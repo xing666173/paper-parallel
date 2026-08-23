@@ -1,0 +1,21 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["role", "version"],
+  "properties": {
+    "role": { "type": "string" },
+    "version": { "type": "string" },
+    "meta": { "type": "object", "additionalProperties": true },
+    "system": {
+      "type": "object",
+      "properties": {
+        "roleDefinition": { "type": "string" },
+        "task": { "type": "string" },
+        "wrapper": { "type": "string" },
+        "criteria": { "type": "string" }
+      }
+    },
+    "userPrompt": { "type": "string" },
+    "user": { "type": "string" }
+  }
+}

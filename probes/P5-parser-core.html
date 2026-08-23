@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>P5 解析器核心探针(块切分)· Paper Parallel Sprint 1</title>
+<style>
+  :root{--ink:#1c2733;--muted:#5b6b7c;--line:#d8dee6;--bg:#eef1f5}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Microsoft YaHei",system-ui,sans-serif;background:var(--bg);color:var(--ink)}
+  header{background:#101828;color:#fff;padding:12px 18px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  header h1{font-size:16px;margin:0}
+  .tag{font-size:11px;background:#1f3a5f;border:1px solid #2f5f9e;border-radius:4px;padding:2px 8px;color:#9cc7ff}
+  main{padding:14px 18px}
+  .card{background:#fff;border:1px solid var(--line);border-radius:8px;padding:14px;margin-bottom:14px}
+  .card h2{font-size:14px;margin:0 0 10px}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  button{padding:7px 16px;border:0;border-radius:5px;background:#0f4c81;color:#fff;font-size:13px;cursor:pointer}
+  button.ghost{background:#fff;color:#0f4c81;border:1px solid #0f4c81}
+  .kv{font-size:12px;color:var(--muted);line-height:1.8}
+  .kv b{color:var(--ink)}
+  #sheet{position:relative;background:#fff;box-shadow:0 2px 8px rgba(15,30,50,.15);margin-top:8px}
+  .blk{position:absolute;border:2px solid;padding:2px 4px;font-size:10px;overflow:hidden}
+  .blk.title{border-color:#2563eb;background:rgba(37,99,235,.08)}
+  .blk.authors{border-color:#64748b;background:rgba(100,116,139,.08)}
+  .blk.abstract{border-color:#0891b2;background:rgba(8,145,178,.08)}
+  .blk.section{border-color:#7c3aed;background:rgba(124,58,237,.10)}
+  .blk.paragraph{border-color:#16a34a;background:rgba(22,163,74,.07)}
+  .blk.caption{border-color:#d97706;background:rgba(217,119,6,.10)}
+  .blk.equation{border-color:#db2777;background:rgba(219,39,119,.08)}
+  .blk.reference{border-color:#475569;background:rgba(71,85,105,.08)}
+  .blk .lbl{font-weight:700}
+  table{width:100%;border-collapse:collapse;font-size:11px;margin-top:8px}
+  th,td{border:1px solid var(--line);padding:3px 6px;text-align:left}
+  th{background:#f4f6f9}
+  .ok{color:#0a7d4f;font-weight:700}.bad{color:#c0392b;font-weight:700}
+  pre{background:#f4f6f9;border:1px solid var(--line);border-radius:4px;padding:8px;font-size:10.5px;max-height:240px;overflow:auto}
+  #toast{position:fixed;right:16px;bottom:16px;background:#101828;color:#fff;border-radius:8px;padding:10px 14px;z-index:99;max-width:460px;font-size:12px}
+  .hidden{display:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>P5 · 解析器核心探针(文字层 → 行 → 栏 → 块)</h1>
+  <span class="tag">Sprint 1 · 块切分算法基准 + 合成夹具断言</span>
+</header>
+<main>
+  <div class="card">
+    <h2>输入</h2>
+    <div class="row">
+      <button id="demo">运行合成夹具 + 断言</button>
+      <input id="file" type="file" accept=".pdf,application/pdf">
+      <button id="parse">解析真实 PDF(懒加载 pdfjs,需联网)</button>
+    </div>
+    <div class="kv" style="margin-top:8px">真实解析建议:ZK-Tracer 英文原版(单栏)与任意 IEEE 双栏论文;先跑演示,看到"✅ 断言全部通过"后再上真实论文。</div>
+  </div>
+
+  <div class="card">
+    <h2>断言与统计 <span id="modebadge"></span></h2>
+    <div id="assert"></div>
+    <div id="summary" class="kv"></div>
+  </div>
+
+  <div class="card">
+    <h2>页面块可视化(颜色=块类型)</h2>
+    <div id="pages"></div>
+  </div>
+
+  <div class="card">
+    <h2>块列表</h2>
+    <table>
+      <thead><tr><th>#</th><th>页</th><th>栏</th><th>类型</th><th>y</th><th>高</th><th>文本头</th></tr></thead>
+      <tbody id="blocklist"></tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>块 JSON</h2>
+    <pre id="jsonout"></pre>
+  </div>
+</main>
+<div id="toast" class="hidden"></div>
+
+<script>
+'use strict';
+let pdfjsLib=null, pdfjsPromise=null;
+function loadPdfjs(){
+  if(!pdfjsPromise){ pdfjsPromise=(async()=>{ const t=new Promise((_,rej)=>setTimeout(()=>rej(new Error('CDN 超时')),8000)); const m=await Promise.race([import('https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.mjs'),t]); m.GlobalWorkerOptions.workerSrc='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.worker.mjs'; return m; })(); }
+  return pdfjsPromise;
+}
+const $=id=>document.getElementById(id);
+function toast(m){ const d=$('toast'); d.textContent=m; d.classList.remove('hidden'); clearTimeout(toast._t); toast._t=setTimeout(()=>d.classList.add('hidden'),6000); }
+
+/* ================= 1) items -> lines(P4 已 debug,含 x 间隙拆行) ================= */
+function itemsToLines(items, viewport){
+  const vp = viewport && viewport.clone ? viewport.clone({scale:1}) : {transform:(viewport&&viewport.transform)||[1,0,0,1,0,0]};
+  const groups=[];
+  for(const it of items){
+    if(!it.str || !it.str.trim()) continue;
+    const m = pdfjsLib ? pdfjsLib.Util.transform(vp.transform, it.transform) : null;
+    const x=m?m[4]:it.x, y=m?m[5]:it.y;
+    const h=m?Math.max(Math.hypot(m[2],m[3]),it.height||0):(it.h||12);
+    const w=m?(it.width*Math.hypot(m[0],m[1])||0):(it.w||0);
+    const rec={str:it.str,x,y,h,w:w||it.width||8};
+    let g=groups.find(g=>Math.abs(g.y-y)<=4);
+    if(!g){g={y,items:[]};groups.push(g);} g.items.push(rec);
+  }
+  const lines=[]; const X_GAP=24;
+  for(const g of groups){
+    g.items.sort((a,b)=>a.x-b.x);
+    let seg=[];
+    const flush=()=>{ if(seg.length){ lines.push({y:g.y,items:seg,x1:seg[0].x,x2:Math.max(...seg.map(i=>i.x+i.w)),h:Math.max(...seg.map(i=>i.h)),text:seg.map(i=>i.str).join(' ')}); } };
+    for(const it of g.items){ if(seg.length && it.x-(seg[seg.length-1].x+seg[seg.length-1].w)>X_GAP){flush();seg=[];} seg.push(it); }
+    flush();
+  }
+  lines.sort((a,b)=>a.y-b.y);
+  return lines;
+}
+
+/* ================= 2) 分栏分类 + 阅读顺序(P4 已 debug) ================= */
+function classifyLines(lines,pageW){
+  const out=[];
+  for(const l of lines){
+    const span=l.x2-l.x1, mid=(l.x1+l.x2)/2, nearCenter=Math.abs(mid-pageW/2)<=pageW*0.08;
+    let col='left';
+    if(span>pageW*0.5||(span>pageW*0.38&&nearCenter)) col='full';
+    else if(mid>pageW*0.5) col='right';
+    out.push({...l,col});
+  }
+  const rank=c=>c==='full'?0:(c==='left'?1:2);
+  out.sort((a,b)=>rank(a.col)-rank(b.col)||a.y-b.y);
+  return out;
+}
+
+/* ================= 3) 块切分(本轮核心) ================= */
+function groupLinesToBlocks(lines, pageW, pageH){
+  const byCol={full:[],left:[],right:[]};
+  for(const l of lines) byCol[l.col].push(l);
+
+  const blocks=[]; let n=0;
+  const colX={full:0,left:0,right:0};
+  // 栏几何:左右栏边界由该栏行 x 范围推得
+  for(const c of ['full','left','right']){
+    if(byCol[c].length){
+      byCol[c].sort((a,b)=>a.y-b.y);
+      const xs=byCol[c].map(l=>(l.x1+l.x2)/2);
+      colX[c]={min:Math.min(...byCol[c].map(l=>l.x1)),max:Math.max(...byCol[c].map(l=>l.x2))};
+    }
+  }
+
+  function classifyLineRole(l, col){
+    const t=l.text.trim();
+    const colCenter=(col.min+col.max)/2, lineCenter=(l.x1+l.x2)/2;
+    const centered=Math.abs(lineCenter-colCenter) <= Math.max(20,(col.max-col.min)*0.12);
+    // 标题/作者/摘要/关键词(通栏区)
+    if(l.col==='full'){
+      if(/^(abstract|摘要)[\s—\-:：]/i.test(t)) return 'abstract';
+      if(/^key ?words|^关键词/i.test(t)) return 'keywords';
+      if(/[,，]/.test(t) && /university|大学|学院|实验室|lab/i.test(t)) return 'authors';
+      if(t.length<90 && l.h>=14) return 'title';
+    }
+    // 章节标题:数字编号 + 短文本,或 参考文献/致谢
+    if(/^\s*(\d+(\.\d+)*|IV|V|VI|VII|VIII|IX|X)\s+[A-Z\u4e00-\u9fa5]/.test(t) && t.length<80) return 'section';
+    if(/^(references|bibliography|acknowledge?ments?|参考文献|致谢)\s*$/i.test(t)) return 'section';
+    // 图表题注
+    if(/^(fig(ure)?\.?|table|algorithm)\s*\d+/i.test(t) || /^[图表]\s*\d+/.test(t)) return 'caption';
+    // 公式:短、居中、含数学符号或编号
+    const mathy=/[=+\-*/^(){}[\]=<>≤≥×÷√∑∫]/g;
+    const syms=(t.match(mathy)||[]).length;
+    if(centered && t.length<70 && (syms>=3 || /\(\d+\)$/.test(t))) return 'equation';
+    // 参考文献
+    if(/^\[\d+\]/.test(t)) return 'reference';
+    return 'paragraph';
+  }
+
+  function push(type, linesArr, col){
+    if(!linesArr.length) return;
+    const y1=Math.min(...linesArr.map(l=>l.y)), y2=Math.max(...linesArr.map(l=>l.y+l.h));
+    const x1=Math.min(...linesArr.map(l=>l.x1)), x2=Math.max(...linesArr.map(l=>l.x2));
+    blocks.push({id:'blk'+(++n), type, col:linesArr[0].col,
+      rect:{x:x1,y:y1,w:x2-x1,h:y2-y1},
+      text:linesArr.map(l=>l.text).join('\n'),
+      lineCount:linesArr.length});
+  }
+
+  for(const c of ['full','left','right']){
+    const linesOf=byCol[c]||[]; if(!linesOf.length) continue;
+    const gaps=[]; for(let i=1;i<linesOf.length;i++) gaps.push(linesOf[i].y-linesOf[i-1].y);
+    const medianGap = gaps.length? median(gaps) : 12;
+    const lineH = median(linesOf.map(l=>l.h));      // 该栏行高中位数
+    // 断块阈值:实际空白(当前行顶 - 上一行底)超过该值视为新块
+    const BREAK = Math.max(medianGap*1.4, lineH*1.5, 18);
+    let curType=null, cur=[];
+    const flush=()=>{ if(cur.length){ push(curType,cur); curType=null; cur=[]; } };
+    for(let i=0;i<linesOf.length;i++){
+      const l=linesOf[i], role=classifyLineRole(l,colX[c]||{min:0,max:pageW});
+      const prev=linesOf[i-1];
+      const bigGap = prev && (l.y - (prev.y+prev.h)) > BREAK;
+      if(cur.length && (bigGap || role!==curType)) flush();
+      if(!cur.length) curType=role;
+      cur.push(l);
+    }
+    flush();
+  }
+
+  // 阅读顺序:通栏 -> 左栏 -> 右栏;同栏按 y
+  const rank=c=>c==='full'?0:(c==='left'?1:2);
+  blocks.sort((a,b)=>rank(a.col)-rank(b.col)||a.rect.y-b.rect.y);
+  blocks.forEach((b,i)=>b.order=i);
+  return blocks;
+}
+
+function median(a){ a=[...a].sort((x,y)=>x-y); return a.length%2? a[(a.length-1)/2] : (a[a.length/2-1]+a[a.length/2])/2; }
+
+/* ================= 4) 渲染 ================= */
+function render(pageW,pageH,blocks,lines){
+  const wrap=document.createElement('div');
+  const scale=Math.min(1,620/pageW);
+  const sheet=document.createElement('div'); sheet.id='sheet';
+  sheet.style.width=pageW*scale+'px'; sheet.style.height=pageH*scale+'px';
+  blocks.forEach(b=>{
+    const d=document.createElement('div'); d.className='blk '+b.type;
+    d.style.left=b.rect.x*scale+'px'; d.style.top=b.rect.y*scale+'px';
+    d.style.width=Math.max(24,b.rect.w*scale)+'px'; d.style.height=Math.max(12,b.rect.h*scale)+'px';
+    d.innerHTML=`<span class="lbl">${b.order+1}.${b.type}</span> ${escapeHtml(b.text.split('\n')[0].slice(0,18))}`;
+    sheet.appendChild(d);
+  });
+  wrap.appendChild(sheet);
+  return wrap;
+}
+
+/* ================= 合成夹具 ================= */
+function syntheticFixture(){
+  const pageW=612,pageH=792,items=[];
+  const add=(str,x,y,w,h)=>items.push({str,x,y,w,h});
+  // 通栏区
+  add('面向零知识虚拟机轨迹生成的高性能异构加速器',70,80,430,16);
+  add('作者一，作者二，作者三 东南大学集成电路学院',170,105,260,12);
+  add('摘要——零知识虚拟机（Zero-Knowledge Virtual Machine, zkVM）在区块链',50,130,500,12);
+  // 左栏
+  const L=50, lw=240;
+  add('1 引言',L,180,lw,13.5);
+  add('执行轨迹（Trace）的生成速度直接决定了整个证明流水线的端到端延迟。',L,206,lw,13);
+  add('本文提出一种面向 zkVM 轨迹生成的高性能异构加速器架构。',L,230,lw,13);
+  add('实验结果表明，所提架构相比通用 CPU 基线取得 18.3 倍的加速。',L,254,lw,13);
+  add('该方案的面积开销控制在 1.4 倍以内，同时保持 78% 的算术单元利用率。',L,306,lw,13);
+  add('相关工作分为基于 GPU 的多标量乘法加速与基于 ASIC 的 NTT 加速。',L,330,lw,13);
+  add('图 1：zkVM 执行阶段与证明阶段的工作流示意图',L,388,lw,11);
+  add('证明者（Prover）与验证者（Verifier）之间的交互轮数保持恒定。',L,414,lw,13);
+  // 右栏
+  const R=330;
+  add('该模块通过双缓冲机制隐藏了数据搬运的延迟。',R,180,lw,13);
+  add('我们在表 1 中汇总了各配置下的关键路径延迟分解结果。',R,204,lw,13);
+  add('安全性分析表明，该优化不改变原有协议的可满足性（Soundness）。',R,228,lw,13);
+  add('与已有工作不同，我们的方法不需要改变应用层的密码学假设。',R,252,lw,13);
+  add('e = gcd(f, (x^N - 1) mod f)   (1)',R,360,lw,13);
+  add('2 结论',R,386,lw,13.5);
+  add('综上所述，所提架构在性能与面积之间取得了更好的权衡。',R,412,lw,13);
+  return {pageW,pageH,items};
+}
+
+const EXPECTED_TYPES=['title','authors','abstract','section','paragraph','paragraph','caption','paragraph','paragraph','equation','section','paragraph'];
+
+/* ================= 执行 ================= */
+let last={};
+function runDemo(){
+  const fx=syntheticFixture();
+  const lines=classifyLines(itemsToLines(fx.items,{transform:[1,0,0,1,0,0]}),fx.pageW);
+  const blocks=groupLinesToBlocks(lines,fx.pageW,fx.pageH);
+  last={pageW:fx.pageW,pageH:fx.pageH,lines,blocks};
+  const got=blocks.map(b=>b.type);
+  const ok=JSON.stringify(got)===JSON.stringify(EXPECTED_TYPES);
+  $('assert').innerHTML = ok
+    ? '<span class="ok">✅ 断言全部通过:块类型序列与合成夹具完全一致</span>'
+    : `<span class="bad">❌ 断言失败</span><br>期望:${EXPECTED_TYPES.join(',')}<br>实际:${got.join(',')}`;
+  show(blocks);
+  $('modebadge').textContent='(合成夹具)';
+}
+
+function show(blocks){
+  $('pages').innerHTML='';
+  $('pages').appendChild(render(last.pageW,last.pageH,blocks,last.lines));
+  $('summary').innerHTML=`行数:<b>${last.lines.length}</b> · 块数:<b>${blocks.length}</b> · 栏分布:${Object.entries(blocks.reduce((m,b)=>(m[b.col]=(m[b.col]||0)+1,m),{})).map(([k,v])=>k+':'+v).join(' ')}`;
+  $('blocklist').innerHTML=blocks.map((b,i)=>`<tr><td>${i+1}</td><td>1</td><td>${b.col}</td><td>${b.type}</td><td>${b.rect.y.toFixed(0)}</td><td>${b.rect.h.toFixed(0)}</td><td>${escapeHtml(b.text.split('\n')[0].slice(0,24))}</td></tr>`).join('');
+  $('jsonout').textContent=JSON.stringify({schema:'paper-parallel.blocks.v1',blocks:blocks.map(b=>({id:b.id,order:b.order,type:b.type,col:b.col,rect:b.rect,text:b.text}))},null,1);
+}
+
+async function parseReal(file){
+  try{ pdfjsLib=await loadPdfjs(); }catch(e){ throw new Error('pdfjs 加载失败,请联网('+e.message+')'); }
+  const buf=await file.arrayBuffer();
+  const doc=await pdfjsLib.getDocument({data:buf}).promise;
+  const page=await doc.getPage(1);
+  const viewport=page.getViewport({scale:1});
+  const tc=await page.getTextContent();
+  const lines=classifyLines(itemsToLines(tc.items,viewport),viewport.width);
+  const blocks=groupLinesToBlocks(lines,viewport.width,viewport.height);
+  last={pageW:viewport.width,pageH:viewport.height,lines,blocks};
+  $('assert').innerHTML='<span class="kv">真实论文第一页解析完成,请人工核对块类型序列与页面可视化</span>';
+  show(blocks);
+  $('modebadge').textContent='(真实 PDF 第 1 页)';
+}
+
+function escapeHtml(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+$('demo').onclick=()=>{ try{runDemo();toast('合成夹具已运行');}catch(e){console.error(e);toast('失败:'+e.message);} };
+$('parse').onclick=async()=>{ const f=$('file').files[0]; if(!f){toast('请先选择 PDF');return;} try{await parseReal(f);toast('解析完成');}catch(e){console.error(e);toast('解析失败:'+e.message);} };
+window.__p5={itemsToLines,classifyLines,groupLinesToBlocks};
+</script>
+</body>
+</html>

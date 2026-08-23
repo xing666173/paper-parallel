@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>P15 双栏对照阅读器探针 · Paper Parallel Sprint 5</title>
+<style>
+  :root{--ink:#1c2733;--muted:#5b6b7c;--line:#d8dee6;--bg:#eef1f5}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Microsoft YaHei",system-ui,sans-serif;background:var(--bg);color:var(--ink)}
+  header{background:#101828;color:#fff;padding:12px 18px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  header h1{font-size:16px;margin:0}
+  .tag{font-size:11px;background:#1f3a5f;border:1px solid #2f5f9e;border-radius:4px;padding:2px 8px;color:#9cc7ff}
+  .toolbar{padding:8px 18px;background:#fff;border-bottom:1px solid var(--line);display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  button{padding:5px 12px;border:0;border-radius:4px;background:#0f4c81;color:#fff;font-size:12px;cursor:pointer}
+  button.ghost{background:#fff;color:#0f4c81;border:1px solid #0f4c81}
+  .kv{font-size:11px;color:var(--muted)}
+  .panels{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:12px 18px}
+  .pane{background:#fff;border:1px solid var(--line);border-radius:6px;overflow:hidden;display:flex;flex-direction:column}
+  .pane h2{margin:0;padding:8px 10px;font-size:13px;border-bottom:1px solid var(--line);background:#f8fafc}
+  .scroller{position:relative;height:380px;overflow:auto}
+  .content{position:relative}
+  .pagesep{position:absolute;left:0;right:0;border-top:1px dashed #cbd5e1;color:#9aa7b5;font-size:9px;text-align:center}
+  .blk{position:absolute;border:1px solid #b6c2d0;background:#fbfdff;padding:6px 8px;font-size:11px;line-height:1.5;overflow:hidden;text-align:justify}
+  .blk.section{background:#f3e8ff;border-color:#a855f7;font-weight:700}
+  .blk.title{background:#dbeafe;border-color:#3b82f6;font-weight:700}
+  .hl-unit{outline:3px solid #f59e0b;outline-offset:-1px;background:#fffbeb !important;z-index:3}
+  .char{position:absolute;background:rgba(14,165,233,.35);border:1px solid #0284c7;padding:0;pointer-events:none;z-index:4}
+  .word{cursor:pointer;background:#fef9c3;border-bottom:1px dashed #d97706;padding:0 1px}
+  .word:hover{background:#fde68a}
+  .badge{position:sticky;top:0;background:#101828;color:#fff;font-size:10px;padding:3px 8px;z-index:5}
+  #audit{margin:0 18px 14px;background:#fff;border:1px solid var(--line);border-radius:6px;padding:10px;font-size:12px;color:var(--ink)}
+  .ok{color:#0a7d4f;font-weight:700}.bad{color:#c0392b;font-weight:700}
+</style>
+</head>
+<body>
+<header><h1>P15 · 双栏对照阅读器探针</h1><span class="tag">Sprint 5 · 双向同步滚动 / 句级高亮 / 词级联动</span></header>
+<div class="toolbar">
+  <button id="auto">自动演示:右滚→左同步</button>
+  <button id="clear" class="ghost">清除词高亮</button>
+  <span class="kv">提示:滚任意一侧,另一侧按对齐表定位;点击中文黄色词,左侧英文对应词高亮。</span>
+</div>
+<div class="panels">
+  <div class="pane">
+    <h2>左 · 英文原文(模拟 PDF)</h2>
+    <div id="en-scroller" class="scroller"><div id="en-content" class="content"></div></div>
+  </div>
+  <div class="pane">
+    <h2>右 · 中文译文(模拟 PDF)</h2>
+    <div id="zh-scroller" class="scroller"><div id="zh-content" class="content"></div></div>
+  </div>
+</div>
+<div id="audit">等待自动演示……</div>
+
+<script src="../src/core/reader/reader.core.js"></script>
+<script>
+'use strict';
+const R=window.PaperParallelReader;
+const pageH=1000, viewportH=380;
+const enBlocks=[
+ {id:'ep1',pageIndex:0,rect:{y:120,h:90},type:'title',text:'A High-Performance Accelerator for ZKVM Trace Generation'},
+ {id:'ep2',pageIndex:0,rect:{y:260,h:140},type:'paragraph',text:'We propose a hardware accelerator for trace generation. The proposed architecture reduces memory traffic.'},
+ {id:'ep3',pageIndex:1,rect:{y:150,h:120},type:'section',text:'2 Background'},
+ {id:'ep4',pageIndex:1,rect:{y:300,h:140},type:'paragraph',text:'Prior work uses GPUs for multi-scalar multiplication.'},
+];
+const zhBlocks=[
+ {id:'zp1',pageIndex:0,rect:{y:130,h:70},type:'title',text:'面向零知识虚拟机轨迹生成的高性能异构加速器'},
+ {id:'zp2',pageIndex:0,rect:{y:240,h:160},type:'paragraph',text:'我们为执行轨迹生成提出一种硬件加速器。所提架构减少了内存访问。'},
+ {id:'zp3',pageIndex:1,rect:{y:160,h:90},type:'section',text:'2 背景'},
+ {id:'zp4',pageIndex:1,rect:{y:280,h:160},type:'paragraph',text:'已有工作使用 GPU 进行多标量乘法。'},
+];
+const units=[
+ {enBlockIds:['ep1'],zhBlockIds:['zp1']},
+ {enBlockIds:['ep2'],zhBlockIds:['zp2']},
+ {enBlockIds:['ep3'],zhBlockIds:['zp3']},
+ {enBlockIds:['ep4'],zhBlockIds:['zp4']},
+];
+const spans=[
+ {en:'hardware accelerator',zh:'硬件加速器',enBlockId:'ep2',zhBlockId:'zp2'},
+ {en:'trace generation',zh:'执行轨迹生成',enBlockId:'ep2',zhBlockId:'zp2'},
+];
+const enIdx=R.buildPositionIndex(enBlocks,pageH);
+const zhIdx=R.buildPositionIndex(zhBlocks,pageH);
+const unitIdx=R.buildUnitIndex(units);
+const lock=R.createSyncController(150);
+
+function buildPane(side){
+  const blocks=side==='en'?enBlocks:zhBlocks;
+  const scroller=document.getElementById(side+'-scroller');
+  const content=document.getElementById(side+'-content');
+  content.style.height=(3*pageH)+'px';
+  for(let p=0;p<3;p++){
+    const sep=document.createElement('div');sep.className='pagesep';
+    sep.style.top=(p*pageH)+'px';sep.textContent='第 '+(p+1)+' 页';
+    content.appendChild(sep);
+  }
+  const unitByBlock=new Map();units.forEach((u,i)=>{for(const id of u[side==='en'?'enBlockIds':'zhBlockIds'])unitByBlock.set(id,i);});
+  blocks.forEach(b=>{
+    const el=document.createElement('div');el.className='blk '+b.type;
+    el.id=side+'-'+b.id;el.dataset.block=b.id;el.dataset.side=side;
+    el.style.left='40px';el.style.top=(b.pageIndex*pageH+b.rect.y)+'px';
+    el.style.width='calc(100% - 80px)';el.style.height=b.rect.h+'px';
+    el.textContent=b.text;
+    // 词级联动:中文块中把 span.zh 包成可点击词
+    if(side==='zh'){
+      for(const sp of spans){ if(sp.zhBlockId===b.id && b.text.includes(sp.zh)){
+        const before=el.textContent;el.textContent='';
+        const idx=before.indexOf(sp.zh);
+        el.appendChild(document.createTextNode(before.slice(0,idx)));
+        const w=document.createElement('span');w.className='word';w.textContent=sp.zh;
+        w.dataset.spanZh=sp.zh;w.onclick=()=>clickWord(sp);
+        el.appendChild(w);
+        el.appendChild(document.createTextNode(before.slice(idx+sp.zh.length)));
+      }}
+    }
+    content.appendChild(el);
+  });
+}
+function activeUnitEls(ui){
+  if(ui===undefined)return[];
+  const u=units[ui];const out=[];
+  for(const id of u.enBlockIds)out.push(document.getElementById('en-'+id));
+  for(const id of u.zhBlockIds)out.push(document.getElementById('zh-'+id));
+  return out.filter(Boolean);
+}
+let lastUnit=null;
+let suppressNext='';
+function setActiveUnit(ui){
+  if(ui===lastUnit)return;lastUnit=ui;
+  document.querySelectorAll('.hl-unit').forEach(e=>e.classList.remove('hl-unit'));
+  activeUnitEls(ui).forEach(e=>e.classList.add('hl-unit'));
+}
+function onScroll(side){
+  if(suppressNext===side){ suppressNext=''; return; } // 程序化同步设置触发的回声,忽略一次
+  const scroller=document.getElementById(side+'-scroller');
+  const now=performance.now();
+  if(!lock.shouldSync(side,now))return;
+  const cmd=R.resolveSyncCommand(enIdx,zhIdx,units,unitIdx,side,scroller.scrollTop,viewportH);
+  if(!cmd)return;
+  setActiveUnit(cmd.unitIndex);
+  const other=document.getElementById(cmd.targetSide+'-scroller');
+  suppressNext=cmd.targetSide;
+  other.scrollTop=cmd.targetScrollTop;
+}
+function clickWord(sp){
+  document.querySelectorAll('.char').forEach(e=>e.remove());
+  const enEl=document.getElementById('en-'+sp.enBlockId);
+  const range=R.locateSubstringRange(enEl.textContent,sp.en);
+  if(!range)return;
+  // 粗略按字符等分块宽,绘制字符高亮格
+  const rect=enEl.getBoundingClientRect();
+  const cs=getComputedStyle(enEl);const pad=parseFloat(cs.paddingLeft);
+  const innerW=rect.width-pad*2;
+  const chars=Math.max(1,[...enEl.textContent].length);
+  const per=innerW/chars;
+  for(let i=range.start;i<range.end;i++){
+    const d=document.createElement('div');d.className='char';
+    d.style.left=(rect.left+pad+i*per)+'px';
+    d.style.top=(rect.top+2)+'px';
+    d.style.width=per+'px';d.style.height=(rect.height-4)+'px';
+    d.style.position='fixed';
+    document.body.appendChild(d);
+  }
+  document.getElementById('audit').innerHTML='<span class="ok">✅ 词级联动:</span> 点击中文「'+sp.zh+'」→ 左侧英文「'+sp.en+'」高亮字符 '+(range.end-range.start)+' 格';
+}
+document.getElementById('en-scroller').addEventListener('scroll',()=>onScroll('en'));
+document.getElementById('zh-scroller').addEventListener('scroll',()=>onScroll('zh'));
+
+buildPane('en');buildPane('zh');
+setActiveUnit(0);
+
+document.getElementById('auto').onclick=()=>{
+  document.querySelectorAll('.char').forEach(e=>e.remove());
+  // ① 词级联动(初始视口内 zp2 可见)
+  clickWord(spans[0]);
+  const charCount=document.querySelectorAll('.char').length;
+  const wordOk=charCount==='hardware accelerator'.length;
+  document.querySelectorAll('.char').forEach(e=>e.remove()); // 验证完清理,避免滚动后残留错位高亮
+  // ② 右滚 -> 左同步 + 句级高亮
+  const zh=document.getElementById('zh-scroller');
+  zh.scrollTop=1000;
+  onScroll('zh');
+  const en=document.getElementById('en-scroller');
+  const cmd=R.resolveSyncCommand(enIdx,zhIdx,units,unitIdx,'zh',zh.scrollTop,viewportH);
+  const ok1=cmd&&cmd.unitIndex===2&&Math.abs(en.scrollTop-cmd.targetScrollTop)<1;
+  const ok2=document.getElementById('zh-'+units[2].zhBlockIds[0]).classList.contains('hl-unit');
+  const all=ok1&&ok2&&wordOk;
+  document.getElementById('audit').innerHTML=(all?'<span class="ok">✅ 自动演示通过</span>':'<span class="bad">❌ 自动演示失败</span>')
+    +` · 词级联动:${wordOk?'✅ '+charCount+'字符':'❌ '+charCount} · 右滚=${zh.scrollTop} → 左滚=${en.scrollTop} · 对齐单元=${cmd?cmd.unitIndex:'-'} · 句级高亮=${ok2?'是':'否'}`;
+};
+document.getElementById('clear').onclick=()=>document.querySelectorAll('.char').forEach(e=>e.remove());
+</script>
+</body>
+</html>

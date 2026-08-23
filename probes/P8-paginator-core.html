@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>P8 分页器核心共享模块探针 · Paper Parallel Sprint 2</title>
+<style>
+  :root{--ink:#1c2733;--muted:#5b6b7c;--line:#d8dee6;--bg:#eef1f5}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Microsoft YaHei",system-ui,sans-serif;background:var(--bg);color:var(--ink)}
+  header{background:#101828;color:#fff;padding:12px 18px;display:flex;align-items:center;gap:14px}
+  header h1{font-size:16px;margin:0}
+  .tag{font-size:11px;background:#1f3a5f;border:1px solid #2f5f9e;border-radius:4px;padding:2px 8px;color:#9cc7ff}
+  main{padding:14px 18px}
+  .card{background:#fff;border:1px solid var(--line);border-radius:8px;padding:14px;margin-bottom:14px}
+  .card h2{font-size:14px;margin:0 0 10px}
+  .ok{color:#0a7d4f;font-weight:700}.bad{color:#c0392b;font-weight:700}
+  .kv{font-size:12px;color:var(--muted);line-height:1.8}
+  #pages{display:flex;gap:12px;flex-wrap:wrap}
+  .page{position:relative;background:#fff;box-shadow:0 2px 6px rgba(15,30,50,.12)}
+  .pb{position:absolute;border:1px solid #94a3b8;font-size:8px;padding:0 2px;overflow:hidden}
+  .pb.section{background:rgba(124,58,237,.10);border-color:#7c3aed}
+  .pb.figure,.pb.table,.pb.equation{border-width:2px}
+  .pb.figure{background:rgba(217,119,6,.10);border-color:#d97706}
+  .pb.table{background:rgba(5,150,105,.10);border-color:#059669}
+  .pb.equation{background:rgba(219,39,119,.08);border-color:#db2777}
+  #toast{position:fixed;right:16px;bottom:16px;background:#101828;color:#fff;border-radius:8px;padding:10px 14px;z-index:99;max-width:500px;font-size:12px}
+  .hidden{display:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>P8 · 分页器核心共享模块探针</h1>
+  <span class="tag">Sprint 2 · 与 Vitest 共用同一份 paginator.core.js</span>
+</header>
+<main>
+  <div class="card"><h2>断言与统计</h2><div id="assert"></div></div>
+  <div class="card"><h2>三种版式页面预览</h2><div id="pages"></div></div>
+</main>
+<div id="toast" class="hidden"></div>
+
+<script src="../src/core/paginate/paginator.core.js"></script>
+<script>
+const paginate = globalThis.PaperParallelPaginator.paginate;
+const validateOrder = globalThis.PaperParallelPaginator.validateOrder;
+const DEFAULT_GEOM = globalThis.PaperParallelPaginator.DEFAULT_GEOM;
+
+const $=id=>document.getElementById(id);
+$('assert').textContent='JS-STARTED';
+function toast(m){const d=$('toast');d.textContent=m;d.classList.remove('hidden');clearTimeout(toast._t);toast._t=setTimeout(()=>d.classList.add('hidden'),6000);}
+
+/* 确定性假测量(与 Vitest 相同):等宽字体近似 */
+function fakeMeasure(text,w,fs){
+  const lineH=fs*1.6;
+  const cpl=Math.max(1,Math.floor(w/(fs*1.05)));
+  const lines=Math.ceil([...text].length/cpl);
+  return Math.max(lineH,lines*lineH);
+}
+
+/* 与 P3 相同的确定性假数据 */
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+const SENT=[
+  '零知识虚拟机（Zero-Knowledge Virtual Machine, zkVM）在区块链扩容与隐私计算中扮演关键角色。',
+  '执行轨迹（Trace）的生成速度直接决定了整个证明流水线的端到端延迟。',
+  '本文提出一种面向 zkVM 轨迹生成的高性能异构加速器架构，将访存密集与计算密集子任务分离。',
+  '实验结果表明，所提架构相比通用 CPU 基线取得 18.3 倍的端到端加速。',
+  '具体而言，我们重新设计了寄存器文件的读写端口以避免结构冲突。',
+  '约束系统在证明生成阶段被编译为低层原语序列，其依赖图具有明显的稀疏特征。',
+  '该方案的面积开销控制在 1.4 倍以内，同时保持 78% 的算术单元利用率。',
+  '为了验证设计有效性，我们在 FPGA 原型与 28nm 工艺库下分别进行了综合与布局布线评估。',
+  '相关工作主要分为三类：基于 GPU 的多标量乘法加速、基于 ASIC 的 NTT 加速以及可重构 zkVM。',
+  '与已有工作不同，我们的方法不需要改变应用层的密码学假设。',
+  '流水线深度的选取需要在吞吐率、频率与片上存储容量之间进行权衡。',
+  '我们在表 1 中汇总了各配置下的关键路径延迟分解结果。',
+  '上述结果表明，通信瓶颈可以被局部性感知的调度策略有效缓解。',
+  '证明者（Prover）与验证者（Verifier）之间的交互轮数保持恒定，不随电路规模增长。',
+  '该模块通过双缓冲机制隐藏了数据搬运的延迟。',
+  '我们进一步分析了不同批大小对缓存命中率与带宽利用率的影响。',
+  '安全性分析表明，该优化不改变原有协议的可满足性（Soundness）与零知识性。',
+  '在对比实验中，基线平台采用 Intel Xeon 处理器与 128GB 主存配置。'
+];
+const SECTIONS=['1 引言','2 背景与相关工作','3 架构设计','4 实验评估','5 结论'];
+function makeBlocks(rand){
+  const B=[];let n=0;const add=o=>B.push({id:'zh-b'+(++n),...o});
+  const para=len=>Array.from({length:len},()=>SENT[Math.floor(rand()*SENT.length)]).join('');
+  add({type:'title',text:'面向零知识虚拟机轨迹生成的高性能异构加速器',widthMode:'span',frontMatter:true,fontSize:17});
+  add({type:'authors',text:'作者一，作者二，作者三  东南大学集成电路学院',widthMode:'span',frontMatter:true,fontSize:11});
+  add({type:'abstract',text:'摘要——'+para(4),widthMode:'span',frontMatter:true,fontSize:12.5});
+  add({type:'keywords',text:'关键词：零知识虚拟机（Zero-Knowledge Virtual Machine, zkVM）；执行轨迹（Trace）；加速器（Accelerator）',widthMode:'span',frontMatter:true,fontSize:11.5});
+  add({type:'section',text:SECTIONS[0],widthMode:'column',fontSize:14});
+  add({type:'paragraph',text:para(8),widthMode:'column',fontSize:13});
+  add({type:'paragraph',text:para(9),widthMode:'column',fontSize:13});
+  add({type:'figure',widthMode:'column',atomicH:250,caption:'图 1：zkVM 执行阶段与证明阶段的工作流示意'});
+  add({type:'paragraph',text:para(7),widthMode:'column',fontSize:13});
+  add({type:'section',text:SECTIONS[1],widthMode:'column',fontSize:14});
+  add({type:'paragraph',text:para(10),widthMode:'column',fontSize:13});
+  add({type:'equation',widthMode:'column',atomicH:88,label:'e = gcd(f, (x^N - 1) mod f)'});
+  add({type:'paragraph',text:para(6),widthMode:'column',fontSize:13});
+  add({type:'table',widthMode:'span',atomicH:300,caption:'表 1：各配置下的关键路径延迟分解（单位：ns）'});
+  add({type:'paragraph',text:para(8),widthMode:'column',fontSize:13});
+  add({type:'section',text:SECTIONS[2],widthMode:'column',fontSize:14});
+  add({type:'paragraph',text:para(11),widthMode:'column',fontSize:13});
+  add({type:'paragraph',text:para(9),widthMode:'column',fontSize:13});
+  add({type:'paragraph',text:para(10),widthMode:'column',fontSize:13});
+  add({type:'figure',widthMode:'span',atomicH:330,caption:'图 2：所提异构加速器的整体架构（跨双栏宽）'});
+  add({type:'paragraph',text:para(8),widthMode:'column',fontSize:13});
+  add({type:'paragraph',text:para(7),widthMode:'column',fontSize:13});
+  add({type:'section',text:SECTIONS[3],widthMode:'column',fontSize:14});
+  add({type:'paragraph',text:para(10),widthMode:'column',fontSize:13});
+  add({type:'table',widthMode:'column',atomicH:260,caption:'表 2：与已有加速器的面积/性能对比'});
+  add({type:'paragraph',text:para(9),widthMode:'column',fontSize:13});
+  add({type:'equation',widthMode:'column',atomicH:80,label:'T_total = T_trace + T_commit + T_prove'});
+  add({type:'paragraph',text:para(8),widthMode:'column',fontSize:13});
+  add({type:'section',text:SECTIONS[4],widthMode:'column',fontSize:14});
+  add({type:'paragraph',text:para(6),widthMode:'column',fontSize:13});
+  add({type:'paragraph',text:para(5),widthMode:'column',fontSize:13});
+  add({type:'reference',text:'[1] 作者等. ZK-Tracer: A High-Performance Heterogeneous Accelerator...\n[2] 作者等. PipeZK: Accelerating Zero-Knowledge Proof...\n[3] 作者等. cuZK: Accelerating Zero-Knowledge Proof...',widthMode:'column',fontSize:11});
+  add({type:'table',widthMode:'span',atomicH:1180,caption:'表 3：完整工艺角与时序报告汇总（刻意超高超大,用于测试降级缩放）'});
+  return B;
+}
+
+function run(){
+  const blocks=makeBlocks(mulberry32(42));
+  const results={};
+  const checks=[];
+  for(const mode of ['double','single','mixed']){
+    const r=paginate(blocks,{mode,measureText:fakeMeasure});
+    results[mode]=r;
+    const v=validateOrder(blocks,r.log);
+    checks.push([`${mode} 块序校验`,v.ok,v]);
+    checks.push([`${mode} 页数合理(>=2)`,r.pages.length>=2,r.pages.length]);
+  }
+  checks.push(['超高块降级提示存在', Object.values(results).every(r=>r.issues.length===1 && r.issues[0].block==='zh-b33'), null]);
+  checks.push(['双栏首页标题入通栏 full 区', results.double.pages[0].full.blocks.some(b=>b.block.type==='title'), null]);
+  checks.push(['单栏模式 span 块也正确落页', results.single.pages.some(p=>p.spans.length>0), null]);
+  checks.push(['混合版式首页含 frontMatter 且正文随后双栏', results.mixed.pages[0].full.blocks.length===4 && results.mixed.pages[0].left.blocks.length>0, null]);
+
+  const fail=checks.filter(c=>!c[1]);
+  $('assert').innerHTML=(fail.length?`<span class="bad">❌ ${fail.length} 项失败</span><br>`:'<span class="ok">✅ 断言全部通过</span><br>')
+    +checks.map(c=>`${c[1]?'✅':'❌'} ${c[0]}${c[2]&&c[2].ok===false?' (got='+c[2].got.join(',')+')':''}${typeof c[2]==='number'?' ='+c[2]:''}`).join('<br>');
+
+  // 预览(三种模式各画前2页)
+  $('pages').innerHTML='';
+  const g=DEFAULT_GEOM, scale=0.28;
+  for(const mode of ['double','single','mixed']){
+    const title=document.createElement('div');title.className='kv';title.innerHTML=`<b>${mode}</b> · ${results[mode].pages.length} 页`;title.style.flexBasis='100%';
+    $('pages').appendChild(title);
+    results[mode].pages.slice(0,2).forEach((page,pi)=>{
+      const wrap=document.createElement('div');
+      const sheet=document.createElement('div');sheet.className='page';sheet.style.width=g.w*scale+'px';sheet.style.height=g.h*scale+'px';
+      const draw=(col,x,w)=>col.blocks.forEach(it=>{const el=document.createElement('div');el.className='pb '+it.block.type;
+        el.style.left=x*scale+'px';el.style.top=it.y*scale+'px';el.style.width=w*scale+'px';el.style.height=Math.max(4,it.h*scale)+'px';
+        el.textContent=it.block.type==='paragraph'?(it.block.text||'').slice(0,6):it.block.type;
+        sheet.appendChild(el);});
+      if(page.mode==='single')draw(page.single,g.margin,g.usableW);
+      else{draw(page.full,g.margin,g.usableW);draw(page.left,g.margin,g.colW);draw(page.right,g.margin+g.colW+g.gutter,g.colW);}
+      page.spans.forEach(it=>{const el=document.createElement('div');el.className='pb '+it.block.type;
+        el.style.left=g.margin*scale+'px';el.style.top=it.y*scale+'px';el.style.width=g.usableW*scale+'px';el.style.height=Math.max(4,it.h*scale)+'px';el.textContent=it.block.type+' span';sheet.appendChild(el);});
+      const lbl=document.createElement('div');lbl.style.cssText='font-size:10px;color:#8a97a5;text-align:center';lbl.textContent='p'+(pi+1);
+      wrap.appendChild(sheet);wrap.appendChild(lbl);$('pages').appendChild(wrap);
+    });
+  }
+}
+try{ run(); toast('共享模块在浏览器加载并执行成功'); }catch(e){ console.error(e); toast('失败:'+e.message+' @@ '+e.stack); $('assert').innerHTML='<span class="bad">❌ 模块执行失败:'+e.message+'</span>'; }
+</script>
+</body>
+</html>

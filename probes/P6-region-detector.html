@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>P6 图/表区域检测与 charRects 探针 · Paper Parallel Sprint 1</title>
+<style>
+  :root{--ink:#1c2733;--muted:#5b6b7c;--line:#d8dee6;--bg:#eef1f5}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Microsoft YaHei",system-ui,sans-serif;background:var(--bg);color:var(--ink)}
+  header{background:#101828;color:#fff;padding:12px 18px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  header h1{font-size:16px;margin:0}
+  .tag{font-size:11px;background:#1f3a5f;border:1px solid #2f5f9e;border-radius:4px;padding:2px 8px;color:#9cc7ff}
+  main{padding:14px 18px}
+  .card{background:#fff;border:1px solid var(--line);border-radius:8px;padding:14px;margin-bottom:14px}
+  .card h2{font-size:14px;margin:0 0 10px}
+  button{padding:7px 16px;border:0;border-radius:5px;background:#0f4c81;color:#fff;font-size:13px;cursor:pointer}
+  .kv{font-size:12px;color:var(--muted);line-height:1.8}
+  .kv b{color:var(--ink)}
+  .ok{color:#0a7d4f;font-weight:700}.bad{color:#c0392b;font-weight:700}
+  #sheet{position:relative;background:#fff;box-shadow:0 2px 8px rgba(15,30,50,.15);margin-top:8px}
+  .region{position:absolute;border:2px solid;padding:2px 5px;font-size:10px;overflow:hidden}
+  .region.figure{border-color:#d97706;background:rgba(217,119,6,.12)}
+  .region.table{border-color:#059669;background:rgba(5,150,105,.12)}
+  .region.equation{border-color:#db2777;background:rgba(219,39,119,.10)}
+  .txtblk{position:absolute;border:1.5px dashed #94a3b8;padding:1px 3px;font-size:9px;color:#475569;overflow:hidden}
+  .char{position:absolute;background:rgba(14,165,233,.25);border:1px solid #0284c7;box-sizing:border-box}
+  table{width:100%;border-collapse:collapse;font-size:11px;margin-top:8px}
+  th,td{border:1px solid var(--line);padding:3px 6px;text-align:left}
+  th{background:#f4f6f9}
+  pre{background:#f4f6f9;border:1px solid var(--line);border-radius:4px;padding:8px;font-size:10.5px;max-height:240px;overflow:auto}
+  #toast{position:fixed;right:16px;bottom:16px;background:#101828;color:#fff;border-radius:8px;padding:10px 14px;z-index:99;max-width:460px;font-size:12px}
+  .hidden{display:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>P6 · 图/表区域检测 + 字符级坐标探针</h1>
+  <span class="tag">Sprint 1 · 位图合并 / 表格线网格 / 题注关联 / charRects</span>
+</header>
+<main>
+  <div class="card">
+    <h2>运行</h2>
+    <button id="run">运行合成夹具 + 断言</button>
+    <div class="kv" style="margin-top:8px">夹具:通栏标题区 + 双栏正文;左栏一张由 2 个重叠位图块组成的图 + 图题;右栏一个 3×3 线网格表 + 表题;公式一行;字符级坐标覆盖首段。</div>
+  </div>
+  <div class="card">
+    <h2>断言结果</h2>
+    <div id="assert"></div>
+    <div id="debug" style="font-family:Consolas,monospace;font-size:20px;margin-top:10px;color:#0f4c81"></div>
+  </div>
+  <div class="card">
+    <h2>页面可视化(实线框=检测出的图/表区域;虚线框=文字块;蓝格=字符坐标)</h2>
+    <div id="sheetwrap"></div>
+  </div>
+  <div class="card">
+    <h2>统一块列表(文字块 + 图/表区域按阅读顺序)</h2>
+    <table><thead><tr><th>#</th><th>栏</th><th>类型</th><th>y</th><th>高</th><th>题注/文本头</th></tr></thead><tbody id="blocks"></tbody></table>
+  </div>
+  <div class="card"><h2>JSON</h2><pre id="json"></pre></div>
+</main>
+<div id="toast" class="hidden"></div>
+
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+function toast(m){const d=$('toast');d.textContent=m;d.classList.remove('hidden');clearTimeout(toast._t);toast._t=setTimeout(()=>d.classList.add('hidden'),6000);}
+
+/* ================= P5 已 debug 的算法(内联参考实现) ================= */
+function itemsToLines(items){
+  const groups=[];
+  for(const it of items){
+    if(!it.str||!it.str.trim())continue;
+    let g=groups.find(g=>Math.abs(g.y-it.y)<=4); if(!g){g={y:it.y,items:[]};groups.push(g);} g.items.push(it);
+  }
+  const lines=[],X_GAP=24;
+  for(const g of groups){ g.items.sort((a,b)=>a.x-b.x); let seg=[];
+    const flush=()=>{if(seg.length){lines.push({y:g.y,items:seg,x1:seg[0].x,x2:Math.max(...seg.map(i=>i.x+i.w)),h:Math.max(...seg.map(i=>i.h)),text:seg.map(i=>i.str).join(' ')});}};
+    for(const it of g.items){ if(seg.length&&it.x-(seg[seg.length-1].x+seg[seg.length-1].w)>X_GAP){flush();seg=[];} seg.push(it);} flush();
+  }
+  lines.sort((a,b)=>a.y-b.y); return lines;
+}
+function classifyLines(lines,pageW){
+  const out=lines.map(l=>{const span=l.x2-l.x1,mid=(l.x1+l.x2)/2,near=Math.abs(mid-pageW/2)<=pageW*0.08;let col='left';
+    if(span>pageW*0.5||(span>pageW*0.38&&near))col='full';else if(mid>pageW*0.5)col='right';return{...l,col};});
+  const rank=c=>c==='full'?0:(c==='left'?1:2); out.sort((a,b)=>rank(a.col)-rank(b.col)||a.y-b.y); return out;
+}
+function median(a){a=[...a].sort((x,y)=>x-y);return a.length%2?a[(a.length-1)/2]:(a[a.length/2-1]+a[a.length/2])/2;}
+function groupLinesToBlocks(lines,pageW){
+  const by={full:[],left:[],right:[]}; for(const l of lines)by[l.col].push(l);
+  const bounds={full:{min:0,max:pageW},left:{min:0,max:pageW/2},right:{min:pageW/2,max:pageW}};
+  for(const c of ['full','left','right']){ if(by[c].length) bounds[c]={min:Math.min(...by[c].map(l=>l.x1)),max:Math.max(...by[c].map(l=>l.x2))}; }
+  const blocks=[];let n=0;
+  const push=(type,ls)=>{ if(!ls.length)return; const y1=Math.min(...ls.map(l=>l.y)),y2=Math.max(...ls.map(l=>l.y+l.h)),x1=Math.min(...ls.map(l=>l.x1)),x2=Math.max(...ls.map(l=>l.x2));
+    blocks.push({id:'txt'+(++n),type,col:ls[0].col,rect:{x:x1,y:y1,w:x2-x1,h:y2-y1},text:ls.map(l=>l.text).join('\n'),lines:ls}); };
+  const role=(l,col)=>{
+    const t=l.text.trim(),cc=(col.min+col.max)/2,lc=(l.x1+l.x2)/2,centered=Math.abs(lc-cc)<=Math.max(20,(col.max-col.min)*0.12);
+    if(l.col==='full'){ if(/^(abstract|摘要)[\s—\-:：]/i.test(t))return'abstract'; if(/^key ?words|^关键词/i.test(t))return'keywords';
+      if(/[,，]/.test(t)&&/university|大学|学院|实验室|lab/i.test(t))return'authors'; if(t.length<90&&l.h>=14)return'title'; }
+    if(/^\s*(\d+(\.\d+)*|IV|V|VI|VII|VIII|IX|X)\s+[A-Z\u4e00-\u9fa5]/.test(t)&&t.length<80)return'section';
+    if(/^(references|bibliography|acknowledge?ments?|参考文献|致谢)\s*$/i.test(t))return'section';
+    if(/^(fig(ure)?\.?|table|algorithm)\s*\d+/i.test(t)||/^[图表]\s*\d+/.test(t))return'caption';
+    const syms=(t.match(/[=+\-*/^(){}[\]<>≤≥×÷√∑∫]/g)||[]).length;
+    if(centered&&t.length<70&&(syms>=3||/\(\d+\)$/.test(t)))return'equation';
+    if(/^\[\d+\]/.test(t))return'reference'; return'paragraph';
+  };
+  for(const c of ['full','left','right']){ const arr=by[c]; if(!arr.length)continue; arr.sort((a,b)=>a.y-b.y);
+    const gaps=[];for(let i=1;i<arr.length;i++)gaps.push(arr[i].y-arr[i-1].y);
+    const medGap=gaps.length?median(gaps):12, lineH=median(arr.map(l=>l.h)), BREAK=Math.max(medGap*1.4,lineH*1.5,18);
+    let curType=null,cur=[]; const flush=()=>{if(cur.length&&curType)push(curType,cur);curType=null;cur=[];};
+    for(let i=0;i<arr.length;i++){ const l=arr[i],r=role(l,bounds[c]),prev=arr[i-1],big=prev?l.y-(prev.y+prev.h)>BREAK:false;
+      if(cur.length&&(big||r!==curType))flush(); if(!cur.length)curType=r; cur.push(l); }
+    flush();
+  }
+  const rank=c=>c==='full'?0:(c==='left'?1:2); blocks.sort((a,b)=>rank(a.col)-rank(b.col)||a.rect.y-b.rect.y); blocks.forEach((b,i)=>b.order=i); return blocks;
+}
+
+/* ================= 本轮核心 1:位图矩形合并 ================= */
+function rectsOverlapOrNear(a,b,gap=8){ return !(a.x>b.x+b.w+gap||b.x>a.x+a.w+gap||a.y>b.y+b.h+gap||b.y>a.y+a.h+gap); }
+function unionRect(a,b){ return {x:Math.min(a.x,b.x),y:Math.min(a.y,b.y),w:Math.max(a.x+a.w,b.x+b.w)-Math.min(a.x,b.x),h:Math.max(a.y+a.h,b.y+b.h)-Math.min(a.y,b.y)}; }
+function mergeRects(rects,gap=8,minArea=1600){
+  const list=[...rects]; let merged=true;
+  while(merged){ merged=false;
+    for(let i=0;i<list.length&&!merged;i++) for(let j=i+1;j<list.length;j++){
+      if(rectsOverlapOrNear(list[i],list[j],gap)){ list[i]=unionRect(list[i],list[j]); list.splice(j,1); merged=true; break; }
+    }
+  }
+  return list.filter(r=>r.w*r.h>=minArea);
+}
+
+/* ================= 本轮核心 2:横竖线 -> 表格区域 ================= */
+function detectTables(hSegs,vSegs,minHLines=2,minVLines=2){
+  const group=(segs,tol,axis)=>segs.reduce((m,s)=>{ const k=Math.round(s[axis]/tol); (m[k]=m[k]||[]).push(s); return m; },{});
+  const hg=group(hSegs,2,'y1'), vg=group(vSegs,2,'x1');
+  const hs=Object.values(hg).map(a=>({pos:a[0].y1,min:Math.min(...a.map(s=>s.x1)),max:Math.max(...a.map(s=>s.x2))}));
+  const vs=Object.values(vg).map(a=>({pos:a[0].x1,min:Math.min(...a.map(s=>s.y1)),max:Math.max(...a.map(s=>s.y2))}));
+  const regions=[];
+  for(let i=0;i<hs.length;i++) for(let j=i+1;j<hs.length;j++){
+    for(let m=0;m<vs.length;m++) for(let n=m+1;n<vs.length;n++){
+      const y1=Math.min(hs[i].pos,hs[j].pos), y2=Math.max(hs[i].pos,hs[j].pos);
+      const x1=Math.min(vs[m].pos,vs[n].pos), x2=Math.max(vs[m].pos,vs[n].pos);
+      const hOk = hs[i].max>=x1&&hs[i].min<=x2 && hs[j].max>=x1&&hs[j].min<=x2;
+      const vOk = vs[m].max>=y1&&vs[m].min<=y2 && vs[n].max>=y1&&vs[n].min<=y2;
+      if(hOk&&vOk) regions.push({x:x1,y:y1,w:x2-x1,h:y2-y1});
+    }
+  }
+  // 合并重叠候选
+  const merged=[]; for(const r of regions){ const hit=merged.find(m=>rectsOverlapOrNear(m,r,4)); if(hit){const u=unionRect(hit,r);Object.assign(hit,u);} else merged.push({...r}); }
+  return merged;
+}
+
+/* ================= 本轮核心 3:题注关联 + 统一块序列 ================= */
+function unify(textBlocks, figRects, tabRects, lineH=13){
+  const captionMaxGap = lineH*3;                 // 题注与区域间距上限(图题在下方 / 表题在上方均可)
+  const blocks=[...textBlocks.map(b=>({...b,src:'text'}))];
+  const captions=blocks.filter(b=>b.type==='caption');
+  const attach=(region,type)=>{
+    let best=null,dist=1e9,side='';
+    for(const c of captions){ if(c.used) continue;
+      const sameCol = (region.x+region.w/2 < 300) === (c.rect.x < 300); // 按页中线粗略同栏
+      if(!sameCol) continue;
+      const below = c.rect.y - (region.y+region.h);          // 题注在区域下方(图题常见)
+      const above = region.y - (c.rect.y+c.rect.h);          // 题注在区域上方(表题常见)
+      for(const [g,s] of [[below,'below'],[above,'above']]){
+        if(g>= -2 && g<=captionMaxGap && g<dist){ best=c; dist=g; side=s; }
+      }
+    }
+    if(best){ best.used=true; blocks.splice(blocks.indexOf(best),1); }
+    return {type,rect:region,caption:best?best.text:null,captionGap:best?Math.round(dist):null,captionSide:best?side:null,col:region.x+region.w/2<300?'left':'right',src:'region'};
+  };
+  const regs=[...figRects.map(r=>attach(r,'figure','fig')), ...tabRects.map(r=>attach(r,'table','tab'))];
+  // 移除已消费的 caption 文本块
+  for(const b of blocks) if(b.used) blocks.splice(blocks.indexOf(b),1);
+  const all=[...blocks.map(b=>({id:b.id,type:b.type,col:b.col,rect:b.rect,text:b.text,caption:null})), ...regs];
+  const rank=c=>c==='full'?0:(c==='left'?1:2);
+  all.sort((a,b)=>rank(a.col)-rank(b.col)||a.rect.y-b.rect.y);
+  all.forEach((b,i)=>b.order=i);
+  return all;
+}
+
+/* ================= 本轮核心 4:charRects(按字符等分 item 宽度) ================= */
+function itemsToCharRects(items){
+  const out=[];
+  for(const it of items){ const n=it.str.length; if(!n)continue;
+    const w=it.w/n; for(let i=0;i<n;i++) out.push({ch:it.str[i],x:it.x+i*w,y:it.y,w,h:it.h});
+  }
+  return out;
+}
+
+/* ================= 合成夹具 ================= */
+function fixture(){
+  const pageW=612,pageH=792,items=[];
+  const add=(str,x,y,w,h)=>items.push({str,x,y,w,h});
+  add('面向零知识虚拟机轨迹生成的高性能异构加速器',70,80,430,16);
+  add('作者一，作者二，作者三 东南大学集成电路学院',170,105,260,12);
+  add('摘要——零知识虚拟机（Zero-Knowledge Virtual Machine, zkVM）在区块链',50,130,500,12);
+  const L=50,R=330,lw=240;
+  add('1 引言',L,180,lw,13.5);
+  add('执行轨迹（Trace）的生成速度直接决定了整个证明流水线的端到端延迟。',L,206,lw,13);
+  add('本文提出一种面向 zkVM 轨迹生成的高性能异构加速器架构。',L,230,lw,13);
+  add('实验结果表明，所提架构相比通用 CPU 基线取得 18.3 倍的加速。',L,254,lw,13);
+  add('图 1：zkVM 执行阶段与证明阶段的工作流示意图',L,388,lw,11);
+  add('证明者（Prover）与验证者（Verifier）之间的交互轮数保持恒定。',L,414,lw,13);
+  add('该模块通过双缓冲机制隐藏了数据搬运的延迟。',R,180,lw,13);
+  add('我们在表 1 中汇总了各配置下的关键路径延迟分解结果。',R,204,lw,13);
+  add('安全性分析表明，该优化不改变原有协议的可满足性（Soundness）。',R,228,lw,13);
+  add('与已有工作不同，我们的方法不需要改变应用层的密码学假设。',R,252,lw,13);
+  add('表 1：各配置关键路径延迟分解（ns）',R,312,lw,11);
+  add('该方案的面积开销控制在 1.4 倍以内，同时保持 78% 的算术单元利用率。',R,398,lw,13);
+  add('相关工作分为基于 GPU 的多标量乘法加速与基于 ASIC 的 NTT 加速。',R,422,lw,13);
+  add('e = gcd(f, (x^N - 1) mod f)   (1)',R,486,lw,13);
+  // 位图:两个重叠矩形 -> 应合并为一张图(左栏,图题上方)
+  const bitmaps=[{x:60,y:270,w:220,h:80},{x:250,y:300,w:50,h:40}];
+  // 表格线:3 横 3 竖网格(右栏,表题上方)
+  const hSegs=[340,360,380].map(y=>({x1:340,x2:560,y1:y,y2:y}));
+  const vSegs=[340,440,560].map(x=>({x1:x,x2:x,y1:280,y2:380}));
+  return {pageW,pageH,items,bitmaps,hSegs,vSegs};
+}
+
+/* ================= 断言 ================= */
+function run(){
+  const fx=fixture();
+  const lines=classifyLines(itemsToLines(fx.items),fx.pageW);
+  const textBlocks=groupLinesToBlocks(lines,fx.pageW);
+  const figs=mergeRects(fx.bitmaps);
+  const tabs=detectTables(fx.hSegs,fx.vSegs);
+  const all=unify(textBlocks,figs,tabs);
+  const chars=itemsToCharRects(fx.items.filter(it=>it.str.includes('执行轨迹')));
+
+  const checks=[
+    ['位图矩形合并为 1 张图', figs.length===1 && Math.abs(figs[0].x-60)<1 && Math.abs(figs[0].y-270)<1],
+    ['表格线网格检测出 1 个表(bbox 以横线网格为界)', tabs.length===1 && Math.abs(tabs[0].x-340)<1 && Math.abs(tabs[0].y-340)<1],
+    ['图题关联到图区域', all.find(b=>b.type==='figure')?.caption?.includes('图 1')===true],
+    ['表题关联到表区域', all.find(b=>b.type==='table')?.caption?.includes('表 1')===true],
+    ['统一块序列与期望一致', JSON.stringify(all.map(b=>b.type))===JSON.stringify(['title','authors','abstract','section','paragraph','figure','paragraph','paragraph','table','paragraph','equation'])],
+    ['charRects 数量=字符数', chars.length===fx.items.filter(it=>it.str.includes('执行轨迹')).reduce((n,it)=>n+it.str.length,0)],
+  ];
+  const fail=checks.filter(c=>!c[1]);
+  $('assert').innerHTML = fail.length
+    ? `<span class="bad">❌ ${fail.length} 项失败</span><br>`+checks.map(c=>`${c[1]?'✅':'❌'} ${c[0]}`).join('<br>')
+    : '<span class="ok">✅ 断言全部通过</span><br>'+checks.map(c=>`✅ ${c[0]}`).join('<br>');
+  $('debug').textContent = `DEBUG tabs.length=${tabs.length} tabs=${JSON.stringify(tabs)} figs.length=${figs.length} figs=${JSON.stringify(figs)}`;
+
+  // 可视化
+  const scale=Math.min(1,620/fx.pageW);
+  const sheet=document.createElement('div'); sheet.id='sheet'; sheet.style.width=fx.pageW*scale+'px'; sheet.style.height=fx.pageH*scale+'px';
+  all.forEach(b=>{
+    if(b.type==='figure'||b.type==='table'||b.type==='equation'){
+      const d=document.createElement('div'); d.className='region '+b.type;
+      d.style.left=b.rect.x*scale+'px'; d.style.top=b.rect.y*scale+'px'; d.style.width=Math.max(20,b.rect.w*scale)+'px'; d.style.height=Math.max(14,b.rect.h*scale)+'px';
+      d.textContent=`${b.order+1}.${b.type}`+(b.caption?' +题注':''); sheet.appendChild(d);
+    } else {
+      const d=document.createElement('div'); d.className='txtblk';
+      d.style.left=b.rect.x*scale+'px'; d.style.top=b.rect.y*scale+'px'; d.style.width=Math.max(20,b.rect.w*scale)+'px'; d.style.height=Math.max(10,b.rect.h*scale)+'px';
+      d.textContent=`${b.order+1}.${b.type}`; sheet.appendChild(d);
+    }
+  });
+  chars.forEach(c=>{ const d=document.createElement('div'); d.className='char';
+    d.style.left=c.x*scale+'px'; d.style.top=c.y*scale+'px'; d.style.width=Math.max(1,c.w*scale)+'px'; d.style.height=c.h*scale+'px'; sheet.appendChild(d); });
+  $('sheetwrap').innerHTML=''; $('sheetwrap').appendChild(sheet);
+
+  $('blocks').innerHTML=all.map((b,i)=>`<tr><td>${i+1}</td><td>${b.col}</td><td>${b.type}</td><td>${b.rect.y.toFixed(0)}</td><td>${b.rect.h.toFixed(0)}</td><td>${(b.caption||b.text||'').slice(0,28)}</td></tr>`).join('');
+  $('json').textContent=JSON.stringify({schema:'paper-parallel.unified.v1',bitmapRegions:figs,tableRegions:tabs,blocks:all,charRectsCount:chars.length},null,1);
+  window.__last={fx,textBlocks,figs,tabs,all,chars};
+}
+function escapeHtml(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+$('run').onclick=()=>{ try{run();toast('夹具已运行');}catch(e){console.error(e);toast('失败:'+e.message);} };
+</script>
+</body>
+</html>

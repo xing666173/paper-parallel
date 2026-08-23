@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>P7 跨页装配探针(DocBuilder)· Paper Parallel Sprint 1</title>
+<style>
+  :root{--ink:#1c2733;--muted:#5b6b7c;--line:#d8dee6;--bg:#eef1f5}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Microsoft YaHei",system-ui,sans-serif;background:var(--bg);color:var(--ink)}
+  header{background:#101828;color:#fff;padding:12px 18px;display:flex;align-items:center;gap:14px}
+  header h1{font-size:16px;margin:0}
+  .tag{font-size:11px;background:#1f3a5f;border:1px solid #2f5f9e;border-radius:4px;padding:2px 8px;color:#9cc7ff}
+  main{padding:14px 18px}
+  .card{background:#fff;border:1px solid var(--line);border-radius:8px;padding:14px;margin-bottom:14px}
+  .card h2{font-size:14px;margin:0 0 10px}
+  button{padding:7px 16px;border:0;border-radius:5px;background:#0f4c81;color:#fff;font-size:13px;cursor:pointer}
+  .ok{color:#0a7d4f;font-weight:700}.bad{color:#c0392b;font-weight:700}
+  .kv{font-size:12px;color:var(--muted);line-height:1.8}
+  .kv b{color:var(--ink)}
+  #pages{display:flex;gap:16px;flex-wrap:wrap}
+  .page{position:relative;background:#fff;box-shadow:0 2px 8px rgba(15,30,50,.15)}
+  .pblock{position:absolute;border:2px solid;font-size:9px;padding:1px 3px;overflow:hidden}
+  .pblock.title{border-color:#2563eb;background:rgba(37,99,235,.08)}
+  .pblock.authors{border-color:#64748b;background:rgba(100,116,139,.08)}
+  .pblock.abstract{border-color:#0891b2;background:rgba(8,145,178,.08)}
+  .pblock.section{border-color:#7c3aed;background:rgba(124,58,237,.10)}
+  .pblock.paragraph{border-color:#16a34a;background:rgba(22,163,74,.07)}
+  .pblock.figure{border-color:#d97706;background:rgba(217,119,6,.12)}
+  .pblock.equation{border-color:#db2777;background:rgba(219,39,119,.08)}
+  .pblock.merged{border-style:solid;border-width:3px}
+  table{width:100%;border-collapse:collapse;font-size:11px;margin-top:8px}
+  th,td{border:1px solid var(--line);padding:3px 6px;text-align:left}
+  th{background:#f4f6f9}
+  #toast{position:fixed;right:16px;bottom:16px;background:#101828;color:#fff;border-radius:8px;padding:10px 14px;z-index:99;max-width:460px;font-size:12px}
+  .hidden{display:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>P7 · 跨页装配探针(DocBuilder)</h1>
+  <span class="tag">Sprint 1 · 跨页段落续接 / prev-next 链 / 章节归属 / 版式继承</span>
+</header>
+<main>
+  <div class="card">
+    <h2>运行</h2>
+    <button id="run">运行合成双页夹具 + 断言</button>
+    <div class="kv" style="margin-top:8px">第1页混合版式,左栏末段在页末中断(无句末标点);第2页双栏,左栏首段是其续段 → 应合并为一个块,携带两个 fragment。</div>
+  </div>
+  <div class="card">
+    <h2>断言结果</h2>
+    <div id="assert"></div>
+    <div id="debug" style="font-family:Consolas,monospace;font-size:16px;margin-top:8px;color:#0f4c81"></div>
+  </div>
+  <div class="card">
+    <h2>双页可视化(粗框=跨页合并块,两页各一个 fragment)</h2>
+    <div id="pages"></div>
+  </div>
+  <div class="card">
+    <h2>装配后的 Doc.blocks</h2>
+    <table><thead><tr><th>order</th><th>id</th><th>类型</th><th>页</th><th>栏</th><th>widthMode</th><th>可断</th><th>所属章节</th><th>文本头</th></tr></thead><tbody id="rows"></tbody></table>
+  </div>
+</main>
+<div id="toast" class="hidden"></div>
+
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+function toast(m){const d=$('toast');d.textContent=m;d.classList.remove('hidden');clearTimeout(toast._t);toast._t=setTimeout(()=>d.classList.add('hidden'),6000);}
+
+/* ================= 合成双页夹具(逐页解析结果) ================= */
+function fixture(){
+  const pages=[
+    {no:1,w:612,h:792,layoutMode:'mixed',blocks:[
+      {id:'t1',type:'title',col:'full',rect:{x:70,y:80,w:430,h:16},text:'面向零知识虚拟机轨迹生成的高性能异构加速器'},
+      {id:'a1',type:'authors',col:'full',rect:{x:170,y:105,w:260,h:12},text:'作者一，作者二，作者三 东南大学集成电路学院'},
+      {id:'ab1',type:'abstract',col:'full',rect:{x:50,y:130,w:500,h:12},text:'摘要——零知识虚拟机（Zero-Knowledge Virtual Machine, zkVM）在区块链'},
+      {id:'s1',type:'section',col:'left',rect:{x:50,y:180,w:240,h:14},text:'1 引言'},
+      {id:'p2',type:'paragraph',col:'left',rect:{x:50,y:206,w:240,h:61},text:'实验结果表明，所提架构相比通用 CPU 基线取得 18.3 倍的加速。'},
+      {id:'f1',type:'figure',col:'left',rect:{x:60,y:290,w:220,h:80},text:''},
+      {id:'p1',type:'paragraph',col:'left',rect:{x:50,y:390,w:240,h:48},text:'执行轨迹（Trace）的生成速度直接决定了整个证明流水线的端到端延迟。本文提出'},
+      {id:'p3',type:'paragraph',col:'right',rect:{x:330,y:180,w:240,h:72},text:'该模块通过双缓冲机制隐藏了数据搬运的延迟。'},
+    ]},
+    {no:2,w:612,h:792,layoutMode:'double',blocks:[
+      {id:'p1b',type:'paragraph',col:'left',rect:{x:50,y:70,w:240,h:48},text:'一种面向 zkVM 轨迹生成的高性能异构加速器架构。该方案的面积开销控制在 1.4 倍以内。'},
+      {id:'s2',type:'section',col:'left',rect:{x:50,y:150,w:240,h:14},text:'2 背景与相关工作'},
+      {id:'p4',type:'paragraph',col:'left',rect:{x:50,y:176,w:240,h:54},text:'相关工作分为基于 GPU 的多标量乘法加速与基于 ASIC 的 NTT 加速。'},
+      {id:'e1',type:'equation',col:'right',rect:{x:350,y:70,w:200,h:30},text:'e = gcd(f, (x^N - 1) mod f)'},
+      {id:'p5',type:'paragraph',col:'right',rect:{x:330,y:120,w:240,h:60},text:'安全性分析表明，该优化不改变原有协议的可满足性（Soundness）。'},
+    ]},
+  ];
+  return pages;
+}
+
+/* ================= DocBuilder 核心 ================= */
+function buildDoc(pages, docId='en'){
+  // 1) 每页块按阅读顺序排好,并压平成带 pageIndex 的全局序列
+  const rank=c=>c==='full'?0:(c==='left'?1:2);
+  let seq=[];
+  for(const pg of pages){
+    const sorted=[...pg.blocks].sort((a,b)=>rank(a.col)-rank(b.col)||a.rect.y-b.rect.y);
+    sorted.forEach(b=>seq.push({...b,pageIndex:pg.no}));
+  }
+  // 2) 跨页/跨栏段落续接合并(两遍法:先跨页同栏,再同页左→右)
+  const isContinuable = b => b.type==='paragraph'
+    && !/[。！？.!?；;:：]$/.test((b.text||'').trim())
+    && b.text.trim().length>0;
+  const startsLikeHeading = b => /^\s*(\d+(\.\d+)*|IV|V|VI|VII|VIII|IX|X)\s+[A-Z\u4e00-\u9fa5]/.test((b.text||'').trim())
+    || /^(fig(ure)?\.?|table|algorithm)\s*\d+/i.test((b.text||'').trim())
+    || /^[图表]\s*\d+/.test((b.text||'').trim());
+  function mergePass(list, allowCrossPage, allowCrossCol){
+    const out=[];
+    for(let i=0;i<list.length;i++){
+      const b=list[i];
+      if(out.length && isContinuable(out[out.length-1]) && b.type==='paragraph' && !startsLikeHeading(b)){
+        const prev=out[out.length-1];
+        const crossPage = allowCrossPage && b.pageIndex===prev.pageIndex+1 && b.col===prev.col;
+        const crossCol  = allowCrossCol && b.pageIndex===prev.pageIndex && prev.col==='left' && b.col==='right';
+        if(crossPage||crossCol){
+          prev.text = (prev.text||'')+'\n'+(b.text||'');
+          prev.fragments = prev.fragments||[{pageIndex:prev.pageIndex,rect:prev.rect}];
+          prev.fragments.push({pageIndex:b.pageIndex,rect:b.rect});
+          continue;
+        }
+      }
+      out.push({...b,fragments:b.fragments?[...b.fragments]:[{pageIndex:b.pageIndex,rect:b.rect}]});
+    }
+    return out;
+  }
+  const pass1=mergePass(seq,true,false);   // 第一遍:跨页同栏优先
+  const merged=mergePass(pass1,false,true);// 第二遍:残余的同页左→右栏续接
+  // 3) 两遍赋值:第一遍统一换新 id,第二遍再建 prev/next 链与章节归属
+  //   (不能在单遍里取 merged[i+1].id,否则拿到的是尚未替换的旧 id)
+  merged.forEach((b,i)=>{
+    b.id='blk-'+(i+1);
+    b.order=i;
+    b.pageIndex=b.fragments[0].pageIndex;             // 块首页
+    b.widthMode = b.col==='full'?'span':'column';
+    b.splitAllowed = !['figure','table','equation','caption'].includes(b.type);
+    b.docId=docId;
+  });
+  let currentSectionId = undefined;
+  merged.forEach((b,i)=>{
+    b.prevBlockId=i>0?merged[i-1].id:undefined;
+    b.nextBlockId=i<merged.length-1?merged[i+1].id:undefined;
+    if(b.type==='section'){ currentSectionId=b.id; b.parentSectionId=currentSectionId; }
+    else b.parentSectionId=currentSectionId;
+  });
+  // 4) 版式:逐页 + 整体
+  const overall = pages.some(p=>p.layoutMode==='mixed')?'mixed'
+    : pages.some(p=>p.layoutMode==='double')?'double':'single';
+  return {id:docId,role:docId==='zh'?'zh':'en',pages:pages.map(p=>({...p})),blocks:merged,layoutMode:overall,
+    meta:{paperWidth:pages[0].w,paperHeight:pages[0].h,title:merged.find(b=>b.type==='title')?.text}};
+}
+
+/* ================= 断言 ================= */
+function run(){
+  const pages=fixture();
+  const doc=buildDoc(pages,'en');
+  const checks=[
+    ['全局块序与期望一致(含续接合并)', JSON.stringify(doc.blocks.map(b=>b.type))===JSON.stringify(['title','authors','abstract','section','paragraph','figure','paragraph','paragraph','section','paragraph','equation','paragraph'])],
+    ['跨页段落已合并为 1 个块,带 2 个 fragment', doc.blocks.filter(b=>b.fragments.length===2).length===1 && doc.blocks.find(b=>b.fragments.length===2).text.includes('本文提出')],
+    ['合并块 pageIndex=首页', doc.blocks.find(b=>b.fragments.length===2).pageIndex===1],
+    ['prev/next 链连续', doc.blocks.every((b,i)=> (i===0||b.prevBlockId===doc.blocks[i-1].id) && (i===doc.blocks.length-1||b.nextBlockId===doc.blocks[i+1].id))],
+    ['章节归属正确(s1/s2)', (()=>{ const s1=doc.blocks.find(b=>b.type==='section'&&(b.text||'').startsWith('1')); const s2=doc.blocks.find(b=>b.type==='section'&&(b.text||'').startsWith('2'));
+      return doc.blocks.find(b=>b.text&&b.text.includes('本文提出')).parentSectionId===s1.id && doc.blocks.find(b=>b.text&&b.text.includes('安全性分析')).parentSectionId===s2.id; })()],
+    ['widthMode:标题 span,正文 column', doc.blocks.find(b=>b.type==='title').widthMode==='span' && doc.blocks.find(b=>b.type==='paragraph').widthMode==='column'],
+    ['splitAllowed:图/公式 false,段落 true', doc.blocks.find(b=>b.type==='figure').splitAllowed===false && doc.blocks.find(b=>b.type==='equation').splitAllowed===false && doc.blocks.find(b=>b.type==='paragraph').splitAllowed===true],
+    ['整体 layoutMode=mixed', doc.layoutMode==='mixed'],
+  ];
+  const fail=checks.filter(c=>!c[1]);
+  $('assert').innerHTML = fail.length
+    ? `<span class="bad">❌ ${fail.length} 项失败</span><br>`+checks.map(c=>`${c[1]?'✅':'❌'} ${c[0]}`).join('<br>')
+    : '<span class="ok">✅ 断言全部通过</span><br>'+checks.map(c=>`✅ ${c[0]}`).join('<br>');
+  const chainOk=checks[3][1];
+  const badIdx=doc.blocks.findIndex((b,i)=> !((i===0||b.prevBlockId===doc.blocks[i-1].id) && (i===doc.blocks.length-1||b.nextBlockId===doc.blocks[i+1].id)));
+  const bad=badIdx>=0?doc.blocks[badIdx]:null;
+  $('debug').textContent='实际序='+doc.blocks.map(b=>b.type).join(',')+'  期望序='+['title','authors','abstract','section','paragraph','figure','paragraph','paragraph','section','paragraph','equation','paragraph'].join(',')+'  链:'+(chainOk?'OK':'FAIL')+(bad?' badIdx='+badIdx+' id='+bad.id+' prev='+bad.prevBlockId+' next='+bad.nextBlockId:'')+'  前='+(bad&&badIdx>0?doc.blocks[badIdx-1].id:'')+' 后='+(bad&&badIdx<doc.blocks.length-1?doc.blocks[badIdx+1].id:'');
+
+  // 可视化
+  $('pages').innerHTML='';
+  pages.forEach(pg=>{
+    const scale=0.8;
+    const wrap=document.createElement('div'); wrap.innerHTML=`<div class="kv" style="margin-bottom:4px"><b>第 ${pg.no} 页 · ${pg.layoutMode}</b></div>`;
+    const sheet=document.createElement('div'); sheet.className='page'; sheet.style.width=pg.w*scale+'px'; sheet.style.height=pg.h*scale+'px';
+    pg.blocks.forEach(b=>{
+      const mergedB=doc.blocks.find(x=>x.fragments.some(f=>f.pageIndex===pg.no&&f.rect===b.rect)&&x.text&&(x.text.includes(b.text)||b.type!=='paragraph'));
+      const isMerged=doc.blocks.some(x=>x.fragments.length===2&&x.fragments.some(f=>f.pageIndex===pg.no));
+      const el=document.createElement('div'); el.className='pblock '+b.type+(isMerged&&b.type==='paragraph'?' merged':'');
+      el.style.left=b.rect.x*scale+'px'; el.style.top=b.rect.y*scale+'px'; el.style.width=Math.max(20,b.rect.w*scale)+'px'; el.style.height=Math.max(10,b.rect.h*scale)+'px';
+      const mb=doc.blocks.find(x=>x.fragments.length===2&&x.fragments.some(f=>f.pageIndex===pg.no));
+      el.textContent=`${b.id} ${b.type}${mb&&mb.fragments.some(f=>f.pageIndex===pg.no&&f.rect===b.rect)?' ⇄续接':''}`;
+      sheet.appendChild(el);
+    });
+    wrap.appendChild(sheet); $('pages').appendChild(wrap);
+  });
+
+  $('rows').innerHTML=doc.blocks.map(b=>`<tr><td>${b.order}</td><td>${b.id}</td><td>${b.type}</td><td>${b.pageIndex}</td><td>${b.col}</td><td>${b.widthMode}</td><td>${b.splitAllowed?'是':'否'}</td><td>${b.parentSectionId||'-'}</td><td>${(b.text||'').slice(0,22)}</td></tr>`).join('');
+  window.__doc=doc;
+}
+$('run').onclick=()=>{ try{run();toast('夹具已运行');}catch(e){console.error(e);toast('失败:'+e.message);} };
+</script>
+</body>
+</html>

@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><title>P9 render test</title>
+<style>
+  body{font-family:Consolas,monospace;font-size:16px;padding:20px;background:#fff}
+  .print-page{position:relative;background:#fff;box-shadow:0 0 6px #0003;transform:scale(.4);transform-origin:top left}
+  .blk{position:absolute;border:1px solid #555;overflow:hidden;font-size:13px}
+</style>
+</head>
+<body>
+<h1>P9 render + audit minimal test</h1>
+<div id="stage"></div>
+<div id="r" style="white-space:pre-wrap;font-size:20px;color:#0f4c81">RUNNING…</div>
+<script src="../src/core/paginate/paginator.core.js"></script>
+<script>
+function fakeMeasure(text,w,fs){const lh=fs*1.6,cpl=Math.max(1,Math.floor(w/(fs*1.05)));return Math.max(lh,Math.ceil([...text].length/cpl)*lh);}
+const core=window.PaperParallelPaginator, g=core.DEFAULT_GEOM;
+const B=[];let n=0;const add=o=>B.push({id:'b'+(++n),...o});
+add({type:'title',text:'标题',widthMode:'span',frontMatter:true,fontSize:17});
+add({type:'authors',text:'作者',widthMode:'span',frontMatter:true,fontSize:11});
+add({type:'section',text:'1 引言',fontSize:14});
+add({type:'paragraph',text:'第一段内容。'.repeat(20),fontSize:13});
+add({type:'figure',widthMode:'column',atomicH:200,caption:'图 1'});
+add({type:'paragraph',text:'第二段内容。'.repeat(15),fontSize:13});
+add({type:'table',widthMode:'span',atomicH:250,caption:'表 1'});
+add({type:'paragraph',text:'第三段内容。'.repeat(12),fontSize:13});
+const result=core.paginate(B,{mode:'double',measureText:fakeMeasure});
+const v=core.validateOrder(B,result.log);
+const stage=document.getElementById('stage');
+const draw=(sheet,col,x,w)=>col.blocks.forEach(it=>{const el=document.createElement('div');el.className='blk';
+  el.style.left=x+'px';el.style.top=it.y+'px';el.style.width=w+'px';el.style.height=it.h+'px';
+  el.textContent=it.block.type+':'+(it.block.text||it.block.caption||'').slice(0,10);sheet.appendChild(el);});
+result.pages.forEach((page,pi)=>{
+  const sheet=document.createElement('div');sheet.className='print-page';
+  sheet.style.width=g.w+'px';sheet.style.height=g.h+'px';
+  if(pi>0)sheet.style.marginTop='12px';
+  draw(sheet,page.full,g.margin,g.usableW);draw(sheet,page.left,g.margin,g.colW);draw(sheet,page.right,g.margin+g.colW+g.gutter,g.colW);
+  page.spans.forEach(it=>{const el=document.createElement('div');el.className='blk';el.style.left=g.margin+'px';el.style.top=it.y+'px';el.style.width=g.usableW+'px';el.style.height=it.h+'px';el.textContent='span:'+it.block.type;sheet.appendChild(el);});
+  stage.appendChild(sheet);
+});
+// audit
+const bottom=g.margin+g.usableH;const issues=[];
+result.pages.forEach((p,pi)=>{for(const c of ['full','left','right']){for(const it of p[c].blocks){if(it.y+it.h>bottom+0.5)issues.push('overflow p'+(pi+1)+' '+c+' '+it.block.id);}}for(const it of p.spans){if(it.y+it.h>bottom+0.5)issues.push('overflow span '+it.block.id);}});
+const domCount=document.querySelectorAll('.print-page .blk').length;
+const dataCount=result.pages.reduce((n,p)=>n+p.spans.length+p.full.blocks.length+p.left.blocks.length+p.right.blocks.length,0);
+if(domCount!==dataCount)issues.push('DOM '+domCount+' != data '+dataCount);
+document.getElementById('r').textContent='order='+(v.ok?'OK':'FAIL')+' pages='+result.pages.length+' dom='+domCount+' data='+dataCount+' issues='+issues.length+'\n'+(issues.join('\n')||'AUDIT=PASS');
+</script>
+</body>
+</html>

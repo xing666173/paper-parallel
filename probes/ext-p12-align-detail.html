@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><title>P12 align detail</title></head>
+<body style="font-family:Consolas,monospace;font-size:15px;padding:20px;background:#fff">
+<h1>P12 detail</h1>
+<div id="r" style="white-space:pre-wrap;font-size:17px;color:#0f4c81">RUNNING…</div>
+<script src="../src/core/align/align.core.js"></script>
+<script>
+const A=window.PaperParallelAlign;
+const KW=[['trace generation','执行轨迹生成'],['execution trace','执行轨迹'],['accelerator','加速器'],['latency','延迟'],['propose','提出'],['speedup','加速'],['architecture','架构'],['memory','内存']];
+function kwScore(a,b){a=a.toLowerCase();b=b.toLowerCase();let hit=0;for(const [en,zh] of KW){if(a.includes(en)&&b.includes(zh))hit++;}return Math.min(1,hit/2.67);}
+(async()=>{
+ const out=[];
+ const ens=A.splitSentences('The trace generation dominates latency. We propose an accelerator.');
+ const zhs=A.splitSentences('执行轨迹的生成主导了延迟。我们提出一种加速器。');
+ out.push('split ens='+JSON.stringify(ens)+' zhs='+JSON.stringify(zhs)+' => '+(ens.length===2&&zhs.length===2?'PASS':'FAIL'));
+ let r=await A.alignSentenceSequences(ens,zhs,async(i,j)=>kwScore(ens[i],zhs[j]));
+ out.push('1:1 units='+JSON.stringify(r.units)+' avg='+r.avgConfidence.toFixed(2)+' => '+(r.matchedEn===2&&r.matchedZh===2?'PASS':'FAIL'));
+ const en2=['The trace generation dominates latency.','We propose an accelerator.'];const zh2=['执行轨迹的生成主导了延迟,我们提出一种加速器。'];
+ r=await A.alignSentenceSequences(en2,zh2,async(i,j)=>kwScore(en2[i],zh2[j]));
+ out.push('2:1 units='+JSON.stringify(r.units)+' => '+(r.units.some(u=>u.enIndices.length===2&&u.zhIndices.length===1)?'PASS':'FAIL'));
+ const en3=['The trace generation dominates latency.','We propose an accelerator.'];const zh3=['执行轨迹的生成主导了延迟。'];
+ r=await A.alignSentenceSequences(en3,zh3,async(i,j)=>kwScore(en3[i],zh3[j]));
+ out.push('miss units='+JSON.stringify(r.units)+' => '+(r.units.some(u=>u.enIndices.length===1&&u.zhIndices.length===0)?'PASS':'FAIL'));
+ r=await A.alignBlockPair({id:'en',text:'Quantum field theory describes fundamental interactions.'},{id:'zh',text:'本文研究完全无关的另一主题。'},{scoreFn:async()=>0,minConfidence:0.35});
+ out.push('fallback level='+r.level+' fb='+(r.units[0]&&r.units[0].fallback)+' => '+(r.level==='paragraph'&&r.units[0].fallback?'PASS':'FAIL'));
+ r=await A.alignBlockPair({id:'en',text:'We propose a hardware accelerator for trace generation. It reduces latency.'},{id:'zh',text:'我们为执行轨迹生成提出一种硬件加速器。它降低了延迟。'},
+  {scoreFn:async(i,j)=>kwScore(['We propose a hardware accelerator for trace generation.','It reduces latency.'][i],['我们为执行轨迹生成提出一种硬件加速器。','它降低了延迟。'][j]),
+   spansForPair:async()=>[{en:'hardware accelerator',zh:'硬件加速器'},{en:'trace generation',zh:'执行轨迹生成'},{en:'not present',zh:'不存在'}]});
+ out.push('pair level='+r.level+' units='+JSON.stringify(r.units.map(u=>({e:u.enIndices,z:u.zhIndices,c:+u.confidence.toFixed(2)})))+' spans='+JSON.stringify(r.spans));
+ out.push('pair => '+(r.level==='sentence'&&r.units.length===2&&r.spans.length===2?'PASS':'FAIL'));
+ document.getElementById('r').textContent=out.join('\n');
+})().catch(e=>{document.getElementById('r').textContent='EXCEPTION '+e.message;});
+</script>
+</body>
+</html>

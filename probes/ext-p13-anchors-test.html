@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><title>P13 anchors test</title></head>
+<body style="font-family:Consolas,monospace;font-size:16px;padding:20px;background:#fff">
+<h1>P13 scenario-B anchors + block alignment test</h1>
+<div id="r" style="white-space:pre-wrap;font-size:18px;color:#0f4c81">RUNNING…</div>
+<script src="../src/core/align/alignBlocks.core.js"></script>
+<script>
+const A=window.PaperParallelAlignBlocks;
+const KW=[['trace generation','轨迹生成'],['execution trace','执行轨迹'],['accelerator','加速器'],['latency','延迟'],['propose','提出'],['gpu','gpu'],['multi-scalar','多标量'],['multiplication','乘法'],['high-performance','高性能']];
+function kwScore(a,b){a=a.toLowerCase();b=b.toLowerCase();let hit=0;for(const [en,zh] of KW){if(a.includes(en)&&b.includes(zh))hit++;}const na=(a.match(/\d+(\.\d+)?/g)||[]),nb=(b.match(/\d+(\.\d+)?/g)||[]);if(na.length&&na.some(x=>nb.includes(x)))hit+=2;return Math.min(1,hit/3);}
+const enBlocks=[
+ {id:'e-title',type:'title',text:'A High-Performance Accelerator for ZKVM Trace Generation',order:0},
+ {id:'e-s1',type:'section',text:'1 Introduction',order:1},
+ {id:'e-intro',type:'paragraph',text:'We propose a hardware accelerator for trace generation.',order:2},
+ {id:'e-fig',type:'figure',text:'Figure 1: Workflow of execution and proving',order:3},
+ {id:'e-after',type:'paragraph',text:'It reduces latency by 18.3x.',order:4},
+ {id:'e-s2',type:'section',text:'2 Background',order:5},
+ {id:'e-bg',type:'paragraph',text:'Prior work uses GPUs for multi-scalar multiplication.',order:6},
+ {id:'e-extra',type:'paragraph',text:'This paragraph is missing in the Chinese version.',order:7},
+];
+const zhBlocks=[
+ {id:'z-title',type:'title',text:'面向零知识虚拟机轨迹生成的高性能异构加速器',order:0},
+ {id:'z-s1',type:'section',text:'1 引言',order:1},
+ {id:'z-intro',type:'paragraph',text:'我们为执行轨迹生成提出一种硬件加速器。',order:2},
+ {id:'z-fig',type:'figure',text:'图 1:工作流示意图',order:3},
+ {id:'z-after',type:'paragraph',text:'它将延迟降低 18.3 倍。',order:4},
+ {id:'z-s2',type:'section',text:'2 背景',order:5},
+ {id:'z-bg',type:'paragraph',text:'已有工作使用 GPU 进行多标量乘法。',order:6},
+];
+(async()=>{
+ const checks=[];
+ checks.push(['标签归一化:Figure 1/图 1/1.2 节', A.normalizeAnchorLabel('figure','Figure 1')==='fig1' && A.normalizeAnchorLabel('figure','图 1')==='fig1' && A.normalizeAnchorLabel('section','1.2 Motivation')==='sec1.2']);
+ const enA=A.extractAnchors(enBlocks), zhA=A.extractAnchors(zhBlocks);
+ checks.push(['锚点抽取:EN=3(s1/fig1/s2),ZH=3', enA.length===3&&zhA.length===3&&enA.map(a=>a.label).join(',')==='sec1,fig1,sec2']);
+ const m=A.matchAnchors(enA,zhA);
+ checks.push(['跨语言自动配对 3 对', m.pairs.length===3&&m.pairs.every(p=>p.source==='auto')&&m.unmatchedEn.length===0&&m.unmatchedZh.length===0]);
+ const r=await A.alignBlocksWithAnchors(enBlocks,zhBlocks,{scoreFn:async(a,b)=>kwScore(a.text,b.text)});
+ const coveredZh=new Set(r.units.flatMap(u=>u.zhBlockIds));
+ checks.push(['锚点单元 3 个且 confidence=1', r.units.filter(u=>u.anchor).length===3&&r.units.filter(u=>u.anchor).every(u=>u.confidence===1)]);
+ checks.push(['中文所有块恰好被覆盖一次', coveredZh.size===zhBlocks.length&&[...coveredZh].every(id=>zhBlocks.some(b=>b.id===id))]);
+ checks.push(['英文多余段产生 1:0 未匹配', r.units.some(u=>u.enBlockIds.includes('e-extra')&&u.zhBlockIds.length===0)]);
+ checks.push(['全局置信度不触发降级', r.avgConfidence>=0.3&&r.degraded===false]);
+ // 人工校准
+ const cal=A.applyManualAnchorOverrides(m.pairs,[{label:'fig1',zhBlockId:null}]);
+ checks.push(['人工删除 fig1 锚点', cal.pairs.length===2&&!cal.pairs.some(p=>p.label==='fig1')]);
+ const cal2=A.applyManualAnchorOverrides(cal.pairs,[{label:'fig1',enBlockId:'e-fig',zhBlockId:'z-after'}]);
+ checks.push(['人工重绑 fig1 锚点', cal2.pairs.length===3&&cal2.pairs.find(p=>p.label==='fig1').source==='manual'&&cal2.pairs.find(p=>p.label==='fig1').zhBlockId==='z-after']);
+ const fails=checks.filter(c=>!c[1]);
+ document.getElementById('r').textContent=(fails.length?'FAIL '+fails.length+'\n':'ALL-PASS\n')+checks.map(c=>`${c[1]?'✅':'❌'} ${c[0]}`).join('\n')+'\navg='+r.avgConfidence.toFixed(2)+'\nunits='+JSON.stringify(r.units.map(u=>({a:u.anchor||'',e:u.enBlockIds,z:u.zhBlockIds})));
+})().catch(e=>{document.getElementById('r').textContent='EXCEPTION '+e.message+'\n'+e.stack;});
+</script>
+</body>
+</html>

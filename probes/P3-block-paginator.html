@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>P3 块级分页器探针 · Paper Parallel Sprint 0</title>
+<style>
+  :root{
+    --ink:#1c2733; --muted:#5b6b7c; --line:#d8dee6; --bg:#eef1f5;
+    --col-text:#1c2733; --col-section:#0f4c81; --col-fig:#7a4b00; --col-table:#085e3c;
+    --col-eq:#5b2d86; --col-front:#334;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Microsoft YaHei",system-ui,sans-serif;background:var(--bg);color:var(--ink)}
+  header{background:#101828;color:#fff;padding:12px 18px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  header h1{font-size:16px;margin:0;font-weight:600}
+  header .tag{font-size:11px;background:#1f3a5f;border:1px solid #2f5f9e;border-radius:4px;padding:2px 8px;color:#9cc7ff}
+  .controls{display:flex;gap:10px;flex-wrap:wrap;align-items:center;padding:10px 18px;background:#fff;border-bottom:1px solid var(--line)}
+  .controls label{font-size:12px;color:var(--muted)}
+  select,input[type=text],input[type=number]{padding:5px 8px;border:1px solid var(--line);border-radius:4px;font-size:13px}
+  button{padding:6px 14px;border:0;border-radius:4px;background:#0f4c81;color:#fff;font-size:13px;cursor:pointer}
+  button.ghost{background:#fff;color:#0f4c81;border:1px solid #0f4c81}
+  main{padding:14px 18px}
+  #stage{display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start}
+  /* 页面:全尺寸布局,再整体缩放 */
+  .page-wrap{position:relative;flex:0 0 auto;background:#fff;box-shadow:0 2px 10px rgba(15,30,50,.18);overflow:hidden}
+  .page{position:absolute;top:0;left:0;transform-origin:top left;background:#fff;color:var(--col-text)}
+  .page .margins{position:absolute;border:1px dashed #cbd5e1}
+  .page .guide{position:absolute;border-left:1px dashed #e2e8f0;background:rgba(226,232,240,.25)}
+  .page .pageno{position:absolute;bottom:10px;left:0;right:0;text-align:center;font-size:8px;color:#9aa7b5}
+  .block{position:absolute;overflow:hidden}
+  .block .inner{font-size:13px;line-height:1.6;font-family:Georgia,"Noto Serif SC","SimSun",serif;text-align:justify}
+  .block.title .inner{font-size:17px;font-weight:700;line-height:1.35;text-align:center}
+  .block.authors .inner{font-size:11px;text-align:center;color:#435163}
+  .block.section .inner{font-size:14px;font-weight:700;color:var(--col-section)}
+  .block.keywords .inner{font-size:11.5px;color:#435163}
+  .block.abstract .inner{font-size:12.5px}
+  .block.paragraph{}
+  .block.figure,.block.table,.block.equation{border:1.5px solid;background:#fafbfc}
+  .block.figure{border-color:#c89a3c}
+  .block.table{border-color:#3f9d73}
+  .block.equation{border-color:#9b6fd0}
+  .block .media{display:flex;align-items:center;justify-content:center;font-size:10px;letter-spacing:1px}
+  .block .caption{padding:6px 8px;font-size:10.5px;line-height:1.45;border-top:1px solid;text-align:left}
+  .block.figure .caption{border-color:#e7d19b}
+  .block.table .caption{border-color:#bfe2d2}
+  .block .chunkmark{background:#fde68a;border-radius:2px;padding:0 2px}
+  .block .scaled{color:#b45309;font-size:9px}
+  /* 调试面板 */
+  .panel{display:grid;grid-template-columns:340px 1fr;gap:14px;margin-top:14px}
+  .card{background:#fff;border:1px solid var(--line);border-radius:6px;padding:12px}
+  .card h2{font-size:13px;margin:0 0 8px}
+  .summary{font-size:12px;color:var(--muted);line-height:1.8}
+  .summary b{color:var(--ink)}
+  .ok{color:#0a7d4f;font-weight:700}
+  .bad{color:#c0392b;font-weight:700}
+  table{width:100%;border-collapse:collapse;font-size:11px}
+  th,td{border:1px solid var(--line);padding:3px 6px;text-align:left}
+  th{background:#f4f6f9}
+  .warn{background:#fff3cd}
+  .overflow{background:#f8d7da}
+  .hidden{display:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>P3 块级分页器探针</h1>
+  <span class="tag">Sprint 0 · 自研块→栏→页装填算法 · 不用 CSS columns 打印</span>
+</header>
+
+<div class="controls">
+  <label>版式模式
+    <select id="mode">
+      <option value="double" selected>双栏(会议论文)</option>
+      <option value="single">单栏(期刊/学位论文)</option>
+      <option value="mixed">混合(标题摘要通栏+正文双栏)</option>
+    </select>
+  </label>
+  <label>随机种子 <input id="seed" type="number" value="42" style="width:70px"></label>
+  <button id="run">重新生成</button>
+  <label><input id="guides" type="checkbox" checked> 显示栏线</label>
+  <label><input id="debugtoggle" type="checkbox" checked> 调试日志</label>
+  <button id="printmode" class="ghost">打印版视图</button>
+</div>
+
+<main>
+  <div id="stage"></div>
+  <div class="panel">
+    <div class="card">
+      <h2>装填结果</h2>
+      <div id="summary" class="summary"></div>
+    </div>
+    <div class="card">
+      <h2>块装填日志(每块最终落点)</h2>
+      <table>
+        <thead><tr><th>#</th><th>块 id</th><th>类型</th><th>页</th><th>栏</th><th>y</th><th>高</th><th>片段</th><th>说明</th></tr></thead>
+        <tbody id="logbody"></tbody>
+      </table>
+    </div>
+  </div>
+</main>
+
+<script>
+'use strict';
+/* ================================================================
+ * P3 探针:自研块级分页器(块 -> 栏 -> 页)
+ * 需求映射:
+ *  R4 版式继承:单栏/双栏/混合,页数自然延伸
+ *  R5 块级保序:图/表/公式钉在相邻正文块之间,不漂移
+ *  图/表/公式/图注块 splitAllowed=false(不可劈开)
+ * ================================================================ */
+
+/* ---------- 确定性伪随机(种子可复现) ---------- */
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+
+/* ---------- 几何常量:A4 @ 96dpi ---------- */
+const MM = 96/25.4;
+const PAGE = {w:210*MM, h:297*MM};
+const MARGIN = 18*MM;                 // 18mm 边距
+const GUTTER = 6*MM;                  // 双栏栏间距 6mm
+const USABLE_W = PAGE.w - MARGIN*2;   // 通栏可用宽
+const COL_W = (USABLE_W - GUTTER)/2;  // 双栏单栏宽
+const USABLE_H = PAGE.h - MARGIN*2;   // 可用高
+
+/* ---------- 测量:浏览器负责块内断行,我们只取高度 ---------- */
+const measurer = document.createElement('div');
+measurer.style.cssText='position:absolute;left:-99999px;top:0;visibility:hidden;'
+  +'font-family:Georgia,"Noto Serif SC","SimSun",serif;text-align:justify;';
+document.body.appendChild(measurer);
+
+function measureText(text, widthPx, fontSize){
+  measurer.style.width = widthPx+'px';
+  measurer.style.fontSize = fontSize+'px';
+  measurer.style.lineHeight = '1.6';
+  measurer.style.fontWeight = '400';
+  measurer.textContent = text;
+  return measurer.getBoundingClientRect().height;
+}
+
+/* 把文字块按句边界切块:每片高度 <= maxH;长句允许按字硬切 */
+function chunkText(text, widthPx, maxH, fontSize){
+  if(measureText(text,widthPx,fontSize) <= maxH) return [{text, h:measureText(text,widthPx,fontSize)}];
+  const sentences = text.match(/[^。！？.!?\n]+[。！？.!?]?|\n+/g) || [text];
+  const out=[]; let cur='';
+  for(const s of sentences){
+    const cand = cur + s;
+    const h = measureText(cand,widthPx,fontSize);
+    if(h <= maxH || !cur){ cur = cand; continue; }
+    // cur 已满,决定:先压出 cur,再单句硬切
+    if(cur){ out.push({text:cur,h:measureText(cur,widthPx,fontSize)}); cur=''; }
+    const sh = measureText(s,widthPx,fontSize);
+    if(sh <= maxH){ cur = s; }
+    else{ // 单句超限,按字切
+      let acc='';
+      for(const ch of s){
+        const t2=acc+ch, h2=measureText(t2,widthPx,fontSize);
+        if(h2<=maxH){acc=t2;} else {if(acc) out.push({text:acc,h:measureText(acc,widthPx,fontSize)}); acc=ch;}
+      }
+      cur=acc;
+    }
+  }
+  if(cur.trim()) out.push({text:cur,h:measureText(cur,widthPx,fontSize)});
+  return out;
+}
+
+/* ---------- 假数据:确定性生成一篇"中文论文" ---------- */
+const SENT=[
+  '零知识虚拟机（Zero-Knowledge Virtual Machine, zkVM）在区块链扩容与隐私计算中扮演关键角色。',
+  '执行轨迹（Trace）的生成速度直接决定了整个证明流水线的端到端延迟。',
+  '本文提出一种面向 zkVM 轨迹生成的高性能异构加速器架构，将访存密集与计算密集子任务分离。',
+  '实验结果表明，所提架构相比通用 CPU 基线取得 18.3 倍的端到端加速。',
+  '具体而言，我们重新设计了寄存器文件的读写端口以避免结构冲突。',
+  '约束系统在证明生成阶段被编译为低层原语序列，其依赖图具有明显的稀疏特征。',
+  '该方案的面积开销控制在 1.4 倍以内，同时保持 78% 的算术单元利用率。',
+  '为了验证设计有效性，我们在 FPGA 原型与 28nm 工艺库下分别进行了综合与布局布线评估。',
+  '相关工作主要分为三类：基于 GPU 的多标量乘法加速、基于 ASIC 的 NTT 加速以及可重构 zkVM。',
+  '与已有工作不同，我们的方法不需要改变应用层的密码学假设。',
+  '流水线深度的选取需要在吞吐率、频率与片上存储容量之间进行权衡。',
+  '我们在表 1 中汇总了各配置下的关键路径延迟分解结果。',
+  '上述结果表明，通信瓶颈可以被局部性感知的调度策略有效缓解。',
+  '证明者（Prover）与验证者（Verifier）之间的交互轮数保持恒定，不随电路规模增长。',
+  '该模块通过双缓冲机制隐藏了数据搬运的延迟。',
+  '我们进一步分析了不同批大小对缓存命中率与带宽利用率的影响。',
+  '安全性分析表明，该优化不改变原有协议的可满足性（Soundness）与零知识性。',
+  '在对比实验中，基线平台采用 Intel Xeon 处理器与 128GB 主存配置。'
+];
+const SECTIONS=['1 引言','2 背景与相关工作','3 架构设计','4 实验评估','5 结论'];
+
+function makeBlocks(rand){
+  const B=[]; let n=0;
+  const add=(o)=>{B.push({id:'zh-b'+(++n),...o});};
+  const para=(len)=>Array.from({length:len},()=>SENT[Math.floor(rand()*SENT.length)]).join('');
+  add({type:'title',text:'面向零知识虚拟机轨迹生成的高性能异构加速器',widthMode:'span',frontMatter:true,fontSize:17});
+  add({type:'authors',text:'作者一，作者二，作者三  东南大学集成电路学院',widthMode:'span',frontMatter:true,fontSize:11});
+  add({type:'abstract',text:'摘要——'+para(4),widthMode:'span',frontMatter:true,fontSize:12.5});
+  add({type:'keywords',text:'关键词：零知识虚拟机（Zero-Knowledge Virtual Machine, zkVM）；执行轨迹（Trace）；加速器（Accelerator）',widthMode:'span',frontMatter:true,fontSize:11.5});
+  add({type:'section',text:SECTIONS[0],widthMode:'column',fontSize:14});
+  add({type:'paragraph',text:para(8),widthMode:'column',fontSize:13});
+  add({type:'paragraph',text:para(9),widthMode:'column',fontSize:13});
+  add({type:'figure',widthMode:'column',atomicH:250,caption:'图 1：zkVM 执行阶段与证明阶段的工作流示意'});
+  add({type:'paragraph',text:para(7),widthMode:'column',fontSize:13});
+  add({type:'section',text:SECTIONS[1],widthMode:'column',fontSize:14});
+  add({type:'paragraph',text:para(10),widthMode:'column',fontSize:13});
+  add({type:'equation',widthMode:'column',atomicH:88,label:'e = gcd(f, (x^N - 1) mod f)'});
+  add({type:'paragraph',text:para(6),widthMode:'column',fontSize:13});
+  add({type:'table',widthMode:'span',atomicH:300,caption:'表 1：各配置下的关键路径延迟分解（单位：ns）'});
+  add({type:'paragraph',text:para(8),widthMode:'column',fontSize:13});
+  add({type:'section',text:SECTIONS[2],widthMode:'column',fontSize:14});
+  add({type:'paragraph',text:para(11),widthMode:'column',fontSize:13});
+  add({type:'paragraph',text:para(9),widthMode:'column',fontSize:13});
+  add({type:'paragraph',text:para(10),widthMode:'column',fontSize:13});
+  add({type:'figure',widthMode:'span',atomicH:330,caption:'图 2：所提异构加速器的整体架构（跨双栏宽）'});
+  add({type:'paragraph',text:para(8),widthMode:'column',fontSize:13});
+  add({type:'paragraph',text:para(7),widthMode:'column',fontSize:13});
+  add({type:'section',text:SECTIONS[3],widthMode:'column',fontSize:14});
+  add({type:'paragraph',text:para(10),widthMode:'column',fontSize:13});
+  add({type:'table',widthMode:'column',atomicH:260,caption:'表 2：与已有加速器的面积/性能对比'});
+  add({type:'paragraph',text:para(9),widthMode:'column',fontSize:13});
+  add({type:'equation',widthMode:'column',atomicH:80,label:'T_total = T_trace + T_commit + T_prove'});
+  add({type:'paragraph',text:para(8),widthMode:'column',fontSize:13});
+  add({type:'section',text:SECTIONS[4],widthMode:'column',fontSize:14});
+  add({type:'paragraph',text:para(6),widthMode:'column',fontSize:13});
+  add({type:'paragraph',text:para(5),widthMode:'column',fontSize:13});
+  add({type:'reference',text:'[1] 作者等. ZK-Tracer: A High-Performance Heterogeneous Accelerator...\n[2] 作者等. PipeZK: Accelerating Zero-Knowledge Proof...\n[3] 作者等. cuZK: Accelerating Zero-Knowledge Proof...',widthMode:'column',fontSize:11});
+  add({type:'table',widthMode:'span',atomicH:1180,caption:'表 3：完整工艺角与时序报告汇总（刻意超高超大,用于测试降级缩放）'});
+  return B;
+}
+
+/* ---------- 分页器核心 ---------- */
+function paginate(blocks, mode){
+  const pages=[];
+  const log=[];
+  const fragments=[];            // {page, col, y, blockId}
+  const issues=[];
+  const newPage=(m)=>({mode:m,
+    single:{cursor:MARGIN,blocks:[]},
+    full:{cursor:MARGIN,blocks:[]},          // 双栏页顶部的通栏区(标题/作者/摘要/关键词)
+    left:{cursor:MARGIN,blocks:[]}, right:{cursor:MARGIN,blocks:[]}, spans:[]});
+
+  // 当前页取栏位候选(按阅读顺序:左->右 / 单栏)
+  function columnSlots(page, wantSpan){
+    if(wantSpan) return null; // span 走专门逻辑
+    if(page.mode==='single') return [{col:'single',x:MARGIN,w:USABLE_W,getH:()=>USABLE_H-(page.single.cursor-MARGIN)}];
+    return [
+      {col:'left',x:MARGIN,w:COL_W,getH:()=>USABLE_H-(page.left.cursor-MARGIN)},
+      {col:'right',x:MARGIN+COL_W+GUTTER,w:COL_W,getH:()=>USABLE_H-(page.right.cursor-MARGIN)}
+    ];
+  }
+  function pushCol(page,col,blk,y,h){page[col].blocks.push({block:blk,y,h}); page[col].cursor=y+h;}
+  function pushSpan(page,blk,y,h){
+    page.spans.push({block:blk,y,h});
+    page.left.cursor=Math.max(page.left.cursor,y+h);
+    page.right.cursor=Math.max(page.right.cursor,y+h);
+    page.full.cursor=Math.max(page.full.cursor,y+h);
+    if(page.mode==='single'){page.single.cursor=Math.max(page.single.cursor,y+h);}
+  }
+
+  // 首页/新页模式
+  function firstPage(){ return mode==='single'?'single':(mode==='double'?'double':'mixed'); }
+  function nextPageMode(){ return mode==='single'?'single':'double'; }
+
+  // 文字流块(可断) vs 原子块(不可断)
+  const TEXT_TYPES = new Set(['title','authors','abstract','keywords','section','paragraph','reference']);
+
+  // 把文字块放入指定栏位:按句边界切块,返回剩余文字
+  function placeText(page, colName, x, w, blk, text, remH, fontSize){
+    const chunks = chunkText(text, w, remH, fontSize);
+    const piece = chunks[0];
+    const y = page[colName].cursor;
+    const placedBlock = {...blk, text: piece.text};
+    pushCol(page, colName, placedBlock, y, piece.h);
+    fragments.push({page: pages.length-1, col: colName, y, blockId: blk.id});
+    log.push({...blk, page: pages.length-1, col: colName, y, h: piece.h, frags: chunks.length>1?'断':'整', note: chunks.length>1?'跨栏断块':''});
+    return chunks.slice(1).map(c=>c.text).join('');
+  }
+
+  for(const blk of blocks){
+    const fontSize = blk.fontSize||13;
+    const lineH = fontSize*1.6 + 2;      // 一行的最小高度,余量小于它就不再放文字
+
+    if(!TEXT_TYPES.has(blk.type)){
+      /* ---- 原子块:图/表/公式,整块不可劈开 ---- */
+      let h = blk.atomicH;
+      let placed = false;
+      const page = pages.length ? pages[pages.length-1] : null;
+
+      if(page && blk.widthMode==='column'){
+        // 严格保序:只有当前栏的余量会构成"读序早于该图"的空间时,禁止跳进右栏。
+        // 若左栏放不下而右栏放得下,则关闭左栏余量(留白),图放右栏顶,后续文字从图下继续。
+        for(const slot of columnSlots(page)){
+          if(h <= slot.getH()+0.5){
+            let note = '';
+            if(page.mode!=='single' && slot.col==='right'){
+              const leftRem = USABLE_H-(page.left.cursor-MARGIN);
+              if(leftRem > 0.5){ page.left.cursor = MARGIN+USABLE_H; note='左栏余量关闭以保序'; }
+            }
+            const y = page[slot.col].cursor;
+            pushCol(page, slot.col, blk, y, h);
+            log.push({...blk, page: pages.length-1, col: slot.col, y, h, frags:'整', note});
+            placed = true;
+            break;
+          }
+        }
+      }
+      if(!placed){
+        // 跨栏块:当前页完全空则页顶;否则推到下一页页顶(模拟 LaTeX figure* 规则)
+        if(page && blk.widthMode==='span'){
+          const empty = page.left.cursor===MARGIN && page.right.cursor===MARGIN
+                     && page.spans.length===0 && page.single.cursor===MARGIN && page.full.cursor===MARGIN;
+          if(empty){ placeSpan(page, blk, h); placed = true; }
+        }
+      }
+      if(!placed){
+        const p = newPage(nextPageMode());
+        pages.push(p);
+        if(blk.widthMode==='span'){ placeSpan(p, blk, h); }
+        else { const col = p.mode==='single' ? 'single' : 'left';
+               pushCol(p, col, blk, MARGIN, h);
+               log.push({...blk, page: pages.length-1, col, y: MARGIN, h, frags:'整', note:'新页'}); }
+      }
+      continue;
+    }
+
+    /* ---- 文字流块:允许在句边界跨栏/跨页断块 ---- */
+    let remaining = blk.text;
+    let safety = 0;
+    while(remaining.trim() && safety++ < 500){
+      let page = pages.length ? pages[pages.length-1] : null;
+      if(!page){ page = newPage(firstPage()); pages.push(page); }
+
+      let slot = null;
+
+      // 双栏/混合版式:frontMatter(标题/作者/摘要/关键词)永远放页顶通栏区
+      if(blk.frontMatter && page.mode!=='single'){
+        let remH = USABLE_H - (page.full.cursor - MARGIN);
+        if(remH <= lineH){ const p = newPage(page.mode); pages.push(p); page = p; remH = USABLE_H; }
+        slot = {col:'full', x:MARGIN, w:USABLE_W, remH};
+      } else {
+        // 通栏区刚结束:正文双栏的起点统一对齐到通栏区底部
+        if(page.mode!=='single' && page.full.cursor > MARGIN
+           && page.left.cursor===MARGIN && page.right.cursor===MARGIN){
+          page.left.cursor = page.right.cursor = page.full.cursor;
+        }
+        // 常规:取当前页第一个有空余的栏(左→右 / 单栏),余量不足一行视为满
+        for(const s of columnSlots(page)){
+          const h = s.getH();
+          if(h > lineH){ slot = {...s, remH:h}; break; }
+        }
+      }
+      if(!slot){
+        const p = newPage(nextPageMode());
+        pages.push(p); page = p;
+        slot = {col: p.mode==='single'?'single':'left', x:MARGIN, w: p.mode==='single'?USABLE_W:COL_W, remH:USABLE_H};
+      }
+      remaining = placeText(page, slot.col, slot.x, slot.w, blk, remaining, slot.remH, fontSize);
+    }
+  }
+  return {pages, log, fragments, issues};
+
+  function placeSpan(page,blk,h){
+    if(h > USABLE_H){
+      issues.push({block:blk.id,msg:`原子块高度 ${h.toFixed(0)}px 超过页高 ${USABLE_H.toFixed(0)}px,缩放 ${(USABLE_H/h).toFixed(2)} 并标记人工审核`});
+      log.push({...blk,page:pages.length-1,col:'span',y:MARGIN,h:USABLE_H,frags:'整',note:'⚠ 超高块已缩放'});
+      pushSpan(page,blk,MARGIN,USABLE_H); return;
+    }
+    pushSpan(page,blk,MARGIN,h);
+    log.push({...blk,page:pages.length-1,col:'span',y:MARGIN,h,frags:'整',note:'跨栏通栏块'});
+  }
+}
+
+/* ---------- 顺序校验:块序是否被分页破坏 ---------- */
+function colRank(l){ // 阅读顺序:通栏区/跨栏块 -> 左栏 -> 右栏
+  if(l.col==='full'||l.col==='span'||l.col==='single') return 0;
+  if(l.col==='left') return 1;
+  return 2;
+}
+
+function validateOrder(blocks, log, fragments){
+  const seq = [...log].sort((a,b)=>a.page-b.page||colRank(a)-colRank(b)||a.y-b.y);
+  // 1) 每个块的全部片段必须连续出现,且压缩片段后的块序必须等于原始块序
+  const idAt = new Map(blocks.map((b,i)=>[b.id,i]));
+  const ranges = new Map();      // blockId -> {min,max} 在 seq 中的序号
+  seq.forEach((f,i)=>{
+    if(!ranges.has(f.id)) ranges.set(f.id,{min:i,max:i});
+    else { const r=ranges.get(f.id); r.min=Math.min(r.min,i); r.max=Math.max(r.max,i); }
+  });
+  let orderOk = true, contOk = true;
+  const sorted = [...ranges.entries()].sort((a,b)=>a[1].min-b[1].min);
+  sorted.forEach(([id,r],i)=>{ if(idAt.get(id)!==i) orderOk=false; });
+  const seenMax = new Set();
+  sorted.forEach(([id,r])=>{
+    for(const [oid,or] of ranges){ if(oid!==id && or.min<r.max && or.max>r.min) contOk=false; }
+  });
+  // 2) 每个块至少出现一次
+  const complete = blocks.every(b=>ranges.has(b.id));
+  return {ok: orderOk && contOk && complete, got: sorted.map(s=>s[0]), expect: blocks.map(b=>b.id), contOk, complete};
+}
+
+/* ---------- 渲染 ---------- */
+const SCALE=0.40;
+function render(pages, blocks, mode, showGuides){
+  const stage=document.getElementById('stage'); stage.innerHTML='';
+  const orderCheck=validateOrder(blocks, lastLog, lastFragments);
+  pages.forEach((page,pi)=>{
+    const wrap=document.createElement('div');
+    wrap.className='page-wrap';
+    wrap.style.width=(PAGE.w*SCALE)+'px'; wrap.style.height=(PAGE.h*SCALE)+'px';
+    const pg=document.createElement('div');
+    pg.className='page';
+    pg.style.width=PAGE.w+'px'; pg.style.height=PAGE.h+'px';
+    pg.style.transform=`scale(${SCALE})`;
+    const m=document.createElement('div'); m.className='margins';
+    m.style.left=MARGIN+'px'; m.style.top=MARGIN+'px';
+    m.style.width=USABLE_W+'px'; m.style.height=USABLE_H+'px';
+    pg.appendChild(m);
+    if(showGuides && (page.mode==='double'||page.mode==='mixed')){
+      const g=document.createElement('div'); g.className='guide';
+      g.style.left=(MARGIN+COL_W+GUTTER/2)+'px'; g.style.top=MARGIN+'px'; g.style.height=USABLE_H+'px';
+      pg.appendChild(g);
+    }
+    const renderCol=(col,blocksArr)=>{
+      blocksArr.forEach(item=>{
+        const el=document.createElement('div');
+        el.className='block '+item.block.type;
+        el.style.left=(col.x)+'px'; el.style.top=item.y+'px'; el.style.width=col.w+'px'; el.style.height=item.h+'px';
+        if(item.block.type==='figure'||item.block.type==='table'||item.block.type==='equation'){
+          const med=document.createElement('div'); med.className='media';
+          med.style.height=Math.max(30,item.h-34)+'px';
+          med.textContent=item.block.type==='figure'?'[ 原论文图块,按坐标裁剪,保持英文标注 ]'
+            : item.block.type==='table'?'[ 表格:结构提取→单元格翻译→HTML 重建 ]'
+            : '$ '+item.block.label+' $';
+          el.appendChild(med);
+          const cap=document.createElement('div'); cap.className='caption'; cap.textContent=item.block.caption||item.block.label||'';
+          el.appendChild(cap);
+        } else {
+          const inn=document.createElement('div'); inn.className='inner';
+          inn.style.fontSize=(item.block.fontSize||13)+'px';
+          inn.textContent=item.block.text;
+          el.appendChild(inn);
+        }
+        pg.appendChild(el);
+      });
+    };
+    if(page.mode==='single') renderCol({x:MARGIN,w:USABLE_W}, page.single.blocks);
+    if(page.mode==='double'||page.mode==='mixed'){
+        renderCol({x:MARGIN,w:USABLE_W}, page.full.blocks);   // 页顶通栏区
+      renderCol({x:MARGIN,w:COL_W}, page.left.blocks);
+      renderCol({x:MARGIN+COL_W+GUTTER,w:COL_W}, page.right.blocks);
+    }
+    page.spans.forEach(item=>{
+      const el=document.createElement('div');
+      el.className='block '+item.block.type;
+      el.style.left=MARGIN+'px'; el.style.top=item.y+'px'; el.style.width=USABLE_W+'px'; el.style.height=item.h+'px';
+      const med=document.createElement('div'); med.className='media';
+      med.style.height=Math.max(30,item.h-34)+'px';
+      med.textContent='[ 跨栏块 · '+ (item.block.type==='figure'?'图':item.block.type==='table'?'表':'公式') +' · '+item.block.caption+' ]';
+      el.appendChild(med);
+      const cap=document.createElement('div'); cap.className='caption'; cap.textContent=item.block.caption||'';
+      el.appendChild(cap);
+      if(item.h>=USABLE_H-1){ const s=document.createElement('div'); s.className='scaled'; s.textContent='⚠ 已缩放至页高'; el.appendChild(s); }
+      pg.appendChild(el);
+    });
+    const pn=document.createElement('div'); pn.className='pageno'; pn.textContent='第 '+(pi+1)+' 页 · '+(page.mode==='single'?'单栏':page.mode==='double'?'双栏':'混合');
+    pg.appendChild(pn);
+    wrap.appendChild(pg); stage.appendChild(wrap);
+  });
+  return orderCheck;
+}
+
+let lastLog=[], lastFragments=[];
+function run(){
+  const seed=+document.getElementById('seed').value||42;
+  const mode=document.getElementById('mode').value;
+  const blocks=makeBlocks(mulberry32(seed));
+  const {pages,log,fragments,issues}=paginate(blocks,mode);
+  lastLog=log; lastFragments=fragments;
+  const oc=render(pages,blocks,mode,document.getElementById('guides').checked);
+  const summary=document.getElementById('summary');
+  const fragCount=fragments.length;
+  const atomic=blocks.filter(b=>['figure','table','equation'].includes(b.type)).length;
+  summary.innerHTML=
+    `<div>版式:<b>${mode}</b> · 块总数:<b>${blocks.length}</b> · 其中原子块(图/表/公式):<b>${atomic}</b></div>
+     <div>生成页数:<b>${pages.length}</b> · 装填片段数:<b>${fragCount}</b></div>
+     <div>块序校验: <span class="${oc.ok?'ok':'bad'}">${oc.ok?'✅ 通过:分页未破坏原块顺序(含跨栏断块连续性)':'❌ 失败'}</span></div>
+     <div>超高块降级: <b>${issues.length?issues.map(i=>i.msg).join('<br>'):'无'}</b></div>`;
+  const tb=document.getElementById('logbody'); tb.innerHTML='';
+  log.forEach((l,i)=>{
+    const tr=document.createElement('tr');
+    if(String(l.note).includes('⚠')) tr.className='warn';
+    tr.innerHTML=`<td>${i+1}</td><td>${l.id}</td><td>${l.type}</td><td>${l.page+1}</td><td>${l.col}</td><td>${l.y.toFixed(0)}</td><td>${l.h.toFixed(0)}</td><td>${l.frags}</td><td>${l.note||''}</td>`;
+    tb.appendChild(tr);
+  });
+}
+document.getElementById('run').onclick=run;
+document.getElementById('guides').onchange=()=>run();
+// 支持 ?mode=single|double|mixed&seed=42 便于自动化截图回归
+(function(){
+  const qs=new URLSearchParams(location.search);
+  const qm=qs.get('mode'); if(qm && ['single','double','mixed'].includes(qm)) document.getElementById('mode').value=qm;
+  const qseed=qs.get('seed'); if(qseed) document.getElementById('seed').value=qseed;
+})();
+document.getElementById('printmode').onclick=()=>{
+  const on=document.body.classList.toggle('printview');
+  document.getElementById('printmode').textContent=on?'返回预览视图':'打印版视图';
+  if(on){ document.getElementById('stage').style.cssText='display:block'; } else { document.getElementById('stage').style.cssText=''; }
+  // 打印版:全尺寸、逐页分页(通过浏览器打印导出 PDF 验证 P2)
+  const wrap=document.getElementById('stage');
+  if(on){
+    wrap.querySelectorAll('.page-wrap').forEach(w=>{w.style.width=PAGE.w+'px';w.style.height=PAGE.h+'px';w.style.pageBreakAfter='always';w.querySelector('.page').style.transform='scale(1)';});
+  } else {
+    wrap.querySelectorAll('.page-wrap').forEach(w=>{w.style.width=(PAGE.w*SCALE)+'px';w.style.height=(PAGE.h*SCALE)+'px';w.style.pageBreakAfter='auto';w.querySelector('.page').style.transform=`scale(${SCALE})`;});
+  }
+};
+run();
+</script>
+</body>
+</html>

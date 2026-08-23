@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><title>P18 全链路集成探针</title></head>
+<body style="font-family:Consolas,monospace;font-size:16px;padding:20px;background:#fff">
+<h1>P18 end-to-end integration (synthetic paper)</h1>
+<div id="r" style="white-space:pre-wrap;font-size:17px;color:#0f4c81">RUNNING…</div>
+<script src="../src/core/paginate/paginator.core.js"></script>
+<script src="../src/core/translate/pipeline.core.js"></script>
+<script src="../src/core/translate/session.core.js"></script>
+<script src="../src/core/align/align.core.js"></script>
+<script src="../src/core/align/alignBlocks.core.js"></script>
+<script src="../src/core/audit/audit.core.js"></script>
+<script src="../src/core/review/review.core.js"></script>
+<script>
+(async()=>{
+const PG=window.PaperParallelPaginator;
+const PL=window.PaperParallelPipeline;
+const TS=window.PaperParallelTranslateSession;
+const AL=window.PaperParallelAlign;
+const AU=window.PaperParallelAudit;
+const RV=window.PaperParallelReview;
+
+/* ---- 合成"解析器输出"的英文块(与 P5-P7 同结构) ---- */
+const blocks=[
+ {id:'b01',type:'title',text:'A High-Performance Accelerator for ZKVM Trace Generation',fontSize:17,widthMode:'span',frontMatter:true,order:0},
+ {id:'b02',type:'authors',text:'Author One, Author Two, Southeast University',fontSize:11,widthMode:'span',frontMatter:true,order:1},
+ {id:'b03',type:'abstract',text:'This paper studies hardware acceleration for zero-knowledge virtual machines.',fontSize:12,widthMode:'span',frontMatter:true,order:2},
+ {id:'b04',type:'section',text:'1 Introduction',fontSize:14,order:3},
+ {id:'b05',type:'paragraph',text:'The execution trace generation dominates end-to-end latency. We propose a hardware accelerator.',fontSize:13,order:4},
+ {id:'b06',type:'figure',atomicH:220,widthMode:'column',caption:'Figure 1: Workflow',order:5},
+ {id:'b07',type:'paragraph',text:'The proposed architecture reduces memory traffic by 18.3x.',fontSize:13,order:6},
+ {id:'b08',type:'section',text:'2 Background',fontSize:14,order:7},
+ {id:'b09',type:'paragraph',text:'Prior work uses GPUs for multi-scalar multiplication.',fontSize:13,order:8},
+ {id:'b10',type:'reference',text:'[1] Prior work.',fontSize:11,order:9},
+];
+
+/* ---- mock 翻译(与 P10/P11 同口径) ---- */
+async function mockTranslate(ctx){
+ if(ctx.pass===1) return '本章围绕零知识虚拟机（Zero-Knowledge Virtual Machine, zkVM）展开。执行轨迹（Trace）的生成是关键。加速器（Accelerator）用于卸载。';
+ const t=(ctx.block.text||'').trim();
+ const map={'b01':'面向零知识虚拟机轨迹生成的高性能加速器','b02':'作者一，作者二，东南大学',
+  'b03':'摘要——本文研究零知识虚拟机（Zero-Knowledge Virtual Machine, zkVM）的硬件加速。',
+  'b04':'1 引言','b05':'执行轨迹（Trace）的生成主导了端到端延迟。我们提出一种硬件加速器。',
+  'b07':'所提架构将内存访问降低了 18.3 倍。','b08':'2 背景','b09':'已有工作使用 GPU 进行多标量乘法。','b10':'[1] 已有工作。'};
+ return map[ctx.block.id]||('已译：'+t);
+}
+function fakeMeasure(text,w,fs){const lh=fs*1.6,cpl=Math.max(1,Math.floor(w/(fs*1.05)));return Math.max(lh,Math.ceil([...text].length/cpl)*lh);}
+
+const checks=[];
+/* 阶段1:翻译(两遍法 + 断点会话)——只翻译文字块,图/表/公式不过模型 */
+const TEXT_TYPES=new Set(['title','authors','abstract','keywords','section','paragraph','reference','caption']);
+const textBlocks=blocks.filter(b=>TEXT_TYPES.has(b.type));
+const nonTextBlocks=blocks.filter(b=>!TEXT_TYPES.has(b.type));
+const store={byId:{},terms:[]};
+const tr=await TS.runResumableTranslation(textBlocks,{translate:mockTranslate,loadState:async()=>store,saveState:async s=>{store.byId=s.byId;store.terms=s.terms;},maxRetries:1,systemPrompt:'SYS',userPrompt:'USER'});
+checks.push(['阶段1 翻译:全部完成且术语>=3', tr.stats.failed===0&&tr.stats.done===textBlocks.length&&tr.terms.length>=3]);
+const zhTextBlocks=textBlocks.map(b=>({...b,text:tr.blocks.find(x=>x.id===b.id).zhText}));
+const zhBlocks=[...zhTextBlocks,...nonTextBlocks.map(b=>({...b}))].sort((a,b)=>a.order-b.order);
+
+/* 阶段2:中文版分页排版(双栏) */
+const layout=PG.paginate(zhBlocks,{mode:'double',measureText:fakeMeasure});
+const order=PG.validateOrder(zhBlocks,layout.log);
+checks.push(['阶段2 分页:块序保持且页数>=1', order.ok===true&&layout.pages.length>=1]);
+
+/* 阶段3:对齐(场景A 管线直出块对齐 + 块内句级精对齐) */
+const units=blocks.map(b=>({enBlockIds:[b.id],zhBlockIds:[b.id]}));
+const pair=await AL.alignBlockPair(
+ {id:'b05',text:blocks.find(b=>b.id==='b05').text},
+ {id:'b05',text:zhBlocks.find(b=>b.id==='b05').text},
+ {scoreFn:async(i,j)=>{const e=['The execution trace generation dominates end-to-end latency.','We propose a hardware accelerator.'];const z=['执行轨迹（Trace）的生成主导了端到端延迟。','我们提出一种硬件加速器。'];const kw=(a,b)=>{const K=[['trace','执行轨迹'],['latency','延迟'],['propose','提出'],['accelerator','加速器']];let h=0;for(const[x,y]of K){if(a.toLowerCase().includes(x)&&b.includes(y))h++;}return Math.min(1,h/2);};return kw(e[i],z[j]);},
+  spansForPair:async()=>[{en:'hardware accelerator',zh:'硬件加速器'}]});
+checks.push(['阶段3 对齐:句级2句 + span 合法', pair.level==='sentence'&&pair.units.length===2&&pair.spans.length===1]);
+
+/* 阶段4:规则审核 */
+const pairs=blocks.filter(b=>!['figure','table','equation'].includes(b.type)).map(b=>({enBlockId:b.id,zhBlockId:b.id,zhText:zhBlocks.find(x=>x.id===b.id).text}));
+const audit=AU.runRuleAudit({enBlocks:blocks,zhBlocks,pairs,terms:tr.terms});
+checks.push(['阶段4 规则审核:0 error', audit.pass===true&&audit.errors===0]);
+
+/* 阶段5:AI 复审(无问题) */
+const ai=await RV.runAiReview(pairs.map(p=>({...p,enText:blocks.find(b=>b.id===p.enBlockId).text})),{translate:async()=>'{"issues":[]}'});
+const comb=RV.combineIssues(audit.issues,ai.issues);
+checks.push(['阶段5 AI 复审:通过', ai.pass===true&&comb.unresolvedErrors===0]);
+
+/* 阶段6:门禁 + 项目包 */
+const approved=RV.isApproved(comb.issues);
+const pkg=RV.buildProjectPackage({mode:'A',enDoc:{id:'en',blocks},zhDoc:{id:'zh',blocks:zhBlocks},units,spans:pair.spans,terms:tr.terms,issues:comb.issues,auditPassed:approved});
+const pkgV=RV.validateProjectPackage(pkg);
+checks.push(['阶段6 门禁+项目包:校验通过', approved===true&&pkgV.ok===true]);
+
+const fails=checks.filter(c=>!c[1]);
+document.getElementById('r').textContent=(fails.length?'FAIL '+fails.length+'\n':'ALL-PASS\n')+checks.map(c=>`${c[1]?'✅':'❌'} ${c[0]}`).join('\n')
+ +`\nstats:翻译${JSON.stringify(tr.stats)} 页数${layout.pages.length} 术语${tr.terms.length} audit=${audit.errors}E/${audit.warns}W 包校验和=${pkg.checksum}`;
+})().catch(e=>{document.getElementById('r').textContent='EXCEPTION '+e.message+'\n'+e.stack;});
+</script>
+</body>
+</html>

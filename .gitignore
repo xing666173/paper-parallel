@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.DS_Store
+*.local
+.vite/
+coverage/
+
+# 本地真实论文测试夹具(版权材料,绝不入库)
+tests/fixtures/local/
+probes/assets/local/
+
+# 本机配置
+.env
+.env.local
+
+# 本机测试输出(由 final-test.ps1 生成,开发者读取用,不入库)
+reports/

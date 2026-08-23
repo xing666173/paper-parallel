@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>P2 打印导出文字层探针 · Paper Parallel</title>
+<style>
+  :root{--ink:#1c2733;--muted:#5b6b7c;--line:#d8dee6;--bg:#eef1f5}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Microsoft YaHei",system-ui,sans-serif;background:var(--bg);color:var(--ink)}
+  header{background:#101828;color:#fff;padding:12px 18px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  header h1{font-size:16px;margin:0}
+  .tag{font-size:11px;background:#1f3a5f;border:1px solid #2f5f9e;border-radius:4px;padding:2px 8px;color:#9cc7ff}
+  .controls{display:flex;gap:10px;flex-wrap:wrap;align-items:center;padding:10px 18px;background:#fff;border-bottom:1px solid var(--line)}
+  button{padding:6px 14px;border:0;border-radius:4px;background:#0f4c81;color:#fff;font-size:13px;cursor:pointer}
+  button.ghost{background:#fff;color:#0f4c81;border:1px solid #0f4c81}
+  .note{font-size:11.5px;color:var(--muted);line-height:1.8;padding:0 18px;margin:8px 0}
+  #stage{display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start;padding:14px 18px}
+  .page-wrap{position:relative;flex:0 0 auto;background:#fff;box-shadow:0 2px 10px rgba(15,30,50,.18);overflow:hidden}
+  .page{position:absolute;top:0;left:0;transform-origin:top left;background:#fff;color:var(--ink)}
+  .page .margins{position:absolute;border:1px dashed #cbd5e1}
+  .page .guide{position:absolute;border-left:1px dashed #e2e8f0;background:rgba(226,232,240,.25)}
+  .page .pageno{position:absolute;bottom:10px;left:0;right:0;text-align:center;font-size:8px;color:#9aa7b5}
+  .block{position:absolute;overflow:hidden}
+  .block .inner{font-size:13px;line-height:1.6;font-family:Georgia,"Noto Serif SC","SimSun",serif;text-align:justify}
+  .block.title .inner{font-size:16px;font-weight:700;line-height:1.4;text-align:center}
+  .block.authors .inner{font-size:11px;text-align:center;color:#435163}
+  .block.section .inner{font-size:13.5px;font-weight:700;color:#0f4c81}
+  .block.abstract .inner{font-size:12px}
+  .block.keywords .inner{font-size:11px;color:#435163}
+  .block.figure,.block.table,.block.equation{border:1.5px solid}
+  .block.figure{border-color:#c89a3c;background:#fafbfc}
+  .block.table{border-color:#3f9d73;background:#fafbfc}
+  .block.equation{border-color:#9b6fd0;background:#fafbfc}
+  .block .media{display:flex;align-items:center;justify-content:center;font-size:10px}
+  .block .caption{padding:5px 8px;font-size:10px;line-height:1.45;border-top:1px solid;text-align:left}
+  .block.figure .caption{border-color:#e7d19b}
+  .block.table .caption{border-color:#bfe2d2}
+  .card{background:#fff;border:1px solid var(--line);border-radius:6px;padding:12px;margin:14px 18px}
+  .card h2{font-size:13px;margin:0 0 8px}
+  pre{background:#f4f6f9;border:1px solid var(--line);border-radius:4px;padding:8px;font-size:10.5px;max-height:200px;overflow:auto}
+  .hidden{display:none}
+  @page{size:A4;margin:0}
+  @media print{
+    header,.controls,.note,.card{display:none !important}
+    body{background:#fff}
+    #stage{display:block;padding:0}
+    .page-wrap{width:210mm !important;height:297mm !important;page-break-after:always;box-shadow:none;margin:0}
+    .page{width:793.7008px !important;height:1122.5197px !important;transform:none !important}
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>P2 · 双栏中文打印导出文字层探针</h1>
+  <span class="tag">Sprint 0 · 验证 Chrome 打印 PDF 的中文文字层质量与阅读顺序</span>
+</header>
+<div class="controls">
+  <button id="print">打印 / 另存为 PDF</button>
+  <button id="copyjson" class="ghost">复制自检基准 JSON</button>
+  <span style="font-size:12px;color:var(--muted)">页面内容为确定性固定数据,导出后可复现比对</span>
+</div>
+<div class="note">
+  <b>验证流程</b>:① 点"打印 / 另存为 PDF",目标选"另存为 PDF",边距选<b>无</b>,关闭页眉页脚 → ② 把导出的 PDF 交给 P4 探针解析 → ③ P4 按同一算法抽取文字层并输出"阅读顺序 JSON" → ④ 与本页"自检基准 JSON"比对,顺序一致则<b>P2 通过</b>。
+</div>
+<div id="stage"></div>
+<div class="card">
+  <h2>自检基准 JSON(导出的 PDF 被 P4 重新解析后,应与之一致)</h2>
+  <pre id="baseline"></pre>
+</div>
+
+<script>
+'use strict';
+/* ---- 与 P3 相同的几何常量和测量(双栏简化版) ---- */
+const MM=96/25.4, PAGE={w:210*MM,h:297*MM}, MARGIN=18*MM, GUTTER=6*MM;
+const USABLE_W=PAGE.w-MARGIN*2, COL_W=(USABLE_W-GUTTER)/2, USABLE_H=PAGE.h-MARGIN*2;
+
+const measurer=document.createElement('div');
+measurer.style.cssText='position:absolute;left:-99999px;top:0;visibility:hidden;font-family:Georgia,"Noto Serif SC","SimSun",serif;text-align:justify;';
+document.body.appendChild(measurer);
+function measure(text,w,fs){measurer.style.width=w+'px';measurer.style.fontSize=fs+'px';measurer.style.lineHeight='1.6';measurer.textContent=text;return measurer.getBoundingClientRect().height;}
+function chunkText(text,w,maxH,fs){
+  if(measure(text,w,fs)<=maxH) return [{text,h:measure(text,w,fs)}];
+  const out=[]; let cur='';
+  for(const s of (text.match(/[^。！？.!?\n]+[。！？.!?]?|\n+/g)||[text])){
+    const cand=cur+s, h=measure(cand,w,fs);
+    if(h<=maxH||!cur){cur=cand;continue;}
+    out.push({text:cur,h:measure(cur,w,fs)}); cur='';
+    if(measure(s,w,fs)<=maxH){cur=s;} else {let acc=''; for(const ch of s){const t2=acc+ch,h2=measure(t2,w,fs); if(h2<=maxH){acc=t2;} else {if(acc)out.push({text:acc,h:measure(acc,w,fs)}); acc=ch;}} cur=acc;}
+  }
+  if(cur.trim()) out.push({text:cur,h:measure(cur,w,fs)});
+  return out;
+}
+
+/* ---- 确定性内容(固定,保证两次解析可比) ---- */
+const SENT=[
+ '零知识虚拟机（Zero-Knowledge Virtual Machine, zkVM）在区块链扩容与隐私计算中扮演关键角色。',
+ '执行轨迹（Trace）的生成速度直接决定了整个证明流水线的端到端延迟。',
+ '本文提出一种面向 zkVM 轨迹生成的高性能异构加速器架构。',
+ '实验结果表明，所提架构相比通用 CPU 基线取得 18.3 倍的端到端加速。',
+ '该方案的面积开销控制在 1.4 倍以内，同时保持 78% 的算术单元利用率。',
+ '相关工作分为基于 GPU 的多标量乘法加速、基于 ASIC 的 NTT 加速以及可重构 zkVM 三类。',
+ '证明者（Prover）与验证者（Verifier）之间的交互轮数保持恒定。',
+ '该模块通过双缓冲机制隐藏了数据搬运的延迟。',
+ '我们在表 1 中汇总了各配置下的关键路径延迟分解结果。'
+];
+function makeBlocks(){
+  const B=[],add=o=>B.push({id:'b'+(B.length+1),...o}),para=n=>Array.from({length:n},(_,i)=>SENT[i%SENT.length]).join('');
+  add({type:'title',text:'面向零知识虚拟机轨迹生成的高性能异构加速器',widthMode:'span',frontMatter:true,fs:16});
+  add({type:'authors',text:'作者一，作者二，作者三  东南大学集成电路学院',widthMode:'span',frontMatter:true,fs:11});
+  add({type:'abstract',text:'摘要——'+para(4),widthMode:'span',frontMatter:true,fs:12});
+  add({type:'keywords',text:'关键词：零知识虚拟机（Zero-Knowledge Virtual Machine, zkVM）；执行轨迹（Trace）；加速器（Accelerator）',widthMode:'span',frontMatter:true,fs:11});
+  add({type:'section',text:'1 引言',fs:13.5});
+  add({type:'paragraph',text:para(8),fs:13});
+  add({type:'paragraph',text:para(9),fs:13});
+  add({type:'figure',widthMode:'column',h:250,caption:'图 1：zkVM 执行阶段与证明阶段的工作流示意'});
+  add({type:'paragraph',text:para(7),fs:13});
+  add({type:'equation',widthMode:'column',h:88,label:'e = gcd(f, (x^N - 1) mod f)'});
+  add({type:'paragraph',text:para(6),fs:13});
+  add({type:'table',widthMode:'span',h:300,caption:'表 1：各配置下的关键路径延迟分解（单位：ns）'});
+  add({type:'paragraph',text:para(8),fs:13});
+  add({type:'section',text:'2 背景与相关工作',fs:13.5});
+  add({type:'paragraph',text:para(9),fs:13});
+  return B;
+}
+
+/* ---- 双栏分页(与 P3 同算法) ---- */
+function paginate(blocks){
+  const pages=[],log=[];
+  const newPage=()=>({single:{cursor:MARGIN,blocks:[]},full:{cursor:MARGIN,blocks:[]},left:{cursor:MARGIN,blocks:[]},right:{cursor:MARGIN,blocks:[]},spans:[]});
+  const TEXT=new Set(['title','authors','abstract','keywords','section','paragraph']);
+  const slots=page=>[{col:'left',x:MARGIN,w:COL_W,getH:()=>USABLE_H-(page.left.cursor-MARGIN)},{col:'right',x:MARGIN+COL_W+GUTTER,w:COL_W,getH:()=>USABLE_H-(page.right.cursor-MARGIN)}];
+  const pushCol=(p,c,b,y,h)=>{p[c].blocks.push({block:b,y,h});p[c].cursor=y+h;};
+  const pushSpan=(p,b,y,h)=>{p.spans.push({block:b,y,h});p.left.cursor=p.right.cursor=p.full.cursor=Math.max(p.full.cursor,y+h);};
+  for(const blk of blocks){
+    const fs=blk.fs||13, lineH=fs*1.6+2;
+    if(!TEXT.has(blk.type)){
+      const page=pages[pages.length-1]; let placed=false;
+      if(page&&blk.widthMode==='column'){ for(const s of slots(page)){ if(blk.h<=s.getH()+0.5){ let note=''; if(s.col==='right'&&USABLE_H-(page.left.cursor-MARGIN)>0.5){page.left.cursor=MARGIN+USABLE_H;note='left-closed';} pushCol(page,s.col,blk,page[s.col].cursor,blk.h); log.push({...blk,page:pages.length-1,col:s.col,y:page[s.col].cursor-blk.h,h:blk.h,note}); placed=true; break; } } }
+      if(!placed){ if(page&&blk.widthMode==='span'&&page.left.cursor===MARGIN&&page.right.cursor===MARGIN&&page.spans.length===0&&page.full.cursor===MARGIN){pushSpan(page,blk,MARGIN,blk.h);log.push({...blk,page:pages.length-1,col:'span',y:MARGIN,h:blk.h,note:'span'});placed=true;} }
+      if(!placed){ const p=newPage();pages.push(p); if(blk.widthMode==='span'){pushSpan(p,blk,MARGIN,blk.h);log.push({...blk,page:pages.length-1,col:'span',y:MARGIN,h:blk.h,note:'span-new'});} else {pushCol(p,'left',blk,MARGIN,blk.h);log.push({...blk,page:pages.length-1,col:'left',y:MARGIN,h:blk.h,note:'new'});} }
+      continue;
+    }
+    let rem=blk.text, guard=0;
+    while(rem.trim()&&guard++<500){
+      let page=pages[pages.length-1]; if(!page){page=newPage();pages.push(page);}
+      let slot=null;
+      if(blk.frontMatter){ slot={col:'full',w:USABLE_W,remH:USABLE_H-(page.full.cursor-MARGIN)}; }
+      else{ if(page.full.cursor>MARGIN&&page.left.cursor===MARGIN&&page.right.cursor===MARGIN)page.left.cursor=page.right.cursor=page.full.cursor;
+        for(const s of slots(page)){if(s.getH()>lineH){slot={...s,remH:s.getH()};break;}} }
+      if(!slot){const p=newPage();pages.push(p);page=p;slot={col:'left',w:COL_W,remH:USABLE_H};}
+      const chunks=chunkText(rem,slot.w,slot.remH,fs),piece=chunks[0],y=page[slot.col].cursor;
+      pushCol(page,slot.col,{...blk,text:piece.text},y,piece.h);
+      log.push({...blk,page:pages.length-1,col:slot.col,y,h:piece.h,note:chunks.length>1?'cont':''});
+      rem=chunks.slice(1).map(c=>c.text).join('');
+    }
+  }
+  return {pages,log};
+}
+
+/* ---- 渲染(预览缩放) ---- */
+const SCALE=0.4;
+function render(pages){
+  const stage=document.getElementById('stage'); stage.innerHTML='';
+  pages.forEach((page,pi)=>{
+    const wrap=document.createElement('div'); wrap.className='page-wrap';
+    wrap.style.width=PAGE.w*SCALE+'px'; wrap.style.height=PAGE.h*SCALE+'px';
+    const pg=document.createElement('div'); pg.className='page';
+    pg.style.width=PAGE.w+'px'; pg.style.height=PAGE.h+'px'; pg.style.transform=`scale(${SCALE})`;
+    const m=document.createElement('div'); m.className='margins';
+    m.style.left=MARGIN+'px';m.style.top=MARGIN+'px';m.style.width=USABLE_W+'px';m.style.height=USABLE_H+'px';pg.appendChild(m);
+    const g=document.createElement('div');g.className='guide';g.style.left=(MARGIN+COL_W+GUTTER/2)+'px';g.style.top=MARGIN+'px';g.style.height=USABLE_H+'px';pg.appendChild(g);
+    const draw=(x,w,arr)=>arr.forEach(it=>{
+      const el=document.createElement('div');el.className='block '+it.block.type;
+      el.style.left=x+'px';el.style.top=it.y+'px';el.style.width=w+'px';el.style.height=it.h+'px';
+      if(it.block.type==='figure'||it.block.type==='table'||it.block.type==='equation'){
+        const med=document.createElement('div');med.className='media';med.style.height=Math.max(30,it.h-30)+'px';
+        med.textContent=it.block.type==='figure'?'[ 图块 ]':it.block.type==='table'?'[ 表块 ]':'$ '+it.block.label+' $';el.appendChild(med);
+        const cap=document.createElement('div');cap.className='caption';cap.textContent=it.block.caption||'';el.appendChild(cap);
+      }else{const inn=document.createElement('div');inn.className='inner';inn.style.fontSize=(it.block.fs||13)+'px';inn.textContent=it.block.text;el.appendChild(inn);}
+      pg.appendChild(el);
+    });
+    draw(MARGIN,USABLE_W,page.full.blocks); draw(MARGIN,COL_W,page.left.blocks); draw(MARGIN+COL_W+GUTTER,COL_W,page.right.blocks);
+    page.spans.forEach(it=>{const el=document.createElement('div');el.className='block '+it.block.type;el.style.left=MARGIN+'px';el.style.top=it.y+'px';el.style.width=USABLE_W+'px';el.style.height=it.h+'px';const med=document.createElement('div');med.className='media';med.style.height=Math.max(30,it.h-30)+'px';med.textContent='[ 跨栏 '+it.block.type+' 块 ]';el.appendChild(med);const cap=document.createElement('div');cap.className='caption';cap.textContent=it.block.caption||'';el.appendChild(cap);pg.appendChild(el);});
+    const pn=document.createElement('div');pn.className='pageno';pn.textContent='第 '+(pi+1)+' 页';
+    pg.appendChild(pn); wrap.appendChild(pg); stage.appendChild(wrap);
+  });
+}
+
+/* ---- 自检基准 ---- */
+const blocks = makeBlocks();
+let rendered = null;
+
+function baselineJSON(){
+  const rows = rendered.log.map(l=>({page:l.page+1,col:l.col,y:Math.round(l.y),h:Math.round(l.h),type:l.type,head:(l.text||l.caption||l.label||'').slice(0,16)}));
+  return {schema:'paper-parallel.reading-order.v1',pages:rendered.pages.length,
+    order:[...new Set(rendered.log.map(l=>l.id))], rows};
+}
+function refresh(){
+  rendered = paginate(blocks);
+  render(rendered.pages);
+  document.getElementById('baseline').textContent = JSON.stringify(baselineJSON(),null,1);
+}
+refresh();
+
+document.getElementById('copyjson').onclick=async function(){
+  try{ await navigator.clipboard.writeText(JSON.stringify(baselineJSON(),null,1));
+    this.textContent='已复制 ✅'; setTimeout(()=>this.textContent='复制自检基准 JSON',1500); }
+  catch(e){ alert('复制失败,请手动选中 JSON 复制'); }
+};
+document.getElementById('print').onclick=function(){
+  document.querySelectorAll('.page-wrap').forEach(w=>{w.style.width=PAGE.w+'px';w.style.height=PAGE.h+'px';w.querySelector('.page').style.transform='scale(1)';});
+  setTimeout(()=>window.print(),150);
+};
+</script>
+</body>
+</html>

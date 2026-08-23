@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><title>P22 ZK-Tracer 全篇真实译文测试</title></head>
+<body style="font-family:Consolas,monospace;font-size:16px;padding:20px;background:#fff">
+<h1>P22 ZK-Tracer 全篇真实译文采样(本机 ZK-Tracer_中文翻译.html 全文提取)</h1>
+<div id="r" style="white-space:pre-wrap;font-size:16px;color:#0f4c81">RUNNING…</div>
+<script src="../src/core/paginate/paginator.core.js"></script>
+<script src="../src/core/translate/pipeline.core.js"></script>
+<script src="../src/core/align/alignBlocks.core.js"></script>
+<script>
+const PG=window.PaperParallelPaginator, PL=window.PaperParallelPipeline, ALB=window.PaperParallelAlignBlocks;
+const B=[];let n=0;const add=o=>B.push({id:'z'+(++n),...o});
+const T='ZK-Tracer：一种面向零知识虚拟机轨迹生成的高性能异构加速器';
+add({type:'title',text:T,fontSize:17,widthMode:'span',frontMatter:true,order:0});
+add({type:'authors',text:'Jieran Cui,Zhengkai Wen,Haowen Fang,Yinan Zhu,Jia Xiong,Cheng Ni,Mingchi Zhang,Nan Guan,Xi Wang',fontSize:11,widthMode:'span',frontMatter:true,order:1});
+add({type:'abstract',text:'零知识虚拟机（Zero-Knowledge Virtual Machine, zkVM）是推动零知识证明（Zero-Knowledge Proof, ZKP）大规模应用的关键技术，但其性能瓶颈严重制约了其实用性。我们提出了 ZK-Tracer，由一个主轨迹单元（Main Trace Unit, MTU）与多个并行的置换轨迹单元（Permutation Trace Units, PTUs）组成。',fontSize:12,widthMode:'span',frontMatter:true,order:2});
+add({type:'keywords',text:'零知识虚拟机（Zero-Knowledge Virtual Machine），硬件加速（Hardware Acceleration）',fontSize:11,widthMode:'span',frontMatter:true,order:3});
+add({type:'section',text:'1 引言',fontSize:14,order:4});
+add({type:'paragraph',text:'零知识证明（Zero-Knowledge Proofs, ZKPs）是构建下一代可信数字系统的基石。然而传统 ZKP 开发门槛极高,零知识虚拟机应运而生。',fontSize:13,order:5});
+add({type:'figure',widthMode:'column',atomicH:200,caption:'图 1：zkVM 工作流程',order:6});
+add({type:'paragraph',text:'目前硬件加速研究均只聚焦于计算密集的后端证明阶段。前端执行与轨迹生成阶段已占端到端证明时间的 20% 至 30%。',fontSize:13,order:7});
+add({type:'section',text:'2 动机与相关工作',fontSize:14,order:8});
+add({type:'section',text:'2.1 ZKP 瓶颈迁移现象',fontSize:13,order:9});
+add({type:'paragraph',text:'后端加速器的成功使前端开销被急剧放大,成为新兴瓶颈。即便后端仅保守地实现 10 倍加速,前端占比也将飙升至 80% 以上。',fontSize:13,order:10});
+add({type:'figure',widthMode:'column',atomicH:180,caption:'图 2：zkVM 轨迹生成流程',order:11});
+add({type:'figure',widthMode:'column',atomicH:180,caption:'图 3：后端加速前（左）与后端加速后（右）的性能剖析',order:12});
+add({type:'section',text:'2.2 zkVM 中的执行轨迹',fontSize:13,order:13});
+add({type:'paragraph',text:'执行轨迹由主轨迹（Main Trace）与置换轨迹（Permutation Trace）组成。置换轨迹按公式 1 计算，其中 γ 与 β 为随机挑战值。',fontSize:13,order:14});
+add({type:'equation',widthMode:'column',atomicH:60,label:'Permutation_i = 1 / (γ + Σ_j β^j A_ij)',order:15});
+add({type:'section',text:'2.3 轨迹生成工作负载分析',fontSize:13,order:16});
+add({type:'figure',widthMode:'column',atomicH:180,caption:'图 4：轨迹生成工作负载分析',order:17});
+add({type:'section',text:'3 设计与理念',fontSize:14,order:18});
+add({type:'section',text:'3.1 架构与工作流程',fontSize:13,order:19});
+add({type:'figure',widthMode:'span',atomicH:260,caption:'图 5：ZK-Tracer 架构',order:20});
+add({type:'section',text:'3.2 主轨迹单元（MTU）',fontSize:13,order:21});
+add({type:'figure',widthMode:'column',atomicH:180,caption:'图 6：主轨迹单元',order:22});
+add({type:'section',text:'3.3 置换轨迹单元（PTU）',fontSize:13,order:23});
+add({type:'figure',widthMode:'column',atomicH:180,caption:'图 7：MMAC 脉动阵列',order:24});
+add({type:'figure',widthMode:'column',atomicH:180,caption:'图 8：批量模逆单元',order:25});
+add({type:'paragraph',text:'PTU 集成了批量模逆单元,将 N 次独立求逆的开销摊薄为一次模逆与约 3(N−1) 次模乘。',fontSize:13,order:26});
+add({type:'section',text:'4 评估',fontSize:14,order:27});
+add({type:'section',text:'4.1 实验设置',fontSize:13,order:28});
+add({type:'paragraph',text:'我们选择 SP1 zkVM 作为性能基线,采用 TSMC 28nm 工艺进行 ASIC 综合,DRAM 功耗由 DRAMSim3 的 DDR4 模型评估。',fontSize:13,order:29});
+add({type:'table',widthMode:'column',atomicH:160,caption:'表 1：实验设置',order:30});
+add({type:'section',text:'4.2 性能模型仿真',fontSize:13,order:31});
+add({type:'paragraph',text:'在 GEM5 中评估 ZK-Tracer 性能开销,IPC 退化约 0%,存储器访问延迟无显著增加。',fontSize:13,order:32});
+add({type:'figure',widthMode:'column',atomicH:160,caption:'图 9：并行度分析',order:33});
+add({type:'figure',widthMode:'column',atomicH:160,caption:'图 10：MTU 与 PTU 加速比',order:34});
+add({type:'table',widthMode:'column',atomicH:120,caption:'表 2：ZK-Tracer PPA 结果',order:35});
+add({type:'section',text:'4.3 硬件实现',fontSize:13,order:36});
+add({type:'paragraph',text:'使用 SystemVerilog(约 27 kLoC)实现,基于流片验证的 SCR1 RISC-V 核心,100MHz 无时序违例,面积 0.21 mm²。',fontSize:13,order:37});
+add({type:'section',text:'4.4 性能',fontSize:13,order:38});
+add({type:'paragraph',text:'ZK-Tracer 在所有测试中展现压倒性优势,相对纯软件平均 1829 倍加速。',fontSize:13,order:39});
+add({type:'table',widthMode:'column',atomicH:180,caption:'表 3：性能对比',order:40});
+add({type:'section',text:'4.5 消融分析',fontSize:13,order:41});
+add({type:'figure',widthMode:'column',atomicH:180,caption:'图 11：消融研究',order:42});
+add({type:'section',text:'5 结论',fontSize:14,order:43});
+add({type:'paragraph',text:'我们实现了 ZK-Tracer,将轨迹生成加速最高 1829 倍,预计转化为最高 963 倍的端到端加速。',fontSize:13,order:44});
+add({type:'section',text:'致谢',fontSize:14,order:45});
+add({type:'paragraph',text:'本工作受国家自然科学基金等资助。',fontSize:13,order:46});
+add({type:'reference',text:'[1] Anees Ahmed et al. 2024. Amaze: Accelerated mimc hardware architecture...\n[2] Bing-Jyue Chen et al. 2024. Zkml: An optimizing system for ml inference...\n[3] Alhad Daftardar et al. 2025. Need for zkSpeed...',fontSize:11,order:47});
+function fakeMeasure(text,w,fs){const lh=fs*1.6,cpl=Math.max(1,Math.floor(w/(fs*1.05)));return Math.max(lh,Math.ceil([...text].length/cpl)*lh);}
+const checks=[];
+const terms=PL.extractTerms(B.map(b=>b.text||'').join('\n'));
+checks.push(['术语>=10', terms.length>=10]);
+const anchors=ALB.extractAnchors(B);
+const secs=anchors.filter(a=>a.kind==='section').map(a=>a.label);
+const figs=anchors.filter(a=>a.kind==='caption').map(a=>a.label).filter(l=>l.startsWith('fig'));
+const tabs=anchors.filter(a=>a.kind==='caption').map(a=>a.label).filter(l=>l.startsWith('tab'));
+checks.push(['章节锚点完整 1..5(含全部子节)', secs.join(',')==='sec1,sec2,sec2.1,sec2.2,sec2.3,sec3,sec3.1,sec3.2,sec3.3,sec4,sec4.1,sec4.2,sec4.3,sec4.4,sec4.5,sec5']);
+checks.push(['图锚点 1..11 不重不漏', figs.join(',')==='fig1,fig2,fig3,fig4,fig5,fig6,fig7,fig8,fig9,fig10,fig11']);
+checks.push(['表锚点 1..3', tabs.join(',')==='tab1,tab2,tab3']);
+for(const mode of ['single','double']){
+ const r=PG.paginate(B,{mode,measureText:fakeMeasure});
+ const v=PG.validateOrder(B,r.log);
+ checks.push([mode+' 分页:块序保持且页数>=3', v.ok===true&&r.pages.length>=3]);
+}
+const fails=checks.filter(c=>!c[1]);
+document.getElementById('r').textContent=(fails.length?'FAIL '+fails.length+'\n':'ALL-PASS\n')+checks.map(c=>`${c[1]?'✅':'❌'} ${c[0]}`).join('\n')+'\nblocks='+B.length+' terms='+terms.length+' secs='+secs.length+' figs='+figs.length+' tabs='+tabs.length;
+</script>
+</body>
+</html>

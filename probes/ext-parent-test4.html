@@ -1,0 +1,11 @@
+<!DOCTYPE html>
+<html><body>
+<div id="r" style="font-size:30px">pending</div>
+<script src="../src/core/paginate/paginator.core.js"></script>
+<script>
+var p = globalThis.PaperParallelPaginator.paginate;
+var v = globalThis.PaperParallelPaginator.validateOrder;
+var g = globalThis.PaperParallelPaginator.DEFAULT_GEOM;
+document.getElementById('r').textContent = (p && v && g) ? 'prop-ok' : 'prop-failed';
+</script>
+</body></html>

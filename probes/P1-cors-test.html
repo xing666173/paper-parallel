@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>P1 DeepSeek 浏览器 CORS 连通性探针 · Paper Parallel</title>
+<style>
+  :root{--ink:#1c2733;--muted:#5b6b7c;--line:#d8dee6;--bg:#eef1f5;--ok:#0a7d4f;--bad:#c0392b;--warn:#b45309}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Microsoft YaHei",system-ui,sans-serif;background:var(--bg);color:var(--ink)}
+  header{background:#101828;color:#fff;padding:12px 18px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  header h1{font-size:16px;margin:0}
+  .tag{font-size:11px;background:#1f3a5f;border:1px solid #2f5f9e;border-radius:4px;padding:2px 8px;color:#9cc7ff}
+  main{max-width:1080px;margin:16px auto;display:grid;grid-template-columns:400px 1fr;gap:14px;padding:0 14px}
+  .card{background:#fff;border:1px solid var(--line);border-radius:8px;padding:14px}
+  .card h2{font-size:14px;margin:0 0 10px}
+  label{display:block;font-size:12px;color:var(--muted);margin:10px 0 4px}
+  input[type=text],input[type=password],select{padding:7px 9px;border:1px solid var(--line);border-radius:5px;font-size:13px;width:100%}
+  button{padding:7px 16px;border:0;border-radius:5px;background:#0f4c81;color:#fff;font-size:13px;cursor:pointer;margin-top:12px}
+  button.ghost{background:#fff;color:#0f4c81;border:1px solid #0f4c81}
+  button.danger{background:#fff;color:#c0392b;border:1px solid #c0392b}
+  .row{display:flex;gap:8px;flex-wrap:wrap}
+  .note{font-size:11px;color:var(--muted);line-height:1.7;margin-top:12px;border-top:1px dashed var(--line);padding-top:10px}
+  .step{border:1px solid var(--line);border-radius:6px;padding:10px;margin-bottom:10px;font-size:12.5px}
+  .step h3{margin:0 0 6px;font-size:13px}
+  .pill{display:inline-block;border-radius:10px;padding:1px 9px;font-size:11px;font-weight:700;color:#fff}
+  .pill.ok{background:var(--ok)} .pill.bad{background:var(--bad)} .pill.warn{background:var(--warn)} .pill.idle{background:#8a97a5}
+  code,pre{background:#f4f6f9;border:1px solid var(--line);border-radius:4px;padding:2px 6px;font-size:11.5px;word-break:break-all}
+  pre{padding:8px;overflow:auto;max-height:220px}
+  .kv{font-size:11.5px;color:var(--muted);line-height:1.6}
+  .kv b{color:var(--ink)}
+  .verdict{font-size:15px;font-weight:700;padding:10px;border-radius:6px;margin-bottom:10px}
+  .verdict.ok{background:#e6f6ee;color:var(--ok)}
+  .verdict.bad{background:#fdecea;color:var(--bad)}
+  .verdict.wait{background:#eef3fa;color:#335}
+  .spinner{display:inline-block;width:12px;height:12px;border:2px solid #cbd5e1;border-top-color:#0f4c81;border-radius:50%;animation:spin .7s linear infinite;vertical-align:-2px;margin-right:6px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .demo-mark{font-size:10px;color:#b45309;border:1px dashed #d9a441;border-radius:4px;padding:1px 6px;margin-left:8px}
+</style>
+</head>
+<body>
+<header>
+  <h1>P1 · DeepSeek 浏览器 CORS 连通性探针</h1>
+  <span class="tag">Sprint 0 · 决定是否引入 Cloudflare Worker 代理</span>
+</header>
+<main>
+  <div>
+    <div class="card">
+      <h2>连接参数</h2>
+      <label>Base URL</label>
+      <input id="base" type="text" value="https://api.deepseek.com">
+      <label>接口路径</label>
+      <input id="path" type="text" value="/chat/completions">
+      <label>模型 ID(官方字段名)</label>
+      <input id="model" type="text" value="deepseek-chat">
+      <label>API Key <input id="savekey" type="checkbox" style="width:auto;vertical-align:-2px;margin-left:8px"> 保存到 localStorage(仅本机)</label>
+      <input id="key" type="password" placeholder="sk-...">
+      <div class="row">
+        <button id="run">开始测试</button>
+        <button id="demo" class="ghost">离线演示</button>
+        <button id="clear" class="danger">清除已存 Key</button>
+      </div>
+      <div class="note">
+        <b>测试内容</b>:① 浏览器预检(OPTIONS);② 真实最小请求(max_tokens=1);③ 响应头中
+        <code>Access-Control-Allow-Origin</code> 检查。<br>
+        <b>Key 安全</b>:除非勾选保存,Key 只在本页内存中,刷新即消失;本页无任何网络请求去向 DeepSeek 之外的服务器。
+      </div>
+    </div>
+    <div class="card">
+      <h2>判定标准</h2>
+      <div class="kv">
+        ① 预检与真实请求都成功,且 <code>Access-Control-Allow-Origin</code> 存在 → <b style="color:var(--ok)">通过:纯前端直连可行,不需要代理</b><br>
+        ② 请求被浏览器拦截 / 头缺失 / 报 CORS 错误 → <b style="color:var(--bad)">不通过:启用"可选代理地址"方案</b><br>
+        ③ 网络不可达 / 401(Key 错)→ 与 CORS 无关,按提示修正后重测
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>测试结果 <span id="demomark" class="demo-mark hidden">离线演示数据</span></h2>
+    <div id="verdict" class="verdict wait">等待测试……</div>
+    <div id="steps"></div>
+    <div id="detail"></div>
+  </div>
+</main>
+
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const KEY_LS = 'paper-parallel.dsKey';
+
+// 载入已存 Key
+(function(){
+  const saved = localStorage.getItem(KEY_LS);
+  if(saved){ $('key').value = saved; $('savekey').checked = true; }
+})();
+
+$('savekey').onchange = function(){
+  if(this.checked && $('key').value.trim()) localStorage.setItem(KEY_LS, $('key').value.trim());
+  if(!this.checked) localStorage.removeItem(KEY_LS);
+};
+$('key').oninput = function(){ if($('savekey').checked) localStorage.setItem(KEY_LS, this.value.trim()); };
+$('clear').onclick = function(){ localStorage.removeItem(KEY_LS); $('key').value=''; $('savekey').checked=false; };
+
+function pill(text, cls){ return `<span class="pill ${cls}">${text}</span>`; }
+function stepHtml(title, status, statusCls, body){
+  return `<div class="step"><h3>${title} ${pill(status,statusCls)}</h3><div class="kv">${body}</div></div>`;
+}
+function setVerdict(cls, text){ const v=$('verdict'); v.className='verdict '+cls; v.innerHTML=text; }
+
+async function runTest(){
+  $('demomark').classList.add('hidden');
+  $('steps').innerHTML=''; $('detail').innerHTML='';
+  setVerdict('wait', '<span class="spinner"></span>测试进行中……');
+  $('run').disabled = true;
+
+  const base = $('base').value.trim().replace(/\/+$/,'');
+  const path = $('path').value.trim() || '/chat/completions';
+  const url = base + path;
+  const model = $('model').value.trim() || 'deepseek-chat';
+  const key = $('key').value.trim();
+  if(!key){ setVerdict('bad','❌ 请先填写 API Key'); $('run').disabled=false; return; }
+  if($('savekey').checked) localStorage.setItem(KEY_LS, key);
+
+  const steps=[]; let pass=true; let status='通过';
+  const t0=performance.now();
+
+  // ① 显式预检
+  try{
+    const t1=performance.now();
+    const res = await fetch(url, {method:'OPTIONS',
+      headers:{'Origin': location.origin, 'Access-Control-Request-Method':'POST',
+               'Access-Control-Request-Headers':'authorization,content-type'}});
+    const ms=(performance.now()-t1).toFixed(0);
+    const acao = res.headers.get('access-control-allow-origin');
+    const acam = res.headers.get('access-control-allow-methods');
+    const acah = res.headers.get('access-control-allow-headers');
+    const ok = acao ? true : (res.status===204||res.status===200); // 显式预检若响应头不可读,以 HTTP 状态为准
+    steps.push({title:'① 预检 OPTIONS', ok, ms,
+      body:`HTTP ${res.status} · ${ms}ms<br>Access-Control-Allow-Origin: <b>${acao||'(无法读取)'}</b><br>`+
+           `Allow-Methods: ${acam||'-'} · Allow-Headers: ${acah||'-'}`});
+    if(!ok) pass=false;
+  }catch(e){
+    pass=false;
+    steps.push({title:'① 预检 OPTIONS', ok:false, ms:null, body:`异常: <code>${escapeHtml(String(e))}</code>`});
+  }
+
+  // ② 真实最小请求
+  try{
+    const t1=performance.now();
+    const res = await fetch(url, {method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':'Bearer '+key},
+      body: JSON.stringify({model, messages:[{role:'user',content:'ping'}], max_tokens:1, stream:false})});
+    const ms=(performance.now()-t1).toFixed(0);
+    const acao = res.headers.get('access-control-allow-origin');
+    let bodyText=''; try{ bodyText = await res.text(); }catch(_){ bodyText='(响应体读取失败)'; }
+    const ok = res.ok;
+    const bodySnippet = bodyText.length>600 ? bodyText.slice(0,600)+'…' : bodyText;
+    steps.push({title:'② 真实最小请求', ok, ms,
+      body:`HTTP ${res.status} · ${ms}ms<br>Access-Control-Allow-Origin: <b>${acao||'(无法读取)'}</b><br>`+
+           `响应体(前600字符):<pre>${escapeHtml(bodySnippet)}</pre>`});
+    if(!ok){ pass=false; status = res.status===401 ? '401:Key 无效' : '请求失败'; }
+    if(!acao){ pass=false; status='CORS 头缺失'; }
+  }catch(e){
+    pass=false;
+    steps.push({title:'② 真实最小请求', ok:false, ms:null, body:`异常: <code>${escapeHtml(String(e))}</code><br>`+
+      `若信息含 CORS / origin / blocked 字样 → 浏览器 CORS 被拦截;若含 fetch failed / Failed to fetch → 网络不可达或代理未开`});
+  }
+
+  const total=(performance.now()-t0).toFixed(0);
+  $('steps').innerHTML = steps.map(s=>stepHtml(s.title, s.ok?'OK':'失败', s.ok?'ok':'bad',
+    s.body + `<br>耗时:${s.ms? s.ms+'ms':'-'} · 总耗时:${total}ms`)).join('');
+
+  const issues = steps.filter(s=>!s.ok).length;
+  if(pass){
+    status='全部通过';
+    setVerdict('ok', `✅ CORS 连通性${status} —— 浏览器直连 DeepSeek 可行,无需代理;<br>主流程可继续按纯静态方案开发。`);
+    $('detail').innerHTML = '<div class="kv"><b>结论</b>:P1 通过。设置页将按"直连默认 + 可选代理地址字段"实现。</div>';
+  } else {
+    setVerdict('bad', `❌ 未通过(${status}) —— 存在 ${issues} 个失败项;按预案:启用可选代理地址,并附 Cloudflare Worker 代理模板。`);
+  }
+  $('run').disabled = false;
+}
+
+// 离线演示:不联网,直接展示两种典型结果的界面形态(用于 UI 调试与用户预览)
+function runDemo(){
+  $('demomark').classList.remove('hidden');
+  setVerdict('ok','✅ 演示:假设结果——浏览器直连 DeepSeek 可行(真实结果请点"开始测试")');
+  $('steps').innerHTML =
+    stepHtml('① 预检 OPTIONS','OK','ok','HTTP 204 · 182ms<br>Access-Control-Allow-Origin: <b>https://example.github.io</b>') +
+    stepHtml('② 真实最小请求','OK','ok','HTTP 200 · 1267ms<br>Access-Control-Allow-Origin: <b>https://example.github.io</b><br>响应体:<pre>{"choices":[{"message":{"content":"pong"}}]}</pre>');
+  $('detail').innerHTML='<div class="kv">演示数据不代表真实连通性。</div>';
+}
+
+function escapeHtml(s){ return s.replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+$('run').onclick = runTest;
+$('demo').onclick = runDemo;
+</script>
+</body>
+</html>

@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>P9 打印导出渲染器探针 · Paper Parallel Sprint 2</title>
+<style>
+  :root{--ink:#1c2733;--muted:#5b6b7c;--line:#d8dee6;--bg:#eef1f5}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Microsoft YaHei",system-ui,sans-serif;background:var(--bg);color:var(--ink)}
+  header{background:#101828;color:#fff;padding:12px 18px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  header h1{font-size:16px;margin:0}
+  .tag{font-size:11px;background:#1f3a5f;border:1px solid #2f5f9e;border-radius:4px;padding:2px 8px;color:#9cc7ff}
+  .controls{display:flex;gap:10px;align-items:center;padding:10px 18px;background:#fff;border-bottom:1px solid var(--line);flex-wrap:wrap}
+  button{padding:6px 14px;border:0;border-radius:4px;background:#0f4c81;color:#fff;font-size:13px;cursor:pointer}
+  button.ghost{background:#fff;color:#0f4c81;border:1px solid #0f4c81}
+  select{padding:5px 8px;border:1px solid var(--line);border-radius:4px}
+  main{padding:14px 18px}
+  .card{background:#fff;border:1px solid var(--line);border-radius:8px;padding:14px;margin-bottom:14px}
+  .card h2{font-size:14px;margin:0 0 10px}
+  .ok{color:#0a7d4f;font-weight:700}.bad{color:#c0392b;font-weight:700}
+  .kv{font-size:12px;color:var(--muted);line-height:1.8}
+  #stage{display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start}
+  /* A4 页面:内部用 px(96dpi),打印时物理 210×297mm */
+  .print-page{position:relative;background:#fff;box-shadow:0 2px 10px rgba(15,30,50,.18);overflow:hidden;transform-origin:top left}
+  .margins{position:absolute;border:1px dashed #cbd5e1;pointer-events:none}
+  .guide{position:absolute;border-left:1px dashed #e2e8f0;pointer-events:none}
+  .pageno{position:absolute;bottom:8px;left:0;right:0;text-align:center;font-size:8px;color:#9aa7b5}
+  .blk{position:absolute;overflow:hidden}
+  .blk .inner{font-size:13px;line-height:1.6;font-family:Georgia,"Noto Serif SC","SimSun",serif;text-align:justify}
+  .blk.title .inner{font-size:17px;font-weight:700;line-height:1.35;text-align:center}
+  .blk.authors .inner{font-size:11px;text-align:center;color:#435163}
+  .blk.section .inner{font-size:14px;font-weight:700;color:#0f4c81}
+  .blk.keywords .inner{font-size:11.5px;color:#435163}
+  .blk.abstract .inner{font-size:12.5px}
+  .blk.reference .inner{font-size:11px}
+  .blk.figure,.blk.table,.blk.equation{border:1.5px solid}
+  .blk.figure{border-color:#c89a3c;background:#fafbfc}
+  .blk.table{border-color:#3f9d73;background:#fafbfc}
+  .blk.equation{border-color:#9b6fd0;background:#fafbfc}
+  .blk .media{display:flex;align-items:center;justify-content:center;font-size:10px;letter-spacing:1px}
+  .blk .caption{padding:5px 8px;font-size:10px;line-height:1.45;border-top:1px solid;text-align:left}
+  .blk.figure .caption{border-color:#e7d19b}
+  .blk.table .caption{border-color:#bfe2d2}
+  .blk .scaled{position:absolute;top:2px;right:4px;color:#b45309;font-size:8px;font-weight:700}
+  pre{background:#f4f6f9;border:1px solid var(--line);border-radius:4px;padding:8px;font-size:10.5px;max-height:180px;overflow:auto}
+  #toast{position:fixed;right:16px;bottom:16px;background:#101828;color:#fff;border-radius:8px;padding:10px 14px;z-index:99;max-width:500px;font-size:12px}
+  .hidden{display:none}
+  @page{size:A4;margin:0}
+  @media print{
+    header,.controls,.card{display:none !important}
+    body{background:#fff}
+    #stage{display:block;padding:0}
+    .page-wrap{width:210mm !important;height:297mm !important;page-break-after:always;margin:0}
+    .print-page{width:210mm !important;height:297mm !important;box-shadow:none;transform:none !important}
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>P9 · 打印导出渲染器探针</h1>
+  <span class="tag">Sprint 2 · 分页结果 → A4 DOM · 屏幕=打印 · 布局审计</span>
+</header>
+<div class="controls">
+  <label style="font-size:12px;color:var(--muted)">版式
+    <select id="mode">
+      <option value="double" selected>双栏</option>
+      <option value="single">单栏</option>
+      <option value="mixed">混合</option>
+    </select>
+  </label>
+  <button id="render">重新渲染</button>
+  <button id="print" class="ghost">打印 / 另存为 PDF</button>
+  <button id="audit" class="ghost">布局审计</button>
+</div>
+<main>
+  <div class="card"><h2>渲染与审计</h2><div id="assert" class="kv"></div></div>
+  <div id="stage"></div>
+  <div class="card"><h2>布局 JSON(打印导出依据)</h2><pre id="json"></pre></div>
+</main>
+<div id="toast" class="hidden"></div>
+
+<script src="../src/core/paginate/paginator.core.js"></script>
+<script>
+'use strict';
+const core = globalThis.PaperParallelPaginator;
+const paginate = core.paginate, validateOrder = core.validateOrder;
+const g = core.DEFAULT_GEOM;
+const $=id=>document.getElementById(id);
+function toast(m){const d=$('toast');d.textContent=m;d.classList.remove('hidden');clearTimeout(toast._t);toast._t=setTimeout(()=>d.classList.add('hidden'),6000);}
+
+/* DOM 测量(与 P3 相同) */
+const measurer=document.createElement('div');
+measurer.style.cssText='position:absolute;left:-99999px;top:0;visibility:hidden;font-family:Georgia,"Noto Serif SC","SimSun",serif;text-align:justify;';
+document.body.appendChild(measurer);
+function domMeasure(text,w,fs){measurer.style.width=w+'px';measurer.style.fontSize=fs+'px';measurer.style.lineHeight='1.6';measurer.textContent=text;return measurer.getBoundingClientRect().height;}
+
+/* 与 P3 相同的确定性假数据 */
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+const SENT=['零知识虚拟机（Zero-Knowledge Virtual Machine, zkVM）在区块链扩容与隐私计算中扮演关键角色。','执行轨迹（Trace）的生成速度直接决定了整个证明流水线的端到端延迟。','本文提出一种面向 zkVM 轨迹生成的高性能异构加速器架构，将访存密集与计算密集子任务分离。','实验结果表明，所提架构相比通用 CPU 基线取得 18.3 倍的端到端加速。','具体而言，我们重新设计了寄存器文件的读写端口以避免结构冲突。','约束系统在证明生成阶段被编译为低层原语序列，其依赖图具有明显的稀疏特征。','该方案的面积开销控制在 1.4 倍以内，同时保持 78% 的算术单元利用率。','为了验证设计有效性，我们在 FPGA 原型与 28nm 工艺库下分别进行了综合与布局布线评估。','相关工作主要分为三类：基于 GPU 的多标量乘法加速、基于 ASIC 的 NTT 加速以及可重构 zkVM。','与已有工作不同，我们的方法不需要改变应用层的密码学假设。','流水线深度的选取需要在吞吐率、频率与片上存储容量之间进行权衡。','我们在表 1 中汇总了各配置下的关键路径延迟分解结果。','上述结果表明，通信瓶颈可以被局部性感知的调度策略有效缓解。','证明者（Prover）与验证者（Verifier）之间的交互轮数保持恒定，不随电路规模增长。','该模块通过双缓冲机制隐藏了数据搬运的延迟。','我们进一步分析了不同批大小对缓存命中率与带宽利用率的影响。','安全性分析表明，该优化不改变原有协议的可满足性（Soundness）与零知识性。','在对比实验中，基线平台采用 Intel Xeon 处理器与 128GB 主存配置。'];
+const SECTIONS=['1 引言','2 背景与相关工作','3 架构设计','4 实验评估','5 结论'];
+function makeBlocks(){
+  const B=[];let n=0;const add=o=>B.push({id:'zh-b'+(++n),...o});const rand=mulberry32(42);
+  const para=len=>Array.from({length:len},()=>SENT[Math.floor(rand()*SENT.length)]).join('');
+  add({type:'title',text:'面向零知识虚拟机轨迹生成的高性能异构加速器',widthMode:'span',frontMatter:true,fontSize:17});
+  add({type:'authors',text:'作者一，作者二，作者三  东南大学集成电路学院',widthMode:'span',frontMatter:true,fontSize:11});
+  add({type:'abstract',text:'摘要——'+para(4),widthMode:'span',frontMatter:true,fontSize:12.5});
+  add({type:'keywords',text:'关键词：零知识虚拟机（Zero-Knowledge Virtual Machine, zkVM）；执行轨迹（Trace）；加速器（Accelerator）',widthMode:'span',frontMatter:true,fontSize:11.5});
+  add({type:'section',text:SECTIONS[0],fontSize:14});add({type:'paragraph',text:para(8),fontSize:13});add({type:'paragraph',text:para(9),fontSize:13});
+  add({type:'figure',widthMode:'column',atomicH:250,caption:'图 1：zkVM 执行阶段与证明阶段的工作流示意图'});
+  add({type:'paragraph',text:para(7),fontSize:13});add({type:'section',text:SECTIONS[1],fontSize:14});add({type:'paragraph',text:para(10),fontSize:13});
+  add({type:'equation',widthMode:'column',atomicH:88,label:'e = gcd(f, (x^N - 1) mod f)'});add({type:'paragraph',text:para(6),fontSize:13});
+  add({type:'table',widthMode:'span',atomicH:300,caption:'表 1：各配置下的关键路径延迟分解（单位：ns）'});
+  add({type:'paragraph',text:para(8),fontSize:13});add({type:'section',text:SECTIONS[2],fontSize:14});
+  add({type:'paragraph',text:para(11),fontSize:13});add({type:'paragraph',text:para(9),fontSize:13});add({type:'paragraph',text:para(10),fontSize:13});
+  add({type:'figure',widthMode:'span',atomicH:330,caption:'图 2：所提异构加速器的整体架构（跨双栏宽）'});
+  add({type:'paragraph',text:para(8),fontSize:13});add({type:'paragraph',text:para(7),fontSize:13});add({type:'section',text:SECTIONS[3],fontSize:14});
+  add({type:'paragraph',text:para(10),fontSize:13});add({type:'table',widthMode:'column',atomicH:260,caption:'表 2：与已有加速器的面积/性能对比'});
+  add({type:'paragraph',text:para(9),fontSize:13});add({type:'equation',widthMode:'column',atomicH:80,label:'T_total = T_trace + T_commit + T_prove'});
+  add({type:'paragraph',text:para(8),fontSize:13});add({type:'section',text:SECTIONS[4],fontSize:14});add({type:'paragraph',text:para(6),fontSize:13});add({type:'paragraph',text:para(5),fontSize:13});
+  add({type:'reference',text:'[1] 作者等. ZK-Tracer: A High-Performance Heterogeneous Accelerator...\n[2] 作者等. PipeZK: Accelerating Zero-Knowledge Proof...',fontSize:11});
+  add({type:'table',widthMode:'span',atomicH:1180,caption:'表 3：完整工艺角与时序报告汇总（刻意超高超大,用于测试降级缩放）'});
+  return B;
+}
+
+let last=null;
+function render(){
+  const mode=$('mode').value;
+  const blocks=makeBlocks();
+  const result=paginate(blocks,{mode,measureText:domMeasure});
+  const order=validateOrder(blocks,result.log);
+  last={mode,blocks,result,order};
+  const stage=$('stage');stage.innerHTML='';
+  const SCALE=0.4;
+  result.pages.forEach((page,pi)=>{
+    const wrap=document.createElement('div');wrap.className='page-wrap';
+    wrap.style.width=g.w*SCALE+'px';wrap.style.height=g.h*SCALE+'px';
+    const pg=document.createElement('div');pg.className='print-page';
+    pg.style.width=g.w+'px';pg.style.height=g.h+'px';pg.style.transform=`scale(${SCALE})`;
+    const m=document.createElement('div');m.className='margins';
+    m.style.left=g.margin+'px';m.style.top=g.margin+'px';m.style.width=g.usableW+'px';m.style.height=g.usableH+'px';pg.appendChild(m);
+    if(page.mode!=='single'){const gl=document.createElement('div');gl.className='guide';
+      gl.style.left=(g.margin+g.colW+g.gutter/2)+'px';gl.style.top=g.margin+'px';gl.style.height=g.usableH+'px';pg.appendChild(gl);}
+    const draw=(col,colName,x,w)=>col.blocks.forEach(it=>{
+      const el=document.createElement('div');el.className='blk '+it.block.type;
+      el.style.left=x+'px';el.style.top=it.y+'px';el.style.width=w+'px';el.style.height=it.h+'px';
+      el.dataset.block=it.block.id;el.dataset.col=colName;
+      if(['figure','table','equation'].includes(it.block.type)){
+        const med=document.createElement('div');med.className='media';med.style.height=Math.max(28,it.h-32)+'px';
+        med.textContent=it.block.type==='figure'?'[ 原论文图块,保持英文标注 ]':it.block.type==='table'?'[ 表格:结构提取→单元格翻译→HTML 重建 ]':'$ '+it.block.label+' $';
+        el.appendChild(med);
+        const cap=document.createElement('div');cap.className='caption';cap.textContent=it.block.caption||'';el.appendChild(cap);
+        if(it.h>=g.usableH-1){const s=document.createElement('div');s.className='scaled';s.textContent='⚠ 已缩放';el.appendChild(s);}
+      }else{
+        const inn=document.createElement('div');inn.className='inner';inn.style.fontSize=(it.block.fontSize||13)+'px';inn.textContent=it.block.text;el.appendChild(inn);
+      }
+      pg.appendChild(el);
+    });
+    if(page.mode==='single')draw(page.single,'single',g.margin,g.usableW);
+    else{draw(page.full,'full',g.margin,g.usableW);draw(page.left,'left',g.margin,g.colW);draw(page.right,'right',g.margin+g.colW+g.gutter,g.colW);}
+    page.spans.forEach(it=>{
+      const el=document.createElement('div');el.className='blk '+it.block.type;
+      el.style.left=g.margin+'px';el.style.top=it.y+'px';el.style.width=g.usableW+'px';el.style.height=it.h+'px';
+      el.dataset.block=it.block.id;el.dataset.col='span';
+      const med=document.createElement('div');med.className='media';med.style.height=Math.max(28,it.h-32)+'px';
+      med.textContent='[ 跨栏 '+it.block.type+' 块 ]';el.appendChild(med);
+      const cap=document.createElement('div');cap.className='caption';cap.textContent=it.block.caption||'';el.appendChild(cap);
+      if(it.h>=g.usableH-1){const s=document.createElement('div');s.className='scaled';s.textContent='⚠ 已缩放';el.appendChild(s);}
+      pg.appendChild(el);
+    });
+    const pn=document.createElement('div');pn.className='pageno';pn.textContent='第 '+(pi+1)+' 页 · '+(page.mode==='single'?'单栏':page.mode==='double'?'双栏':'混合');
+    pg.appendChild(pn);wrap.appendChild(pg);stage.appendChild(wrap);
+  });
+  $('assert').innerHTML=`<b>${mode}</b> · 页数:<b>${result.pages.length}</b> · 块序校验:<span class="${order.ok?'ok':'bad'}">${order.ok?'✅ 通过':'❌ 失败'}</span> · 超高块降级:<b>${result.issues.length}</b> 处(已缩放并标人工) · 请点"布局审计"`;
+  $('json').textContent=JSON.stringify({schema:'paper-parallel.layout.v1',mode,pages:result.pages.length,
+    placements:result.log.map(l=>({page:l.page+1,col:l.col,y:Math.round(l.y),h:Math.round(l.h),id:l.id,type:l.type}))},null,1);
+}
+
+function audit(){
+  if(!last){toast('先渲染');return;}
+  const pages=last.result.pages, issues=[];
+  const bottom=g.margin+g.usableH;
+  pages.forEach((page,pi)=>{
+    const cols=page.mode==='single'?['single']:['full','left','right'];
+    for(const c of cols){ for(const it of page[c].blocks){ if(it.y+it.h>bottom+0.5) issues.push(`p${pi+1} ${c} ${it.block.id} 越界 ${(it.y+it.h-bottom).toFixed(1)}px`); } }
+    for(const it of page.spans){ if(it.y+it.h>bottom+0.5) issues.push(`p${pi+1} span ${it.block.id} 越界`); }
+  });
+  // DOM 数量与数据一致
+  const domBlocks=document.querySelectorAll('.print-page .blk').length;
+  const dataBlocks=pages.reduce((n,p)=>n+p.spans.length+(p.mode==='single'?p.single.blocks.length:p.full.blocks.length+p.left.blocks.length+p.right.blocks.length),0);
+  if(domBlocks!==dataBlocks) issues.push(`DOM 块数 ${domBlocks} ≠ 数据块数 ${dataBlocks}`);
+  $('assert').innerHTML=(issues.length?`<span class="bad">❌ 审计发现 ${issues.length} 个问题</span><br>`:'<span class="ok">✅ 布局审计通过:无越界,DOM 与数据一致</span><br>')+issues.map(escapeHtml).join('<br>');
+}
+function escapeHtml(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+$('render').onclick=render;
+$('print').onclick=function(){
+  document.querySelectorAll('.print-page').forEach(p=>p.style.transform='scale(1)');
+  setTimeout(()=>window.print(),150);
+};
+$('audit').onclick=audit;
+render();
+audit(); // 自动审计,便于截图 debug
+</script>
+</body>
+</html>

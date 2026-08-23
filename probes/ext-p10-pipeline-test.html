@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><title>P10 pipeline test</title></head>
+<body style="font-family:Consolas,monospace;font-size:16px;padding:20px;background:#fff">
+<h1>P10 translation pipeline minimal test</h1>
+<div id="r" style="white-space:pre-wrap;font-size:19px;color:#0f4c81">RUNNING…</div>
+<script src="../src/core/translate/pipeline.core.js"></script>
+<script>
+const core=window.PaperParallelPipeline;
+const calls=[];
+async function mockTranslate(ctx){
+  calls.push({pass:ctx.pass,blockId:ctx.block&&ctx.block.id,attempt:ctx.attempt,terms:ctx.terms.length});
+  if(ctx.pass===1)return '本章围绕零知识虚拟机（Zero-Knowledge Virtual Machine, zkVM）展开。执行轨迹（Trace）是关键。加速器（Accelerator）用于卸载。';
+  const t=(ctx.block.text||'').trim();
+  if(t.includes('FAIL_FOREVER'))throw new Error('permanent');
+  if(t.includes('FAIL_ONCE')&&ctx.attempt===0)throw new Error('transient');
+  if(t.includes('BAD_PREFIX')&&ctx.attempt===0)return '翻译说明:说明性文字不应作为译文。';
+  if(ctx.block.type==='section')return t;
+  return '已译：'+(t.includes('execution trace')?'执行轨迹（Trace）的生成速度决定延迟。':'该段落描述架构设计与实验配置。');
+}
+const blocks=[
+ {id:'b01',type:'section',text:'1 Introduction',order:0},
+ {id:'b02',type:'paragraph',text:'The execution trace generation dominates latency.',order:1},
+ {id:'b03',type:'paragraph',text:'FAIL_ONCE transient.',order:2},
+ {id:'b04',type:'paragraph',text:'BAD_PREFIX validation.',order:3},
+ {id:'b05',type:'paragraph',text:'FAIL_FOREVER always fails.',order:4},
+ {id:'b06',type:'paragraph',text:'The proposed architecture reduces memory traffic.',order:5},
+];
+core.runTranslationPipeline(blocks,{translate:mockTranslate,maxRetries:2,systemPrompt:'SYS',userPrompt:'USR'}).then(res=>{
+ const ch=[
+  ['pass1>=1',res.stats.pass1Chapters>=1],
+  ['terms3',res.terms.length>=3],
+  ['order',JSON.stringify(res.blocks.map(b=>b.id))===JSON.stringify(blocks.map(b=>b.id))],
+  ['transient-retry',res.blocks.find(b=>b.id==='b03').status==='done'&&res.blocks.find(b=>b.id==='b03').attempts===2],
+  ['validation-retry',res.blocks.find(b=>b.id==='b04').attempts===2],
+  ['forever-fail-then-continue',res.blocks.find(b=>b.id==='b05').status==='failed'&&res.blocks.find(b=>b.id==='b06').status==='done'],
+  ['terms-injected',calls.filter(c=>c.pass===2&&c.blockId==='b06').every(c=>c.terms>=3)],
+  ['assembled-ok',res.assembled.includes('执行轨迹')&&!res.assembled.includes('翻译说明:')]
+ ];
+ const fails=ch.filter(c=>!c[1]);
+ document.getElementById('r').textContent=(fails.length?'FAIL '+fails.length+'\n':'ALL-PASS\n')+ch.map(c=>`${c[1]?'✅':'❌'} ${c[0]}`).join('\n')+'\nstats='+JSON.stringify(res.stats)+'\nterms='+res.terms.map(t=>t.abbr||t.en).join(',');
+}).catch(e=>{document.getElementById('r').textContent='EXCEPTION '+e.message;});
+</script>
+</body>
+</html>

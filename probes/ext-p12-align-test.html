@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><title>P12 align test</title></head>
+<body style="font-family:Consolas,monospace;font-size:16px;padding:20px;background:#fff">
+<h1>P12 alignment engine minimal test</h1>
+<div id="r" style="white-space:pre-wrap;font-size:19px;color:#0f4c81">RUNNING…</div>
+<script src="../src/core/align/align.core.js"></script>
+<script>
+const A=window.PaperParallelAlign;
+const KW=[
+ ['trace generation','执行轨迹生成'],['execution trace','执行轨迹'],['accelerator','加速器'],
+ ['latency','延迟'],['propose','提出'],['speedup','加速'],['architecture','架构'],['memory','内存']
+];
+function kwScore(a,b){a=a.toLowerCase();b=b.toLowerCase();let hit=0;for(const [en,zh] of KW){if(a.includes(en)&&b.includes(zh))hit++;}return Math.min(1,hit/Math.max(1,KW.length/3));}
+(async()=>{
+ const lines=[];
+ // 1 分句
+ const ens=A.splitSentences('The trace generation dominates latency. We propose an accelerator.');
+ const zhs=A.splitSentences('执行轨迹的生成主导了延迟。我们提出一种加速器。');
+ lines.push(['split EN=2 ZH=2', ens.length===2&&zhs.length===2]);
+
+ // 2 简单 1:1
+ let r=await A.alignSentenceSequences(ens,zhs,async(i,j)=>kwScore(ens[i],zhs[j]));
+ lines.push(['1:1 全部匹配', r.units.filter(u=>u.enIndices.length&&u.zhIndices.length).length===2 && r.matchedEn===2]);
+
+ // 3 合句 2:1
+ const en2=['The trace generation dominates latency.','We propose an accelerator.'];
+ const zh2=['执行轨迹的生成主导了延迟,我们提出一种加速器。'];
+ r=await A.alignSentenceSequences(en2,zh2,async(i,j)=>kwScore(en2[i],zh2[j]));
+ lines.push(['2:1 合句对齐', r.units.some(u=>u.enIndices.length===2&&u.zhIndices.length===1)]);
+
+ // 4 漏译:en 多一句 -> 1:0
+ const en3=['The trace generation dominates latency.','We propose an accelerator.'];
+ const zh3=['执行轨迹的生成主导了延迟。'];
+ r=await A.alignSentenceSequences(en3,zh3,async(i,j)=>kwScore(en3[i],zh3[j]));
+ lines.push(['漏译 1:0 处理', r.units.some(u=>u.enIndices.length===1&&u.zhIndices.length===0)]);
+
+ // 5 无关联 -> 整段降级
+ r=await A.alignBlockPair({id:'en',text:'Quantum field theory describes fundamental interactions.'},{id:'zh',text:'本文研究完全无关的另一主题。'},{scoreFn:async()=>0,minConfidence:0.35});
+ lines.push(['低置信度降级 paragraph', r.level==='paragraph'&&r.units[0].fallback===true]);
+
+ // 6 正常块对 + span 校验(含非法 span)
+ r=await A.alignBlockPair(
+  {id:'en',text:'We propose a hardware accelerator for trace generation. It reduces latency.'},
+  {id:'zh',text:'我们为执行轨迹生成提出一种硬件加速器。它降低了延迟。'},
+  {scoreFn:async(i,j)=>{const e=['We propose a hardware accelerator for trace generation.','It reduces latency.'];const z=['我们为执行轨迹生成提出一种硬件加速器。','它降低了延迟。'];return kwScore(e[i],z[j]);},
+   spansForPair:async({enText,zhText})=>[{en:'hardware accelerator',zh:'硬件加速器'},{en:'trace generation',zh:'执行轨迹生成'},{en:'not present',zh:'不存在'}]});
+ lines.push(['句级对齐 2 句', r.level==='sentence'&&r.units.length===2]);
+ lines.push(['合法 span 保留=2', r.spans.length===2&&r.spans.every(s=>s.validated)]);
+ lines.push(['非法 span 丢弃', !r.spans.some(s=>s.zh.includes('不存在'))]);
+
+ const fails=lines.filter(l=>!l[1]);
+ document.getElementById('r').textContent=(fails.length?'FAIL '+fails.length+'\n':'ALL-PASS\n')+lines.map(l=>`${l[1]?'✅':'❌'} ${l[0]}`).join('\n');
+})().catch(e=>{document.getElementById('r').textContent='EXCEPTION '+e.message+'\n'+e.stack;});
+</script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+<!DOCTYPE html>
+<html><body>
+<div id="r" style="font-size:22px;white-space:pre-wrap">pending</div>
+<script>window.onerror=function(m,src,line,col){document.getElementById('r').textContent='ERR:'+m+' @'+src+':'+line+':'+col; return true;};</script>
+<script src="../src/core/translate/pipeline.core.js"></script>
+<script src="../src/core/translate/session.core.js"></script>
+<script>
+document.getElementById('r').textContent='P='+(typeof window.PaperParallelPipeline)+' S='+(typeof window.PaperParallelTranslateSession);
+</script>
+</body></html>

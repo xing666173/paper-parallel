@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><title>P16 audit test</title></head>
+<body style="font-family:Consolas,monospace;font-size:16px;padding:20px;background:#fff">
+<h1>P16 rule-audit engine test</h1>
+<div id="r" style="white-space:pre-wrap;font-size:18px;color:#0f4c81">RUNNING…</div>
+<script src="../src/core/audit/audit.core.js"></script>
+<script>
+const A=window.PaperParallelAudit;
+function baseFixtures(){
+ const en=[
+  {id:'e-t',type:'title',text:'A High-Performance Accelerator',order:0},
+  {id:'e-s1',type:'section',text:'1 Introduction',order:1},
+  {id:'e-p1',type:'paragraph',text:'It achieves 18.3x speedup in 2024.',order:2},
+  {id:'e-f',type:'figure',text:'Figure 1: Workflow',order:3},
+  {id:'e-p2',type:'paragraph',text:'The architecture reduces latency.',order:4},
+  {id:'e-tab',type:'table',text:'Table 1: Results',order:5},
+  {id:'e-eq',type:'equation',text:'(1)',order:6},
+  {id:'e-s2',type:'section',text:'2 Background',order:7},
+  {id:'e-ref',type:'reference',text:'[1] Prior work.',order:8},
+ ];
+ const zh=[
+  {id:'z-t',type:'title',text:'高性能加速器（zkVM）',order:0},
+  {id:'z-s1',type:'section',text:'1 引言',order:1},
+  {id:'z-p1',type:'paragraph',text:'它在 2024 年取得 18.3 倍加速。',order:2},
+  {id:'z-f',type:'figure',text:'图 1:工作流',order:3},
+  {id:'z-p2',type:'paragraph',text:'该架构降低了延迟。',order:4},
+  {id:'z-tab',type:'table',text:'表 1:结果',order:5},
+  {id:'z-eq',type:'equation',text:'(1)',order:6},
+  {id:'z-s2',type:'section',text:'2 背景',order:7},
+  {id:'z-ref',type:'reference',text:'[1] 已有工作。',order:8},
+ ];
+ const pairs=[['e-t','z-t'],['e-s1','z-s1'],['e-p1','z-p1'],['e-p2','z-p2'],['e-s2','z-s2'],['e-ref','z-ref']].map(([a,b])=>({enBlockId:a,zhBlockId:b,zhText:zh.find(x=>x.id===b).text}));
+ return {en,zh,pairs};
+}
+const checks=[];
+// 正常夹具:零错误
+let fx=baseFixtures();
+let r=A.runRuleAudit({enBlocks:fx.en,zhBlocks:fx.zh,pairs:fx.pairs,terms:[{zh:'零知识虚拟机',en:'Zero-Knowledge Virtual Machine',abbr:'zkVM'}]});
+checks.push(['正常论文:pass=true 且 0 error', r.pass===true&&r.errors===0&&r.warns===0]);
+// 埋错夹具
+fx=baseFixtures();
+fx.zh.splice(7,1,{id:'z-s2',type:'section',text:'3 背景',order:7});           // R2
+fx.zh.splice(5,1);                                                            // 表题消失 -> R1 + R3
+fx.pairs[2].zhText='翻译说明:这是一段说明。';                                  // R7
+fx.pairs=fx.pairs.filter(p=>p.enBlockId!=='e-p2');                            // R4 漏配
+fx.zh[2].text='它取得 18.3 倍加速。';                                          // 2024 数字缺失 -> R8
+r=A.runRuleAudit({enBlocks:fx.en,zhBlocks:fx.zh,pairs:fx.pairs,terms:[{zh:'零知识虚拟机',en:'Zero-Knowledge Virtual Machine',abbr:'ABC'}]});
+const rules=r.issues.map(i=>i.rule);
+checks.push(['埋错:不通过', r.pass===false]);
+checks.push(['埋错:R1/R2/R3/R4/R7 至少各一条 error', ['R1','R2','R3','R4','R7'].every(x=>rules.includes(x))]);
+checks.push(['埋错:R6/R8 至少各一条 warn', rules.includes('R6')&&rules.includes('R8')]);
+const errIssues=r.issues.filter(i=>i.severity==='error');
+checks.push(['门禁语义:存在 error 即不通过', (errIssues.length>0)===!r.pass]);
+const fails=checks.filter(c=>!c[1]);
+document.getElementById('r').textContent=(fails.length?'FAIL '+fails.length+'\n':'ALL-PASS\n')+checks.map(c=>`${c[1]?'✅':'❌'} ${c[0]}`).join('\n')+'\nissues='+JSON.stringify(r.issues.map(i=>i.rule+':'+i.severity));
+</script>
+</body>
+</html>

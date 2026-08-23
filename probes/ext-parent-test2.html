@@ -1,0 +1,9 @@
+<!DOCTYPE html>
+<html><body>
+<div id="r" style="font-size:30px">pending</div>
+<script src="../src/core/paginate/paginator.core.js"></script>
+<script>
+const { paginate, validateOrder, DEFAULT_GEOM } = globalThis.PaperParallelPaginator;
+document.getElementById('r').textContent = (paginate && validateOrder && DEFAULT_GEOM) ? 'destructure-ok' : 'destructure-failed';
+</script>
+</body></html>

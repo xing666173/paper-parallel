@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><title>P14 reader core test</title></head>
+<body style="font-family:Consolas,monospace;font-size:16px;padding:20px;background:#fff">
+<h1>P14 reader sync/highlight core test</h1>
+<div id="r" style="white-space:pre-wrap;font-size:18px;color:#0f4c81">RUNNING…</div>
+<script src="../src/core/reader/reader.core.js"></script>
+<script>
+(async()=>{
+const R=window.PaperParallelReader;
+const pageH=1000, viewportH=300;
+const enBlocks=[
+ {id:'ep1',pageIndex:0,rect:{y:100,h:80}},
+ {id:'ep2',pageIndex:1,rect:{y:200,h:80}},
+ {id:'ep3',pageIndex:2,rect:{y:300,h:80}},
+];
+const zhBlocks=[
+ {id:'zp1',pageIndex:0,rect:{y:500,h:100}},
+ {id:'zp2',pageIndex:1,rect:{y:100,h:100}},
+ {id:'zp3',pageIndex:1,rect:{y:600,h:100}},
+];
+const units=[
+ {enBlockIds:['ep1'],zhBlockIds:['zp1']},
+ {enBlockIds:['ep2'],zhBlockIds:['zp2']},
+ {enBlockIds:['ep3'],zhBlockIds:['zp3']},
+];
+const enIdx=R.buildPositionIndex(enBlocks,pageH);
+const zhIdx=R.buildPositionIndex(zhBlocks,pageH);
+const unitIdx=R.buildUnitIndex(units);
+const checks=[];
+// 右->左:zp1
+let c=R.resolveSyncCommand(enIdx,zhIdx,units,unitIdx,'zh',400,viewportH);
+checks.push(['zh zp1 -> en ep1 目标滚动居中钳制为0', c&&c.unitIndex===0&&c.targetBlockIds[0]==='ep1'&&c.targetScrollTop===0]);
+// 右->左:zp2
+c=R.resolveSyncCommand(enIdx,zhIdx,units,unitIdx,'zh',1000,viewportH);
+checks.push(['zh zp2 -> en ep2 scroll=1090', c&&c.unitIndex===1&&c.targetBlockIds[0]==='ep2'&&Math.abs(c.targetScrollTop-1090)<0.5]);
+// 左->右:ep3
+c=R.resolveSyncCommand(enIdx,zhIdx,units,unitIdx,'en',2200,viewportH);
+checks.push(['en ep3 -> zh zp3 scroll=1500', c&&c.unitIndex===2&&c.targetBlockIds[0]==='zp3'&&Math.abs(c.targetScrollTop-1500)<0.5]);
+// 同步锁
+const lock=R.createSyncController(150);
+const a=lock.shouldSync('zh',0), b=lock.shouldSync('zh',50), c2=lock.shouldSync('en',80), d=lock.shouldSync('zh',200);
+checks.push(['同步锁:同侧锁定期只发一次,对侧放行,过期解锁', a===true&&b===false&&c2===true&&d===true]);
+// 词级定位
+const r1=R.locateSubstringRange('We propose a hardware accelerator for trace generation.','hardware accelerator');
+const r2=R.locateSubstringRange('我们为执行轨迹生成提出一种硬件加速器。','硬件加速器');
+checks.push(['原文精确子串定位', r1&&r1.start===13&&r1.end===33&&r2&&r2.start===13]);
+const r3=R.locateSubstringRange('We propose  a   hardware accelerator here.','hardware accelerator');
+checks.push(['多空格场景归一化回退定位', r3&&r3.start>=0]);
+const fails=checks.filter(x=>!x[1]);
+document.getElementById('r').textContent=(fails.length?'FAIL '+fails.length+'\n':'ALL-PASS\n')+checks.map(x=>`${x[1]?'✅':'❌'} ${x[0]}`).join('\n')+'\ncommands='+JSON.stringify([c&&c.targetScrollTop])+'\nr1='+JSON.stringify(r1)+' r2='+JSON.stringify(r2)+' r3='+JSON.stringify(r3);
+})().catch(e=>{document.getElementById('r').textContent='EXCEPTION '+e.message+'\n'+e.stack;});
+</script>
+</body>
+</html>

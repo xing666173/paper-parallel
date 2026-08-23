@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>P19 端到端运行器 · Paper Parallel 最终测试</title>
+<style>
+  :root{--ink:#1c2733;--muted:#5b6b7c;--line:#d8dee6;--bg:#eef1f5}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Microsoft YaHei",system-ui,sans-serif;background:var(--bg);color:var(--ink)}
+  header{background:#101828;color:#fff;padding:12px 18px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  header h1{font-size:16px;margin:0}
+  .tag{font-size:11px;background:#1f3a5f;border:1px solid #2f5f9e;border-radius:4px;padding:2px 8px;color:#9cc7ff}
+  main{max-width:1100px;margin:14px auto;padding:0 14px}
+  .card{background:#fff;border:1px solid var(--line);border-radius:8px;padding:14px;margin-bottom:14px}
+  .card h2{font-size:14px;margin:0 0 10px}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  button{padding:6px 14px;border:0;border-radius:5px;background:#0f4c81;color:#fff;font-size:13px;cursor:pointer}
+  button.ghost{background:#fff;color:#0f4c81;border:1px solid #0f4c81}
+  label{font-size:12px;color:var(--muted)}
+  input[type=text],input[type=password],select{padding:6px 8px;border:1px solid var(--line);border-radius:4px;font-size:12px}
+  #out{white-space:pre-wrap;font-family:Consolas,monospace;font-size:12.5px;line-height:1.6;background:#f8fafc;border:1px solid var(--line);border-radius:6px;padding:10px;max-height:420px;overflow:auto}
+  .ok{color:#0a7d4f;font-weight:700}.bad{color:#c0392b;font-weight:700}
+  #toast{position:fixed;right:16px;bottom:16px;background:#101828;color:#fff;border-radius:8px;padding:10px 14px;z-index:99;max-width:520px;font-size:12px}
+  .hidden{display:none}
+</style>
+</head>
+<body>
+<header><h1>P19 · 端到端运行器</h1><span class="tag">最终测试:ZK-Tracer 论文 → 翻译/排版/对齐/审核/项目包</span></header>
+<main>
+  <div class="card">
+    <h2>输入与设置</h2>
+    <div class="row">
+      <label>英文 PDF <input id="enfile" type="file" accept=".pdf,application/pdf"></label>
+      <label>中文 PDF(场景B,可选) <input id="zhfile" type="file" accept=".pdf,application/pdf"></label>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <label>翻译引擎
+        <select id="engine"><option value="mock">mock(离线演示)</option><option value="real">DeepSeek(真实)</option></select>
+      </label>
+      <label>API Key <input id="key" type="password" placeholder="sk-..." style="width:320px"></label>
+      <label>模型 <input id="model" type="text" value="deepseek-chat" style="width:150px"></label>
+      <label><input id="savekey" type="checkbox"> Key 存本机</label>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button id="demo">无文件合成演示(mock)</button>
+      <button id="demoB" class="ghost">无文件场景B演示</button>
+      <button id="run">开始端到端</button>
+      <button id="stop" class="ghost">停止</button>
+      <button id="copyout" class="ghost">复制阶段输出</button>
+      <button id="clearsession" class="ghost">清除翻译会话(重跑全部)</button>
+    </div>
+    <div class="kv" style="margin-top:8px;font-size:11px;color:var(--muted)">真实模式:需联网加载 pdf.js CDN 并直连 DeepSeek(CORS 结论见 P1);所有数据仅在本页内存,项目包 JSON 由浏览器下载。</div>
+  </div>
+  <div class="card"><h2>阶段输出</h2><div id="out">就绪。先点"无文件合成演示"验证链路。</div></div>
+  <div class="card"><h2>项目包</h2><a id="dl" class="hidden" download="paper-parallel-project.json">下载项目包 JSON</a></div>
+</main>
+<div id="toast" class="hidden"></div>
+
+<script src="../src/core/paginate/paginator.core.js"></script>
+<script src="../src/core/translate/pipeline.core.js"></script>
+<script src="../src/core/translate/session.core.js"></script>
+<script src="../src/core/align/align.core.js"></script>
+<script src="../src/core/align/alignBlocks.core.js"></script>
+<script src="../src/core/audit/audit.core.js"></script>
+<script src="../src/core/review/review.core.js"></script>
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+function toast(m){const d=$('toast');d.textContent=m;d.classList.remove('hidden');clearTimeout(toast._t);toast._t=setTimeout(()=>d.classList.add('hidden'),6000);}
+function out(s){const o=$('out');o.textContent+=s+'\n';o.scrollTop=o.scrollHeight;}
+const PG=window.PaperParallelPaginator, TS=window.PaperParallelTranslateSession, AL=window.PaperParallelAlign, ALB=window.PaperParallelAlignBlocks, AU=window.PaperParallelAudit, RV=window.PaperParallelReview;
+let stopFlag=false;let lastPkg=null;
+$('stop').onclick=()=>{stopFlag=true;};
+$('copyout').onclick=async()=>{try{await navigator.clipboard.writeText($('out').textContent);$('copyout').textContent='已复制 ✅';setTimeout(()=>$('copyout').textContent='复制阶段输出',1500);}catch(e){toast('复制失败,请手动全选阶段输出');}};
+$('clearsession').onclick=()=>{const keys=Object.keys(localStorage).filter(k=>k.startsWith('pp-session-'));keys.forEach(k=>localStorage.removeItem(k));toast('已清除 '+keys.length+' 个翻译会话,下次将从第一块重新翻译');};
+const KEY_LS='paper-parallel.dsKey';
+(function(){const k=localStorage.getItem(KEY_LS);if(k){$('key').value=k;$('savekey').checked=true;}})();
+$('savekey').onchange=function(){if(this.checked&&$('key').value.trim())localStorage.setItem(KEY_LS,$('key').value.trim());if(!this.checked)localStorage.removeItem(KEY_LS);};
+
+/* ---------- 内联简化解析器(P4/P5 同算法,单页) ---------- */
+function itemsToLines(items){
+  const groups=[];
+  for(const it of items){ if(!it.str||!it.str.trim())continue;
+    let g=groups.find(g=>Math.abs(g.y-it.y)<=4); if(!g){g={y:it.y,items:[]};groups.push(g);} g.items.push(it); }
+  const lines=[],X_GAP=24;
+  for(const g of groups){ g.items.sort((a,b)=>a.x-b.x); let seg=[];
+    const flush=()=>{if(seg.length){lines.push({y:g.y,items:seg,x1:seg[0].x,x2:Math.max(...seg.map(i=>i.x+i.w)),h:Math.max(...seg.map(i=>i.h)),text:seg.map(i=>i.str).join(' ')});}};
+    for(const it of g.items){ if(seg.length&&it.x-(seg[seg.length-1].x+seg[seg.length-1].w)>X_GAP){flush();seg=[];} seg.push(it);} flush(); }
+  lines.sort((a,b)=>a.y-b.y); return lines;
+}
+function classifyLines(lines,pageW){const out=lines.map(l=>{const span=l.x2-l.x1,mid=(l.x1+l.x2)/2,near=Math.abs(mid-pageW/2)<=pageW*0.08;let col='left';
+  if(span>pageW*0.5||(span>pageW*0.38&&near))col='full';else if(mid>pageW*0.5)col='right';return{...l,col};});
+  const rank=c=>c==='full'?0:(c==='left'?1:2);out.sort((a,b)=>rank(a.col)-rank(b.col)||a.y-b.y);return out;}
+function median(a){a=[...a].sort((x,y)=>x-y);return a.length%2?a[(a.length-1)/2]:(a[a.length/2-1]+a[a.length/2])/2;}
+function groupLinesToBlocks(lines,pageW,pageIndex){
+  const by={full:[],left:[],right:[]};for(const l of lines)by[l.col].push(l);
+  const bounds={full:{min:0,max:pageW},left:{min:0,max:pageW/2},right:{min:pageW/2,max:pageW}};
+  for(const c of ['full','left','right'])if(by[c].length)bounds[c]={min:Math.min(...by[c].map(l=>l.x1)),max:Math.max(...by[c].map(l=>l.x2))};
+  const blocks=[];let n=0;
+  const push=(type,ls)=>{if(!ls.length)return;const y1=Math.min(...ls.map(l=>l.y)),y2=Math.max(...ls.map(l=>l.y+l.h)),x1=Math.min(...ls.map(l=>l.x1)),x2=Math.max(...ls.map(l=>l.x2));
+    blocks.push({id:'p'+pageIndex+'-b'+(++n),type,col:ls[0].col,pageIndex,rect:{x:x1,y:y1,w:x2-x1,h:y2-y1},text:ls.map(l=>l.text).join('\n'),order:-1});};
+  const role=(l,col)=>{const t=l.text.trim(),cc=(col.min+col.max)/2,lc=(l.x1+l.x2)/2,centered=Math.abs(lc-cc)<=Math.max(20,(col.max-col.min)*0.12);
+    if(l.col==='full'){if(/^(abstract|摘要)[\s—\-:：]/i.test(t))return'abstract';if(/^key ?words|^关键词/i.test(t))return'keywords';
+      if(/[,，]/.test(t)&&/university|大学|学院|实验室|lab/i.test(t))return'authors';if(t.length<90&&l.h>=13)return'title';}
+    if(/^\s*(\d+(\.\d+)*|IV|V|VI|VII|VIII|IX|X)\s+[A-Z\u4e00-\u9fa5]/.test(t)&&t.length<80)return'section';
+    if(/^(references|bibliography|acknowledge?ments?|参考文献|致谢)\s*$/i.test(t))return'section';
+    if(/^(fig(ure)?\.?|table|algorithm)\s*\d+/i.test(t)||/^[图表]\s*\d+/.test(t))return'caption';
+    const syms=(t.match(/[=+\-*/^(){}[\]<>≤≥×÷√∑∫]/g)||[]).length;
+    if(centered&&t.length<70&&(syms>=3||/\(\d+\)$/.test(t)))return'equation';
+    if(/^\[\d+\]/.test(t))return'reference';return'paragraph';};
+  for(const c of ['full','left','right']){const arr=by[c];if(!arr.length)continue;arr.sort((a,b)=>a.y-b.y);
+    const gaps=[];for(let i=1;i<arr.length;i++)gaps.push(arr[i].y-arr[i-1].y);const medGap=gaps.length?median(gaps):12,lineH=median(arr.map(l=>l.h)),BREAK=Math.max(medGap*1.4,lineH*1.5,18);
+    let curType=null,cur=[];const flush=()=>{if(cur.length&&curType)push(curType,cur);curType=null;cur=[];};
+    for(let i=0;i<arr.length;i++){const l=arr[i],r=role(l,bounds[c]),prev=arr[i-1],big=prev?l.y-(prev.y+prev.h)>BREAK:false;if(cur.length&&(big||r!==curType))flush();if(!cur.length)curType=r;cur.push(l);}flush();}
+  const rank=c=>c==='full'?0:(c==='left'?1:2);blocks.sort((a,b)=>rank(a.col)-rank(b.col)||a.rect.y-b.rect.y);blocks.forEach((b,i)=>b.order=i);return blocks;
+}
+let pdfjsPromise=null;
+function loadPdfjs(){if(!pdfjsPromise){pdfjsPromise=(async()=>{const t=new Promise((_,rej)=>setTimeout(()=>rej(new Error('CDN 超时')),12000));const m=await Promise.race([import('https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.mjs'),t]);m.GlobalWorkerOptions.workerSrc='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.worker.mjs';return m;})();}return pdfjsPromise;}
+async function parsePdf(file){
+  const pdfjs=await loadPdfjs();const buf=await file.arrayBuffer();const doc=await pdfjs.getDocument({data:buf}).promise;const all=[];
+  const transformPoint=(m1,m2)=>[m1[0]*m2[0]+m1[2]*m2[1],m1[1]*m2[0]+m1[3]*m2[1],m1[0]*m2[2]+m1[2]*m2[3],m1[1]*m2[2]+m1[3]*m2[3],m1[0]*m2[4]+m1[2]*m2[5]+m1[4],m1[1]*m2[4]+m1[3]*m2[5]+m1[5]];
+  for(let i=1;i<=doc.numPages;i++){
+    const page=await doc.getPage(i);const vp=page.getViewport({scale:1});const tc=await page.getTextContent();
+    const items=tc.items.map(it=>{const m=transformPoint(vp.transform,it.transform);return{str:it.str,x:m[4],y:m[5],w:it.width*Math.hypot(m[0],m[1]),h:Math.max(Math.hypot(m[2],m[3]),it.height||0)};});
+    const lines=classifyLines(itemsToLines(items),vp.width);
+    all.push(...groupLinesToBlocks(lines,vp.width,i-1));
+  }
+  all.forEach((b,i)=>{b.id='en-b'+(i+1);b.order=i;});return {blocks:all,pageCount:doc.numPages,pageH:792};
+}
+
+/* ---------- 正式提示词(与 prompts/translation.json、audit.json 原文一致,内嵌以兼容 file:// 打开) ---------- */
+const TRANSLATION_SYSTEM='你是一名计算机体系结构领域的专业论文翻译专家。\n\n请将用户给出的英文论文文字块完整翻译为中文论文文字块。\n\n仅追加以下输出格式要求,不得改变任何翻译原则:\n1. 输出为 Markdown 格式:标题层级用 # 表示;行内公式用 $...$ 包裹,独立公式用 $$...$$ 包裹。\n2. 图题、表题、算法标题保持其编号并翻译其文字。\n3. 正文之外不输出任何解释、说明、总结或评价。\n4. 保持用户提示词中全部翻译原则不变。';
+const TRANSLATION_USER='你现在是一名计算机体系结构领域的专业论文翻译专家。\n\n请将附件中的英文论文完整翻译为中文论文。\n\n翻译要求：\n\n1. 翻译原则\n- 严格遵循“忠实、准确、专业”的原则。\n- 优先保证原文含义、逻辑结构和技术细节完整，不进行总结、扩写或解释。\n- 不删除任何内容，不省略任何句子。\n- 不改变作者原本的论述顺序。\n\n2. 专业术语要求\n- 保持计算机体系结构、密码学、零知识证明领域专业术语的一致性。\n- 第一次出现的专业术语采用：\n  中文名称（英文全称，缩写）\n  的格式。\n- 后续统一使用缩写或固定译名。\n\n例如：\nZero-Knowledge Virtual Machine：\n零知识虚拟机（Zero-Knowledge Virtual Machine, zkVM）\n\nProof：\n证明\n\nTrace：\n执行轨迹（Trace）\n\nConstraint：\n约束\n\nAccelerator：\n加速器\n\n\n3. 技术符号和公式要求\n- 所有数学公式必须保持原样。\n- 不修改任何变量、符号、上下标、希腊字母、公式编号。\n- 算法名称、模型名称、硬件名称、代码片段保持原样。\n- 不翻译代码。\n\n\n4. 图表处理要求\n- 图片标题、表格标题、图注需要翻译。\n- 图编号、表编号保持不变。\n- 图中的英文标注如果无法修改，保持英文。\n- 表格结构、列名关系保持一致。\n\n\n5. 排版要求\n- 尽可能保持与原论文一致的结构。\n- 保留：\n  - 标题层级\n  - Section编号\n  - Algorithm编号\n  - Figure编号\n  - Table编号\n  - Reference格式\n- 如果原论文为双栏排版，则中文版本也按照双栏论文结构组织。\n- 不因为中文字符数量变化而破坏章节对应关系。\n\n\n6. 语言风格\n- 使用正式学术论文表达方式。\n- 避免口语化表达。\n- 避免机械直译导致中文不通顺。\n- 但不得为了语言流畅改变技术含义。\n\n\n7. 输出方式\n- 按论文原顺序逐段翻译。\n- 每次输出完整连续内容。\n- 不输出翻译说明、总结或评价。\n- 如果内容过长，请自动分章节连续翻译。\n- 最终要输出的pdf要经过二次审核';
+const AUDIT_SYSTEM='你是一名严谨的学术论文翻译审校专家,只负责检查,不负责重新翻译。\n逐对检查英文原文与中文译文,输出 JSON:{"issues":[{"severity":"error|warn","message":"问题描述","blockId":"可选"}]}。没有问题时输出 {"issues":[]}。\n检查项:1) 忠实性(数字、符号、名称、否定、逻辑是否被改动);2) 漏译/多译;3) 术语一致性;4) 是否夹带翻译说明或总结;5) 技术含义是否改变。severity=error 表示必须人工处理,severity=warn 表示建议复核。只输出 JSON,不输出任何解释。';
+const AUDIT_USER='【英文原文】\n{enText}\n\n【中文译文】\n{zhText}';
+
+/* ---------- mock 翻译 ---------- */
+async function mockTranslate(ctx){
+  if(ctx.pass===1)return '零知识虚拟机（Zero-Knowledge Virtual Machine, zkVM）。执行轨迹（Trace）。加速器（Accelerator）。';
+  const t=(ctx.block.text||'').trim();
+  if(ctx.block.type==='title')return '面向零知识虚拟机轨迹生成的高性能异构加速器';
+  if(ctx.block.type==='authors')return '作者等 东南大学集成电路学院';
+  if(ctx.block.type==='abstract')return '摘要——本文研究零知识虚拟机（Zero-Knowledge Virtual Machine, zkVM）的硬件加速。';
+  if(ctx.block.type==='section')return t.replace(/^(\d+(?:\.\d+)*).*/,(m,p)=>p+' 节');
+  return '已译段落：'+t.slice(0,20)+'的中文翻译。';
+}
+async function dsChat(messages,maxTokens){
+  const key=$('key').value.trim();if(!key)throw new Error('请填 API Key');
+  const res=await fetch('https://api.deepseek.com/chat/completions',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+key},
+    body:JSON.stringify({model:$('model').value.trim()||'deepseek-chat',messages,temperature:0.2,max_tokens:maxTokens,stream:false})});
+  if(!res.ok){const t=await res.text().catch(()=>'');throw new Error('DeepSeek HTTP '+res.status+' '+t.slice(0,200));}
+  const data=await res.json();return data.choices?.[0]?.message?.content||'';
+}
+async function realTranslate(ctx){
+  if(ctx.pass===1){
+    const user=TRANSLATION_USER+'\n\n【术语抽取用章级粗译】\n当前章节:'+(ctx.chapterTitle||'')+'\n章节原文:\n'+(ctx.chapterText||'');
+    return dsChat([{role:'system',content:TRANSLATION_SYSTEM},{role:'user',content:user}],2000);
+  }
+  let user=TRANSLATION_USER;
+  if(ctx.chapterTitle)user+='\n\n【当前章节】'+ctx.chapterTitle;
+  if(ctx.terms&&ctx.terms.length)user+='\n\n【全局术语表(翻译时保持这些译名一致)】\n'+ctx.terms.map(t=>t.zh+'（'+t.en+(t.abbr?', '+t.abbr:'')+'）').join('\n');
+  if(ctx.priorContext)user+='\n\n【前文已定稿译文片段(仅供风格一致,不要复述)】\n'+ctx.priorContext;
+  user+='\n\n【待翻译块】\n类型:'+ctx.block.type+'\n原文:\n'+ctx.block.text;
+  return dsChat([{role:'system',content:TRANSLATION_SYSTEM},{role:'user',content:user}],4096);
+}
+async function realReviewTranslate(ctx){
+  return dsChat([{role:'system',content:AUDIT_SYSTEM},{role:'user',content:AUDIT_USER.replace('{enText}',ctx.enText).replace('{zhText}',ctx.zhText)}],800);
+}
+
+/* ---------- 场景 B:已有中文 PDF,不做翻译,直接锚点+块级对齐 ---------- */
+const KW_B=[['trace generation','轨迹生成'],['execution trace','执行轨迹'],['accelerator','加速器'],['latency','延迟'],['propose','提出'],['gpu','gpu'],['multi-scalar','多标量'],['multiplication','乘法'],['high-performance','高性能']];
+function blockScore(a,b){
+  const t1=(a.text||'').toLowerCase(),t2=(b.text||'').toLowerCase();
+  const la=ALB.normalizeAnchorLabel(a.type,a.text||''),lb=ALB.normalizeAnchorLabel(b.type,b.text||'');
+  if(la&&lb&&la===lb)return 1;
+  let hit=0;for(const [en,zh] of KW_B){if(t1.includes(en)&&t2.includes(zh))hit++;}
+  const n1=(t1.match(/\d+(\.\d+)?/g)||[]),n2=(t2.match(/\d+(\.\d+)?/g)||[]);if(n1.length&&n1.some(x=>n2.includes(x)))hit+=2;
+  return Math.min(1,hit/3);
+}
+async function runScenarioB(enBlocks,zhBlocks){
+  out('阶段3B 锚点+块级对齐(场景B)...');
+  const aligned=await ALB.alignBlocksWithAnchors(enBlocks,zhBlocks,{scoreFn:blockScore});
+  out(`  锚点 ${aligned.anchors.length} 对;单元 ${aligned.units.length};未匹配锚点 EN=${aligned.unmatchedAnchors.en.length} ZH=${aligned.unmatchedAnchors.zh.length}`);
+  const units=aligned.units.filter(u=>u.enBlockIds.length&&u.zhBlockIds.length).map(u=>({enBlockIds:u.enBlockIds,zhBlockIds:u.zhBlockIds}));
+  const pairs=aligned.units.filter(u=>u.enBlockIds.length===1&&u.zhBlockIds.length===1).map(u=>{
+    const en=enBlocks.find(b=>b.id===u.enBlockIds[0]);const zh=zhBlocks.find(b=>b.id===u.zhBlockIds[0]);
+    return {enBlockId:en.id,zhBlockId:zh.id,zhText:zh.text||''};
+  }).filter(p=>p.zhText.trim());
+  out('阶段4 规则审核...');
+  const allowUnpaired=aligned.units.filter(u=>u.enBlockIds.length&&!u.zhBlockIds.length).flatMap(u=>u.enBlockIds);
+  const audit=AU.runRuleAudit({enBlocks,zhBlocks,pairs,terms:[],allowUnpaired});
+  out(`  errors=${audit.errors} warns=${audit.warns}`);
+  audit.issues.forEach(i=>out(`  [${i.severity}] ${i.rule} ${i.message}`));
+  out('阶段5 AI 复审('+($('engine').value==='real'?'真实 DeepSeek':'mock')+')...');
+  const reviewTranslate=$('engine').value==='real'?realReviewTranslate:async()=>'{"issues":[]}';
+  const ai=await RV.runAiReview(pairs.map(p=>({...p,enText:enBlocks.find(b=>b.id===p.enBlockId).text||''})),{translate:reviewTranslate});
+  const comb=RV.combineIssues(audit.issues,ai.issues);
+  const approved=RV.isApproved(comb.issues);
+  out(`  门禁:${approved?'通过':'不通过'}`);
+  out('阶段6 项目包...');
+  const pkg=RV.buildProjectPackage({mode:'B',enDoc:{id:'en',blocks:enBlocks},zhDoc:{id:'zh',blocks:zhBlocks},units,spans:[],terms:[],issues:comb.issues,auditPassed:approved});
+  const v=RV.validateProjectPackage(pkg);out(`  校验:${v.ok?'OK':'FAIL'} checksum=${pkg.checksum}`);
+  lastPkg=pkg;
+  const blob=new Blob([JSON.stringify(pkg,null,2)],{type:'application/json'});
+  const url=URL.createObjectURL(blob);const a=$('dl');a.href=url;a.classList.remove('hidden');a.textContent='下载项目包 JSON('+pkg.checksum+')';
+  return pkg;
+}
+
+function fakeMeasure(text,w,fs){const lh=fs*1.6,cpl=Math.max(1,Math.floor(w/(fs*1.05)));return Math.max(lh,Math.ceil([...text].length/cpl)*lh);}
+
+/* ---------- 主流程 ---------- */
+async function runPipeline(enBlocks, sessionKey){
+  const TEXT=new Set(['title','authors','abstract','keywords','section','paragraph','reference','caption']);
+  const textBlocks=enBlocks.filter(b=>TEXT.has(b.type)&&(b.text||'').trim());
+  const nonText=enBlocks.filter(b=>!TEXT.has(b.type));
+  const translate=$('engine').value==='real'?realTranslate:mockTranslate;
+  // 断点持久化:每个块成功后写入 localStorage;刷新/重跑时自动续跑
+  const store=JSON.parse(localStorage.getItem(sessionKey||'pp-session-default')||'null')||{byId:{},terms:[]};
+  out('阶段1 翻译:文字块 '+textBlocks.length+' 个(断点会话:'+(sessionKey||'default')+',已存 '+(Object.keys(store.byId||{}).length)+' 块)...');
+  const tr=await TS.runResumableTranslation(textBlocks,{translate,
+    loadState:async()=>store,
+    saveState:async s=>{store.byId=s.byId;store.terms=s.terms;localStorage.setItem(sessionKey||'pp-session-default',JSON.stringify(store));},
+    maxRetries:1,systemPrompt:'SYS',userPrompt:'USER'});
+  out(`  完成 ${tr.stats.done}(复用 ${tr.stats.resumed}),失败 ${tr.stats.failed},术语 ${tr.terms.length}`);
+  if(tr.stats.failed)throw new Error('存在翻译失败块,请检查 API');
+  const zhBlocks=[...textBlocks.map(b=>({...b,text:tr.blocks.find(x=>x.id===b.id).zhText})),...nonText.map(b=>({...b}))].sort((a,b)=>a.order-b.order);
+
+  out('阶段2 分页排版:双栏...');
+  const layout=PG.paginate(zhBlocks,{mode:'double',measureText:fakeMeasure});
+  const order=PG.validateOrder(zhBlocks,layout.log);
+  out(`  页数 ${layout.pages.length},块序 ${order.ok?'OK':'FAIL'}`);
+  if(!order.ok)throw new Error('分页块序校验失败');
+
+  out('阶段3 对齐:场景A 管线直出块对齐...');
+  const units=enBlocks.map(b=>({enBlockIds:[b.id],zhBlockIds:[b.id]}));
+
+  out('阶段4 规则审核...');
+  const pairs=textBlocks.map(b=>({enBlockId:b.id,zhBlockId:b.id,zhText:zhBlocks.find(x=>x.id===b.id).text}));
+  const audit=AU.runRuleAudit({enBlocks,zhBlocks,pairs,terms:tr.terms});
+  out(`  errors=${audit.errors} warns=${audit.warns}`);
+  audit.issues.forEach(i=>out(`  [${i.severity}] ${i.rule} ${i.message}`));
+
+  out('阶段5 AI 复审('+($('engine').value==='real'?'真实 DeepSeek':'mock')+')...');
+  const reviewTranslate=$('engine').value==='real'?realReviewTranslate:async()=>'{"issues":[]}';
+  const ai=await RV.runAiReview(pairs.map(p=>({...p,enText:enBlocks.find(b=>b.id===p.enBlockId).text})),{translate:reviewTranslate});
+  const comb=RV.combineIssues(audit.issues,ai.issues);
+  const approved=RV.isApproved(comb.issues);
+  out(`  门禁:${approved?'通过':'不通过'}`);
+
+  out('阶段6 项目包...');
+  const pkg=RV.buildProjectPackage({mode:'A',enDoc:{id:'en',blocks:enBlocks},zhDoc:{id:'zh',blocks:zhBlocks},units,spans:[],terms:tr.terms,issues:comb.issues,auditPassed:approved});
+  const v=RV.validateProjectPackage(pkg);
+  out(`  校验:${v.ok?'OK':'FAIL'} checksum=${pkg.checksum}`);
+  lastPkg=pkg;
+  const blob=new Blob([JSON.stringify(pkg,null,2)],{type:'application/json'});
+  const url=URL.createObjectURL(blob);const a=$('dl');a.href=url;a.classList.remove('hidden');a.textContent='下载项目包 JSON('+pkg.checksum+')';
+  return pkg;
+}
+
+/* ---------- 无文件合成演示 ---------- */
+const SYNTH=[
+ {id:'en-b1',type:'title',text:'A High-Performance Accelerator for ZKVM Trace Generation',fontSize:17,widthMode:'span',frontMatter:true,order:0},
+ {id:'en-b2',type:'authors',text:'Author One, Author Two, Southeast University',fontSize:11,widthMode:'span',frontMatter:true,order:1},
+ {id:'en-b3',type:'abstract',text:'This paper studies hardware acceleration for zero-knowledge virtual machines.',fontSize:12,widthMode:'span',frontMatter:true,order:2},
+ {id:'en-b4',type:'section',text:'1 Introduction',fontSize:14,order:3},
+ {id:'en-b5',type:'paragraph',text:'The execution trace generation dominates end-to-end latency. We propose a hardware accelerator.',fontSize:13,order:4},
+ {id:'en-b6',type:'figure',atomicH:220,widthMode:'column',caption:'Figure 1: Workflow',order:5},
+ {id:'en-b7',type:'paragraph',text:'The proposed architecture reduces memory traffic by 18.3x.',fontSize:13,order:6},
+ {id:'en-b8',type:'section',text:'2 Background',fontSize:14,order:7},
+ {id:'en-b9',type:'paragraph',text:'Prior work uses GPUs for multi-scalar multiplication.',fontSize:13,order:8},
+ {id:'en-b10',type:'reference',text:'[1] Prior work.',fontSize:11,order:9},
+];
+
+$('demo').onclick=async()=>{stopFlag=false;$('out').textContent='';$('engine').value='mock';try{await runPipeline(SYNTH,'pp-demo-synthetic');out('\n✅ 合成演示完成(无文件)。真实论文:选择 PDF 后点"开始端到端"。');}catch(e){out('❌ '+e.message);}};
+const SYNTH_B_EN=[
+ {id:'b-e1',type:'title',text:'A High-Performance Accelerator for ZKVM Trace Generation',order:0},
+ {id:'b-e2',type:'section',text:'1 Introduction',order:1},
+ {id:'b-e3',type:'paragraph',text:'We propose a hardware accelerator for trace generation.',order:2},
+ {id:'b-e4',type:'figure',text:'Figure 1: Workflow',order:3},
+ {id:'b-e5',type:'paragraph',text:'It reduces latency by 18.3x.',order:4},
+ {id:'b-e6',type:'section',text:'2 Background',order:5},
+ {id:'b-e7',type:'paragraph',text:'Prior work uses GPUs for multi-scalar multiplication.',order:6},
+ {id:'b-e8',type:'paragraph',text:'This paragraph is missing in the Chinese version.',order:7},
+];
+const SYNTH_B_ZH=[
+ {id:'b-z1',type:'title',text:'面向零知识虚拟机轨迹生成的高性能异构加速器',order:0},
+ {id:'b-z2',type:'section',text:'1 引言',order:1},
+ {id:'b-z3',type:'paragraph',text:'我们为执行轨迹生成提出一种硬件加速器。',order:2},
+ {id:'b-z4',type:'figure',text:'图 1:工作流',order:3},
+ {id:'b-z5',type:'paragraph',text:'它将延迟降低 18.3 倍。',order:4},
+ {id:'b-z6',type:'section',text:'2 背景',order:5},
+ {id:'b-z7',type:'paragraph',text:'已有工作使用 GPU 进行多标量乘法。',order:6},
+];
+$('demoB').onclick=async()=>{stopFlag=false;$('out').textContent='';$('engine').value='mock';try{await runScenarioB(SYNTH_B_EN,SYNTH_B_ZH);out('\n✅ 场景B 合成演示完成。真实场景:同时选择英文与中文 PDF 后点"开始端到端"。');}catch(e){out('❌ '+e.message);}};
+$('run').onclick=async()=>{stopFlag=false;$('out').textContent='';try{
+  const f=$('enfile').files[0];if(!f){toast('请先选择英文 PDF');return;}
+  out('阶段0 解析英文 PDF('+f.name+')...');const parsed=await parsePdf(f);out(`  共 ${parsed.pageCount} 页,${parsed.blocks.length} 块`);
+  const zf=$('zhfile').files[0];
+  if(zf){
+    out('阶段0B 解析中文 PDF('+zf.name+')...');const zhParsed=await parsePdf(zf);out(`  共 ${zhParsed.pageCount} 页,${zhParsed.blocks.length} 块`);
+    await runScenarioB(parsed.blocks,zhParsed.blocks);
+    out('\n✅ 场景B 端到端完成。');
+  }else{
+    await runPipeline(parsed.blocks,'pp-session-'+encodeURIComponent(f.name)+'@'+f.size);
+    out('\n✅ 场景A 端到端完成。');
+  }
+}catch(e){out('❌ '+e.message);console.error(e);}};
+</script>
+</body>
+</html>

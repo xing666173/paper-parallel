@@ -1,0 +1,118 @@
+import { describe, it, expect } from 'vitest';
+import { itemsToLines, type SimpleTextItem } from '../../src/core/parser/lines';
+import { classifyLines, detectLayoutMode } from '../../src/core/parser/columns';
+import { groupLinesToBlocks } from '../../src/core/parser/blocks';
+import { parsePageItems } from '../../src/core/parser/index';
+import { normalizeTextItem } from '../../src/core/parser/pdfjsAdapter';
+
+/** 与 P5 探针完全一致的合成夹具:通栏标题区 + 双栏正文 */
+function syntheticFixture(): { pageW: number; pageH: number; items: SimpleTextItem[] } {
+  const pageW = 612;
+  const pageH = 792;
+  const items: SimpleTextItem[] = [];
+  const add = (str: string, x: number, y: number, w: number, h: number) => items.push({ str, x, y, w, h });
+
+  add('面向零知识虚拟机轨迹生成的高性能异构加速器', 70, 80, 430, 16);
+  add('作者一，作者二，作者三 东南大学集成电路学院', 170, 105, 260, 12);
+  add('摘要——零知识虚拟机（Zero-Knowledge Virtual Machine, zkVM）在区块链', 50, 130, 500, 12);
+
+  const L = 50;
+  const lw = 240;
+  add('1 引言', L, 180, lw, 13.5);
+  add('执行轨迹（Trace）的生成速度直接决定了整个证明流水线的端到端延迟。', L, 206, lw, 13);
+  add('本文提出一种面向 zkVM 轨迹生成的高性能异构加速器架构。', L, 230, lw, 13);
+  add('实验结果表明，所提架构相比通用 CPU 基线取得 18.3 倍的加速。', L, 254, lw, 13);
+  add('该方案的面积开销控制在 1.4 倍以内，同时保持 78% 的算术单元利用率。', L, 306, lw, 13);
+  add('相关工作分为基于 GPU 的多标量乘法加速与基于 ASIC 的 NTT 加速。', L, 330, lw, 13);
+  add('图 1：zkVM 执行阶段与证明阶段的工作流示意图', L, 388, lw, 11);
+  add('证明者（Prover）与验证者（Verifier）之间的交互轮数保持恒定。', L, 414, lw, 13);
+
+  const R = 330;
+  add('该模块通过双缓冲机制隐藏了数据搬运的延迟。', R, 180, lw, 13);
+  add('我们在表 1 中汇总了各配置下的关键路径延迟分解结果。', R, 204, lw, 13);
+  add('安全性分析表明，该优化不改变原有协议的可满足性（Soundness）。', R, 228, lw, 13);
+  add('与已有工作不同，我们的方法不需要改变应用层的密码学假设。', R, 252, lw, 13);
+  add('e = gcd(f, (x^N - 1) mod f)   (1)', R, 360, lw, 13);
+  add('2 结论', R, 386, lw, 13.5);
+  add('综上所述，所提架构在性能与面积之间取得了更好的权衡。', R, 412, lw, 13);
+
+  return { pageW, pageH, items };
+}
+
+describe('parser: items -> lines', () => {
+  it('合并同基线、拆分左右两栏同一 y 的行', () => {
+    const fx = syntheticFixture();
+    const lines = itemsToLines(fx.items);
+    expect(lines).toHaveLength(18); // 3 通栏 + 8 左 + 7 右
+    const y180 = lines.filter((l) => Math.abs(l.y - 180) <= 4);
+    expect(y180).toHaveLength(2); // 左右两栏各一行
+    expect(y180[0].x1).toBeLessThan(200);
+    expect(y180[1].x1).toBeGreaterThan(300);
+  });
+});
+
+describe('parser: columns', () => {
+  it('分类与阅读顺序:full -> left -> right,且居中的短作者行判为 full', () => {
+    const fx = syntheticFixture();
+    const lines = classifyLines(itemsToLines(fx.items), fx.pageW);
+    expect(lines.filter((l) => l.col === 'full')).toHaveLength(3);
+    expect(lines.filter((l) => l.col === 'left')).toHaveLength(8);
+    expect(lines.filter((l) => l.col === 'right')).toHaveLength(7);
+    const kinds = lines.map((l) => l.col);
+    expect(kinds.join('|')).toMatch(/^full(\|full)*(\|left)*(\|right)*$/);
+    expect(detectLayoutMode(lines)).toBe('mixed');
+  });
+});
+
+describe('parser: lines -> blocks', () => {
+  it('块类型序列与 P5 合成夹具一致(段间隙断块、题注/公式/章节识别)', () => {
+    const fx = syntheticFixture();
+    const lines = classifyLines(itemsToLines(fx.items), fx.pageW);
+    const blocks = groupLinesToBlocks(lines, fx.pageW, fx.pageH);
+    expect(blocks.map((b) => b.type)).toEqual([
+      'title',
+      'authors',
+      'abstract',
+      'section',
+      'paragraph',
+      'paragraph',
+      'caption',
+      'paragraph',
+      'paragraph',
+      'equation',
+      'section',
+      'paragraph',
+    ]);
+    // 阅读顺序即 order 顺序,且 order 从 0 连续
+    blocks.forEach((b, i) => expect(b.order).toBe(i));
+    expect(blocks[6].type).toBe('caption');
+    expect(blocks[9].type).toBe('equation');
+  });
+
+  it('parsePageItems 端到端输出', () => {
+    const fx = syntheticFixture();
+    const r = parsePageItems(fx.items, fx.pageW, fx.pageH);
+    expect(r.layoutMode).toBe('mixed');
+    expect(r.blocks).toHaveLength(12);
+  });
+});
+
+describe('parser: pdfjsAdapter', () => {
+  it('仿射变换正确(单位视口矩阵)', () => {
+    const item = { str: 'x', width: 5, height: 12, transform: [1, 0, 0, 1, 10, 20] };
+    const viewport = { transform: [1, 0, 0, 1, 0, 0] };
+    const r = normalizeTextItem(item, viewport);
+    expect(r).toEqual({ str: 'x', x: 10, y: 20, w: 5, h: 12 });
+  });
+
+  it('带纵向翻转的视口矩阵(典型 PDF.js scale=1 视口)', () => {
+    // PDF 坐标原点在左下,视口矩阵 [1,0,0,-1,0,pageH] 完成 y 翻转
+    const viewport = { transform: [1, 0, 0, -1, 0, 792] };
+    const item = { str: 'x', width: 5, height: 12, transform: [1, 0, 0, 1, 100, 700] };
+    const r = normalizeTextItem(item, viewport);
+    expect(r.x).toBeCloseTo(100);
+    expect(r.y).toBeCloseTo(92);
+    expect(r.w).toBeCloseTo(5);
+    expect(r.h).toBeCloseTo(12);
+  });
+});

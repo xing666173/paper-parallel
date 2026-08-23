@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>P10 翻译管线探针 · Paper Parallel Sprint 3</title>
+<style>
+  body{font-family:"Microsoft YaHei",system-ui,sans-serif;background:#eef1f5;color:#1c2733;margin:0;padding:16px}
+  .card{background:#fff;border:1px solid #d8dee6;border-radius:8px;padding:14px;max-width:980px;margin:12px auto}
+  h1{font-size:18px}.tag{font-size:11px;color:#0f4c81}
+  #r{font-family:Consolas,monospace;font-size:17px;white-space:pre-wrap;color:#0f4c81;line-height:1.7}
+  .ok{color:#0a7d4f;font-weight:700}.bad{color:#c0392b;font-weight:700}
+  table{width:100%;border-collapse:collapse;font-size:12px;margin-top:10px}
+  th,td{border:1px solid #d8dee6;padding:4px 8px;text-align:left}
+  th{background:#f4f6f9}
+  .failed{background:#fdecea}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>P10 · 翻译管线核心探针 <span class="tag">Sprint 3 · 两遍法 / 串行队列 / 重试校验 / 术语注入</span></h1>
+  <div id="r">RUNNING…</div>
+</div>
+<div class="card"><h2>逐块结果</h2><table><thead><tr><th>#</th><th>id</th><th>状态</th><th>尝试次数</th><th>译文/错误</th></tr></thead><tbody id="rows"></tbody></table></div>
+
+<script src="../src/core/translate/pipeline.core.js"></script>
+<script>
+'use strict';
+const { extractTerms, validateTranslation, runTranslationPipeline } = globalThis.PaperParallelPipeline;
+
+/* ---- mock LLM:模拟 DeepSeek 行为(不联网,确定性) ---- */
+const calls=[];
+async function mockTranslate(ctx){
+  calls.push({pass:ctx.pass, blockId:ctx.block&&ctx.block.id, chapter:ctx.chapterTitle, attempt:ctx.attempt, terms:ctx.terms.length});
+  if(ctx.pass===1){
+    return '本章围绕零知识虚拟机（Zero-Knowledge Virtual Machine, zkVM）展开。执行轨迹（Trace）的生成是关键。加速器（Accelerator）用于卸载计算。';
+  }
+  const t=(ctx.block.text||'').trim();
+  if(t.includes('FAIL_FOREVER')) throw new Error('mock:permanent-failure');
+  if(t.includes('FAIL_ONCE') && ctx.attempt===0) throw new Error('mock:transient-failure');
+  if(t.includes('BAD_PREFIX') && ctx.attempt===0) return '翻译说明:这是一段说明性文字,不应作为译文。';
+  if(ctx.block.type==='title') return '面向零知识虚拟机轨迹生成的高性能异构加速器';
+  if(ctx.block.type==='authors') return '作者一，作者二，作者三  东南大学集成电路学院';
+  if(ctx.block.type==='abstract') return '摘要——本文研究执行轨迹（Trace）的硬件加速方法。';
+  if(ctx.block.type==='section') return t.replace('1 ','第1章 ').replace('2 ','第2章 ');
+  return '已译：'+(t.includes('execution trace')?'执行轨迹（Trace）的生成速度直接决定证明流水线端到端延迟。':'该段落描述所提架构的设计细节与实验配置。');
+}
+
+const blocks=[
+  {id:'b01',type:'title',text:'A High-Performance Accelerator for ZKVM Trace Generation',order:0},
+  {id:'b02',type:'authors',text:'Author One, Author Two, Author Three, Southeast University',order:1},
+  {id:'b03',type:'abstract',text:'This paper studies acceleration of trace generation.',order:2},
+  {id:'b04',type:'section',text:'1 Introduction',order:3},
+  {id:'b05',type:'paragraph',text:'The execution trace generation dominates end-to-end latency.',order:4},
+  {id:'b06',type:'paragraph',text:'FAIL_ONCE transient network error, then succeed.',order:5},
+  {id:'b07',type:'paragraph',text:'BAD_PREFIX validation should reject first answer.',order:6},
+  {id:'b08',type:'section',text:'2 Background',order:7},
+  {id:'b09',type:'paragraph',text:'FAIL_FOREVER this block always fails.',order:8},
+  {id:'b10',type:'paragraph',text:'The proposed architecture reduces memory traffic.',order:9},
+];
+
+runTranslationPipeline(blocks,{
+  translate:mockTranslate,
+  maxRetries:2,
+  systemPrompt:'你是专业论文翻译专家。',
+  userPrompt:'请翻译,保持术语格式。',
+}).then(res=>{
+  const checks=[
+    ['两遍法执行(第1遍章节数>=2)', res.stats.pass1Chapters>=2],
+    ['术语抽取 >=3 且含 zkVM/Trace/Accelerator', res.terms.length>=3 && res.terms.some(t=>t.abbr==='zkVM') && res.terms.some(t=>t.en==='Trace') && res.terms.some(t=>t.en==='Accelerator')],
+    ['按块串行且块序保持', JSON.stringify(res.blocks.map(b=>b.id))===JSON.stringify(blocks.map(b=>b.id))],
+    ['瞬时失败重试后成功(attempts=2)', res.blocks.find(b=>b.id==='b06').status==='done' && res.blocks.find(b=>b.id==='b06').attempts===2],
+    ['校验失败触发重试(b07 attempts=2)', res.blocks.find(b=>b.id==='b07').attempts===2],
+    ['永久失败块被标记 failed 且不中断队列', res.blocks.find(b=>b.id==='b09').status==='failed' && res.blocks.find(b=>b.id==='b10').status==='done'],
+    ['第2遍注入全局术语表(后续块 terms>=3)', calls.filter(c=>c.pass===2 && c.blockId==='b10').every(c=>c.terms>=3)],
+    ['全局重试计数>=2', res.stats.retries>=2],
+    ['成品按序拼接且不含失败块', res.assembled.includes('执行轨迹（Trace）') && !res.assembled.includes('FAIL_FOREVER')],
+    ['b07 成品不含说明性前缀', !res.assembled.includes('翻译说明:')],
+  ];
+  const fail=checks.filter(c=>!c[1]);
+  document.getElementById('r').textContent=(fail.length?`❌ ${fail.length} 项失败\n`:'✅ 断言全部通过\n')+checks.map(c=>`${c[1]?'✅':'❌'} ${c[0]}`).join('\n')
+    +`\n\nstats=${JSON.stringify(res.stats)}\nterms=${res.terms.map(t=>t.zh+'('+t.en+(t.abbr?','+t.abbr:'')+')').join('; ')}`;
+  document.getElementById('rows').innerHTML=res.blocks.map((b,i)=>`<tr class="${b.status==='failed'?'failed':''}"><td>${i+1}</td><td>${b.id}</td><td>${b.status}</td><td>${b.attempts}</td><td>${(b.zhText||b.error||'').slice(0,50)}</td></tr>`).join('');
+}).catch(e=>{ document.getElementById('r').textContent='❌ 管线执行异常:'+e.message+'\n'+e.stack; });
+</script>
+</body>
+</html>

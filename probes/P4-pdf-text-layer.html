@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>P4 PDF.js 文字层抽取探针 · Paper Parallel</title>
+<style>
+  :root{--ink:#1c2733;--muted:#5b6b7c;--line:#d8dee6;--bg:#eef1f5}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Microsoft YaHei",system-ui,sans-serif;background:var(--bg);color:var(--ink)}
+  header{background:#101828;color:#fff;padding:12px 18px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  header h1{font-size:16px;margin:0}
+  .tag{font-size:11px;background:#1f3a5f;border:1px solid #2f5f9e;border-radius:4px;padding:2px 8px;color:#9cc7ff}
+  main{padding:14px 18px;display:grid;grid-template-columns:1fr;gap:14px}
+  .card{background:#fff;border:1px solid var(--line);border-radius:8px;padding:14px}
+  .card h2{font-size:14px;margin:0 0 10px}
+  button{padding:7px 16px;border:0;border-radius:5px;background:#0f4c81;color:#fff;font-size:13px;cursor:pointer}
+  button.ghost{background:#fff;color:#0f4c81;border:1px solid #0f4c81}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  .kv{font-size:12px;color:var(--muted);line-height:1.8}
+  .kv b{color:var(--ink)}
+  input[type=file]{font-size:12px}
+  textarea{width:100%;height:120px;font-family:monospace;font-size:11px;border:1px solid var(--line);border-radius:4px;padding:6px}
+  #pages{display:flex;gap:14px;flex-wrap:wrap;align-items:flex-start}
+  .sheet{position:relative;background:#fff;box-shadow:0 2px 8px rgba(15,30,50,.15);flex:0 0 auto}
+  .linebox{position:absolute;border:1px solid;padding:0 2px;white-space:nowrap;font-size:11px;overflow:visible}
+  .linebox.full{background:rgba(59,130,246,.12);border-color:#3b82f6;color:#1d4ed8}
+  .linebox.left{background:rgba(16,185,129,.10);border-color:#10b981;color:#047857}
+  .linebox.right{background:rgba(245,158,11,.12);border-color:#f59e0b;color:#b45309}
+  .orderbar{display:flex;flex-wrap:wrap;gap:3px;margin-top:6px}
+  .ordertoken{font-size:10px;border-radius:3px;padding:1px 5px;border:1px solid var(--line);background:#f4f6f9}
+  .ordertoken.full{background:#dbeafe;border-color:#93c5fd}
+  .ordertoken.left{background:#d1fae5;border-color:#6ee7b7}
+  .ordertoken.right{background:#fef3c7;border-color:#fcd34d}
+  pre{background:#f4f6f9;border:1px solid var(--line);border-radius:4px;padding:8px;font-size:10.5px;max-height:260px;overflow:auto}
+  .bad{color:#c0392b;font-weight:700}.ok{color:#0a7d4f;font-weight:700}
+  .hidden{display:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>P4 · PDF.js 文字层抽取探针</h1>
+  <span class="tag">Sprint 0 · 双栏排序 / 阅读顺序 / P2 导出复核</span>
+</header>
+<main>
+  <div class="card">
+    <h2>输入</h2>
+    <div class="row">
+      <input id="file" type="file" accept=".pdf,application/pdf">
+      <button id="parse">解析 PDF</button>
+      <button id="demo" class="ghost">载入离线演示数据</button>
+    </div>
+    <div class="kv" style="margin-top:8px">
+      说明:真实解析依赖 CDN 的 pdfjs-dist(需联网);离线演示数据内置一组模拟双栏 + 通栏标题的 text items,用于验证<b>行合并 → 分栏判定 → 阅读顺序</b>算法本身。
+      与 P2 联测:打开 P2 → 打印导出 PDF → 在此解析 → 把 P2 的自检基准 JSON 粘贴进下方比对框 → 点"比对"。
+    </div>
+  </div>
+
+  <div id="toast" class="card hidden" style="position:fixed;right:16px;bottom:16px;background:#101828;color:#fff;border:0;z-index:99;max-width:420px"></div>
+  <div class="card">
+    <h2>解析结果 <span id="modebadge"></span></h2>
+    <div id="summary" class="kv"></div>
+    <div id="pages"></div>
+  </div>
+
+  <div class="card">
+    <h2>P2 基准比对(可选)</h2>
+    <textarea id="base" placeholder="粘贴 P2 页面里的『自检基准 JSON』……"></textarea>
+    <div class="row" style="margin-top:8px">
+      <button id="compare" class="ghost">比对</button>
+      <button id="copy" class="ghost">复制抽取结果 JSON</button>
+    </div>
+    <div id="cmp" class="kv"></div>
+  </div>
+
+  <div class="card">
+    <h2>抽取结果 JSON(逐页 → 通栏/左栏/右栏 → 行)</h2>
+    <pre id="jsonout"></pre>
+  </div>
+</main>
+
+<script>
+// PDF.js 走 CDN(仅真实解析需要联网;离线演示不依赖它)
+let pdfjsLib = null;
+let pdfjsPromise = null;
+function loadPdfjs(){ // 懒加载:只有点"解析 PDF"才联网,离线演示零网络请求
+  if(!pdfjsPromise){
+    pdfjsPromise = (async()=>{
+      const timeout = new Promise((_,rej)=>setTimeout(()=>rej(new Error('CDN 加载超时(离线或网络受限)')),8000));
+      const m = await Promise.race([import('https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.mjs'), timeout]);
+      m.GlobalWorkerOptions.workerSrc='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.worker.mjs';
+      return m;
+    })();
+  }
+  return pdfjsPromise;
+}
+
+const $=id=>document.getElementById(id);
+let lastResult = null;
+
+/* ============ 核心算法:items -> lines -> columns -> reading order ============ */
+function transformPoint(m1,m2){
+  return [m1[0]*m2[0]+m1[2]*m2[1], m1[1]*m2[0]+m1[3]*m2[1], m1[0]*m2[2]+m1[2]*m2[3], m1[1]*m2[2]+m1[3]*m2[3], m1[0]*m2[4]+m1[2]*m2[5]+m1[4], m1[1]*m2[4]+m1[3]*m2[5]+m1[5]];
+}
+function itemsToLines(items, viewport){
+  // 把每个 TextItem 的 transform 换算到视口坐标(scale=1)
+  const vp = viewport && viewport.clone ? viewport.clone({scale:1}) : {transform: (viewport&&viewport.transform)||[1,0,0,1,0,0]};
+  const lines = [];
+  for(const it of items){
+    if(!it.str || !it.str.trim()) continue;
+    const m = pdfjsLib ? transformPoint(vp.transform, it.transform) : null;
+    // 离线演示数据直接给视口坐标 {x,y,w,h}
+    const x = m ? m[4] : it.x, y = m ? m[5] : it.y;
+    const h = m ? Math.max(Math.hypot(m[2],m[3]), it.height||0) : (it.h||12);
+    const w = m ? it.width*Math.hypot(m[0],m[1])||0 : (it.w||0);
+    if(!w && it.width) var ww=it.width; // fallback below
+    const rec={str:it.str, x, y, h, w: w || it.width || 8};
+    // 行合并:y 容差 4px
+    let line = lines.find(l=>Math.abs(l.y-rec.y)<=4 && !l.closed);
+    if(!line){ line={y:rec.y, items:[], closed:false}; lines.push(line); }
+    line.items.push(rec);
+  }
+  for(const l of lines){ l.items.sort((a,b)=>a.x-b.x); l.x1=l.items[0].x; l.x2=Math.max(...l.items.map(i=>i.x+i.w)); l.h=Math.max(...l.items.map(i=>i.h)); l.text=l.items.map(i=>i.str).join(' '); }
+  lines.sort((a,b)=>a.y-b.y);
+    // 同一 y 高度的行,再按 x 间隙拆分:避免左右两栏同一基线的行被并成一行
+    const final=[]; const X_GAP=24;
+    for(const l of lines){
+      l.items.sort((a,b)=>a.x-b.x);
+      let seg=[];
+      const flush=()=>{ if(seg.length){ final.push({y:l.y,items:seg,x1:seg[0].x,x2:Math.max(...seg.map(i=>i.x+i.w)),h:Math.max(...seg.map(i=>i.h)),text:seg.map(i=>i.str).join(' ')}); } };
+      for(const it of l.items){
+        if(seg.length){ const prev=seg[seg.length-1]; if(it.x-(prev.x+prev.w)>X_GAP){ flush(); seg=[]; } }
+        seg.push(it);
+      }
+      flush();
+    }
+    final.sort((a,b)=>a.y-b.y);
+    return final;
+  // (dead return removed)
+}
+
+function classify(lines, pageW){
+  const out=[];
+  for(const l of lines){
+    const span=l.x2-l.x1;
+    let col = 'left';
+    const mid=(l.x1+l.x2)/2, nearCenter=Math.abs(mid-pageW/2) <= pageW*0.08;
+    if(span > pageW*0.5 || (span > pageW*0.38 && nearCenter)) col='full';
+    else if(mid > pageW*0.5) col='right';
+    out.push({...l,col});
+  }
+  // 阅读顺序:通栏(上到下) -> 左栏(上到下) -> 右栏(上到下)
+  const rank=c=>c==='full'?0:(c==='left'?1:2);
+  out.sort((a,b)=>rank(a.col)-rank(b.col)||a.y-b.y);
+  return out;
+}
+
+/* ============ 渲染:page 上画行框 + 顺序条 ============ */
+function renderLines(pageW, pageH, ordered, pageNo){
+  const wrap=document.createElement('div'); wrap.style.marginBottom='10px';
+  const t=document.createElement('div'); t.className='kv'; t.innerHTML=`<b>第 ${pageNo} 页</b> ${pageW.toFixed(0)}×${pageH.toFixed(0)} · 行数 ${ordered.length}`;
+  wrap.appendChild(t);
+  const sheet=document.createElement('div'); sheet.className='sheet';
+  const scale=Math.min(1, 560/pageW);
+  sheet.style.width=pageW*scale+'px'; sheet.style.height=pageH*scale+'px';
+  ordered.forEach((l,idx)=>{
+    const b=document.createElement('div'); b.className='linebox '+l.col;
+    b.style.left=l.x1*scale+'px'; b.style.top=l.y*scale+'px';
+    b.style.height=(l.h+2)*scale+'px'; b.style.width=Math.max(8,(l.x2-l.x1)*scale)+'px';
+    b.style.fontSize=(11*scale)+'px';
+    b.title=`#${idx} ${l.col} y=${l.y.toFixed(1)} ${l.text.slice(0,50)}`;
+    b.textContent=l.text.slice(0,26);
+    sheet.appendChild(b);
+  });
+  wrap.appendChild(sheet);
+  const bar=document.createElement('div'); bar.className='orderbar';
+  ordered.forEach((l,idx)=>{
+    const s=document.createElement('span'); s.className='ordertoken '+l.col;
+    s.textContent=`${idx+1}.${l.col}${l.y.toFixed(0)}`;
+    bar.appendChild(s);
+  });
+  wrap.appendChild(bar);
+  return wrap;
+}
+
+function showResult(r){
+  lastResult=r;
+  $('pages').innerHTML='';
+  r.pages.forEach(p=>$('pages').appendChild(renderLines(p.w,p.h,p.lines,p.no)));
+  $('jsonout').textContent=JSON.stringify(r.json,null,1);
+  $('summary').innerHTML=`页数:<b>${r.pages.length}</b> · 总行数:<b>${r.json.totalLines}</b> · 分栏判定:<b>${r.json.columnsDetected.map(c=>`第${c.page}页:${c.mode}`).join('; ')}</b>`;
+  $('modebadge').textContent=r.demo?'（离线演示数据）':'（真实 PDF 解析）';
+}
+
+/* ============ 离线演示:合成 text items ============ */
+function demoData(){
+  const pageW=612, pageH=792, items=[];
+  const add=(str,x,y,w,h)=>{items.push({str,x,y,w,h});};
+  // 通栏标题区
+  add('面向零知识虚拟机轨迹生成的高性能异构加速器',70,80,430,16);
+  add('作者一，作者二，作者三 东南大学集成电路学院',170,105,260,12);
+  add('摘要——零知识虚拟机（Zero-Knowledge Virtual Machine, zkVM）在区块链',50,130,500,12);
+  // 左栏
+  const lx=50, lw=240, ry=180;
+  const left=['1 引言','执行轨迹（Trace）的生成速度直接决定了整个证明流水线的端到端延迟。','本文提出一种面向 zkVM 轨迹生成的高性能异构加速器架构。','实验结果表明，所提架构相比通用 CPU 基线取得 18.3 倍的加速。','该方案的面积开销控制在 1.4 倍以内，同时保持 78% 的算术单元利用率。','相关工作分为基于 GPU 的多标量乘法加速与基于 ASIC 的 NTT 加速。'];
+  left.forEach((s,i)=>add(s,lx,ry+i*26,lw,13));
+  // 右栏
+  const rx=330;
+  const right=['证明者（Prover）与验证者（Verifier）之间的交互轮数保持恒定。','该模块通过双缓冲机制隐藏了数据搬运的延迟。','我们在表 1 中汇总了各配置下的关键路径延迟分解结果。','安全性分析表明，该优化不改变原有协议的可满足性（Soundness）。','与已有工作不同，我们的方法不需要改变应用层的密码学假设。','2 结论','综上所述，所提架构在性能与面积之间取得了更好的权衡。'];
+  right.forEach((s,i)=>add(s,rx,ry+i*26,lw,13));
+  return [{no:1,w:pageW,h:pageH,items,viewport:{transform:[1,0,0,1,0,0]}}];
+}
+
+/* ============ 真实 PDF 解析 ============ */
+async function parseFile(file){
+  try{ pdfjsLib = await loadPdfjs(); }catch(e){ throw new Error('pdfjs 未能从 CDN 加载,请联网后重试('+e.message+')'); }
+  const buf=await file.arrayBuffer();
+  const doc=await pdfjsLib.getDocument({data:buf}).promise;
+  const pages=[];
+  for(let i=1;i<=doc.numPages;i++){
+    const page=await doc.getPage(i);
+    const viewport=page.getViewport({scale:1});
+    const tc=await page.getTextContent();
+    const lines=classify(itemsToLines(tc.items,viewport),viewport.width);
+    pages.push({no:i,w:viewport.width,h:viewport.height,lines});
+  }
+  return pages;
+}
+
+function buildResult(pages,demo){
+  const json={schema:'paper-parallel.reading-order.v1',pages:pages.length,totalLines:pages.reduce((n,p)=>n+p.lines.length,0),
+    columnsDetected:pages.map(p=>{const cols=new Set(p.lines.map(l=>l.col));return{page:p.no,mode:cols.has('full')?'mixed':(cols.has('left')&&cols.has('right')?'double':'single')}}),
+    pagesData:pages.map(p=>({page:p.no,order:p.lines.map(l=>({col:l.col,y:Math.round(l.y),x:Math.round(l.x1),w:Math.round(l.x2-l.x1),text:l.text}))}))};
+  return {pages,json,demo};
+}
+
+/* ============ P2 基准比对:预期 head 片段按序出现 ============ */
+function compare(baseText){
+  $('cmp').innerHTML='';
+  if(!lastResult){ $('cmp').innerHTML='<span class="bad">请先解析一个 PDF(或载入演示数据)</span>'; return; }
+  let base; try{ base=JSON.parse(baseText); }catch(e){ $('cmp').innerHTML='<span class="bad">基准 JSON 解析失败</span>'; return; }
+  const expected=(base.rows||[]).map(r=>String(r.head||'').trim()).filter(Boolean);
+  const actual=lastResult.json.pagesData.flatMap(p=>p.order.map(l=>l.text)).join('\n');
+  let cursor=0, ok=true, miss=[];
+  for(const head of expected){
+    const idx=actual.indexOf(head,cursor);
+    if(idx<0){ok=false;miss.push(head);} else cursor=idx+head.length;
+  }
+  $('cmp').innerHTML= ok
+    ? `<span class="ok">✅ 比对通过:${expected.length} 个基准片段按相同顺序全部出现在抽取结果中</span>`
+    : `<span class="bad">❌ ${miss.length} 个片段未按序找到:${miss.slice(0,5).join('、')}</span>`;
+}
+
+/* ============ 事件 ============ */
+function toast(msg){ const d=document.getElementById('toast'); d.textContent=msg; d.classList.remove('hidden'); clearTimeout(toast._t); toast._t=setTimeout(()=>d.classList.add('hidden'),5000); }
+$('demo').onclick=()=>{ try{
+  const processed = demoData().map(p=>({...p, lines: classify(itemsToLines(p.items, p.viewport), p.w)}));
+  showResult(buildResult(processed,true));
+  toast('离线演示数据已载入');
+}catch(e){ console.error(e); toast('演示失败:'+e.message); } };
+$('parse').onclick=async ()=>{
+  const f=$('file').files[0]; if(!f){ toast('请先选择 PDF 文件'); return; }
+  try{ showResult(buildResult(await parseFile(f),false)); toast('解析完成'); }catch(e){ console.error(e); toast('解析失败:'+e.message); }
+};
+$('compare').onclick=()=>compare($('base').value);
+$('copy').onclick=async()=>{ try{ await navigator.clipboard.writeText($('jsonout').textContent); $('copy').textContent='已复制 ✅'; setTimeout(()=>$('copy').textContent='复制抽取结果 JSON',1500);}catch(e){alert('复制失败');} };
+
+// 供控制台调试:window.__pp = {itemsToLines, classify, demoData}
+window.__pp={itemsToLines,classify,demoData};
+</script>
+</body>
+</html>

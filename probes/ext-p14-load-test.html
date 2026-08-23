@@ -1,0 +1,7 @@
+<!DOCTYPE html>
+<html><body>
+<div id="r" style="font-size:22px">pending</div>
+<script>window.onerror=function(m,s,l,c){document.getElementById('r').textContent='ERR:'+m+' @'+s+':'+l+':'+c;return true;};</script>
+<script src="../src/core/reader/reader.core.js"></script>
+<script>document.getElementById('r').textContent=window.PaperParallelReader?'reader-loaded':'reader-missing';</script>
+</body></html>

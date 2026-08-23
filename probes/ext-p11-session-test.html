@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><title>P11 session test</title></head>
+<body style="font-family:Consolas,monospace;font-size:16px;padding:20px;background:#fff">
+<h1>P11 prompt + resume session minimal test</h1>
+<div id="r" style="white-space:pre-wrap;font-size:19px;color:#0f4c81">RUNNING…</div>
+<script src="../src/core/translate/pipeline.core.js"></script>
+<script src="../src/core/translate/session.core.js"></script>
+<script>
+const S=globalThis.PaperParallelTranslateSession;
+const calls=[];
+let runNo=0;
+async function mockTranslate(ctx){
+  calls.push({run:runNo,pass:ctx.pass,blockId:ctx.block&&ctx.block.id,attempt:ctx.attempt,terms:ctx.terms.length,
+    userStarts:ctx.userPrompt.startsWith('USER-PROMPT-原文')});
+  if(ctx.pass===1)return '零知识虚拟机（Zero-Knowledge Virtual Machine, zkVM）与执行轨迹（Trace）是核心概念。';
+  const t=(ctx.block.text||'').trim();
+  if(ctx.block.type==='section')return t;
+  if(runNo===1 && ctx.block.id==='b03')throw new Error('simulated-crash');
+  return '已译:'+t.slice(0,12);
+}
+const blocks=[
+ {id:'b01',type:'section',text:'1 Intro',order:0},
+ {id:'b02',type:'paragraph',text:'The trace generation dominates latency.',order:1},
+ {id:'b03',type:'paragraph',text:'This block crashes the first run.',order:2},
+ {id:'b04',type:'paragraph',text:'The architecture reduces memory traffic.',order:3},
+];
+const store={byId:{},terms:[]};
+function makeOpts(){return {translate:mockTranslate,loadState:async()=>store,saveState:async s=>{store.byId=s.byId;store.terms=s.terms;},maxRetries:1,systemPrompt:'SYS',userPrompt:'USER-PROMPT-原文'};}
+
+(async()=>{
+  runNo=1;
+  const r1=await S.runResumableTranslation(blocks,makeOpts());
+  const callsRun1=calls.length;
+  runNo=2;
+  const r2=await S.runResumableTranslation(blocks,makeOpts());
+  const checks=[
+    ['run1 b03 failed,others done', r1.blocks.find(b=>b.id==='b03').status==='failed' && r1.stats.done===3],
+    ['run1 持久化 b01/b02', store.byId.b01 && store.byId.b01.status==='done' && store.byId.b02.status==='done'],
+    ['run2 复用已完成块(resumed=3)', r2.stats.resumed===3 && r2.blocks.filter(b=>b.resumed).length===3],
+    ['run2 不重跑已完成块(call不含b01/b02)', !calls.slice(callsRun1).some(c=>c.pass===2&&(c.blockId==='b01'||c.blockId==='b02'))],
+    ['run2 续跑 b03..b04 全 done', r2.blocks.find(b=>b.id==='b03').status==='done' && r2.blocks.find(b=>b.id==='b04').status==='done'],
+    ['术语表首轮抽取并跨轮复用', r2.terms.length>=2 && r1.terms.length>=2],
+    ['用户提示词原文前缀完整', calls.every(c=>c.userStarts)],
+    ['pass2 术语注入', calls.filter(c=>c.pass===2&&c.run===2).every(c=>c.terms>=2)],
+  ];
+  const fails=checks.filter(c=>!c[1]);
+  document.getElementById('r').textContent=(fails.length?'FAIL '+fails.length+'\n':'ALL-PASS\n')+checks.map(c=>`${c[1]?'✅':'❌'} ${c[0]}`).join('\n')+'\nr1='+JSON.stringify(r1.stats)+'\nr2='+JSON.stringify(r2.stats);
+})().catch(e=>{document.getElementById('r').textContent='EXCEPTION '+e.message+'\n'+e.stack;});
+</script>
+</body>
+</html>

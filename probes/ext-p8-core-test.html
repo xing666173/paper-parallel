@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><title>P8-core-test</title></head>
+<body style="font-family:Consolas,monospace;font-size:18px;padding:20px;background:#fff">
+<h1>P8 core shared-module test</h1>
+<div id="r">RUNNING…</div>
+<script src="../src/core/paginate/paginator.core.js"></script>
+<script>
+function fakeMeasure(text,w,fs){
+  const lineH=fs*1.6;
+  const cpl=Math.max(1,Math.floor(w/(fs*1.05)));
+  const lines=Math.ceil([...text].length/cpl);
+  return Math.max(lineH,lines*lineH);
+}
+const S=['零知识虚拟机（Zero-Knowledge Virtual Machine, zkVM）在区块链扩容与隐私计算中扮演关键角色。',
+'执行轨迹（Trace）的生成速度直接决定了整个证明流水线的端到端延迟。',
+'本文提出一种面向 zkVM 轨迹生成的高性能异构加速器架构。',
+'实验结果表明，所提架构相比通用 CPU 基线取得 18.3 倍的端到端加速。'];
+const B=[];
+let n=0;const add=o=>B.push({id:'b'+(++n),...o});
+const para=k=>Array.from({length:k},(_,i)=>S[i%S.length]).join('');
+add({type:'title',text:'面向零知识虚拟机轨迹生成的高性能异构加速器',widthMode:'span',frontMatter:true,fontSize:17});
+add({type:'authors',text:'作者一，作者二，作者三  东南大学集成电路学院',widthMode:'span',frontMatter:true,fontSize:11});
+add({type:'abstract',text:'摘要——'+para(3),widthMode:'span',frontMatter:true,fontSize:12});
+add({type:'keywords',text:'关键词：zkVM；Trace；Accelerator',widthMode:'span',frontMatter:true,fontSize:11});
+add({type:'section',text:'1 引言',fontSize:14});
+add({type:'paragraph',text:para(6),fontSize:13});
+add({type:'figure',widthMode:'column',atomicH:220,caption:'图 1'});
+add({type:'paragraph',text:para(5),fontSize:13});
+add({type:'section',text:'2 背景',fontSize:14});
+add({type:'paragraph',text:para(7),fontSize:13});
+add({type:'equation',widthMode:'column',atomicH:80,label:'e=gcd(f)'});
+add({type:'paragraph',text:para(4),fontSize:13});
+add({type:'table',widthMode:'span',atomicH:280,caption:'表 1'});
+add({type:'paragraph',text:para(6),fontSize:13});
+add({type:'section',text:'3 结论',fontSize:14});
+add({type:'paragraph',text:para(3),fontSize:13});
+add({type:'table',widthMode:'span',atomicH:1180,caption:'超大表'});
+
+const core=window.PaperParallelPaginator;
+const lines=[];
+let allOk=true;
+for(const mode of ['double','single','mixed']){
+  const r=core.paginate(B,{mode,measureText:fakeMeasure});
+  const v=core.validateOrder(B,r.log);
+  const ok=v.ok && r.pages.length>=2 && r.issues.length===1;
+  allOk = allOk && ok;
+  lines.push(mode+' pages='+r.pages.length+' order='+(v.ok?'OK':'FAIL')+' issues='+r.issues.length+' spanPages='+r.pages.filter(p=>p.spans.length).length+' => '+(ok?'PASS':'FAIL'));
+}
+lines.push('frontMatterInFull='+core.paginate(B,{mode:'double',measureText:fakeMeasure}).pages[0].full.blocks.length);
+lines.push('ALL='+(allOk?'PASS':'FAIL'));
+document.getElementById('r').textContent=lines.join('\n');
+</script>
+</body>
+</html>
