@@ -34,9 +34,12 @@ describe('Typst project generation', () => {
 
     expect(project.mainContent).toContain('#pp-full-width[');
     expect(project.mainContent).toContain('论文标题');
+    expect(project.mainContent).toContain('#pp-title[');
     expect(project.mainContent).toContain('#pp-double[');
     expect(project.mainContent).toContain('#pp-unit("sec-1-p-1-g-1-t-1")');
     expect(project.mainContent).toContain('#pp-asset("fig-1", "/assets/fig-1.png", span: true)');
+    expect(project.mainContent).toContain('#pp-caption[');
+    expect(project.mainContent).toContain('footer: context');
     expect(project.mainContent.indexOf('pp-full-width')).toBeLessThan(project.mainContent.indexOf('pp-double'));
     expect(project.files.get('/assets/fig-1.png')).toEqual(figBytes);
     expect(project.markerIds).toEqual([

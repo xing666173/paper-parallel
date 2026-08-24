@@ -67,6 +67,26 @@ describe('production pipeline preparation', () => {
     ]));
     expect(prepared.regions[0].orderedUnitIds).not.toContain('table-body');
   });
+
+  it('drops source page numbers so the target PDF can paginate and number itself naturally', () => {
+    const doc = fixtureDoc();
+    doc.blocks.push({
+      id: 'page-number', docId: 'en', type: 'paragraph', pageIndex: 0,
+      rect: { x: 302, y: 765, w: 8, h: 10 }, order: 4, text: '1',
+      splitAllowed: true, widthMode: 'span',
+    });
+    doc.semanticUnits.push({
+      id: 'page-number', kind: 'paragraph', sourceText: '1', protectedTokens: [],
+      layoutRegionId: 'r1', order: 4,
+    });
+    doc.layoutRegions[0].orderedUnitIds.push('page-number');
+
+    const prepared = prepareImmutableStructure(doc);
+
+    expect(prepared.units.some((unit) => unit.id === 'page-number')).toBe(false);
+    expect(prepared.regions[0].orderedUnitIds).not.toContain('page-number');
+    expect(prepared.assetRegions.some((asset) => asset.id === 'page-number')).toBe(false);
+  });
 });
 
 function fixtureDoc(): Doc {

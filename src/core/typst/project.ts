@@ -41,10 +41,16 @@ function renderTextUnit(unit: TypstSemanticUnit, markerIds: string[]): string {
   const segments = unit.targetSegments?.length
     ? unit.targetSegments
     : [{ id: unit.id, text: unit.text ?? '' }];
-  return segments.map((segment) => {
+  const marked = segments.map((segment) => {
     markerIds.push(segment.id);
     return `#pp-unit(${quote(encodeURIComponent(segment.id))})[${escapeTypstText(segment.text)}]`;
   }).join('\n');
+  if (unit.kind === 'title') return `#pp-title[${marked}]`;
+  if (unit.kind === 'author' || unit.kind === 'affiliation') return `#pp-author[${marked}]`;
+  if (unit.kind === 'heading') return `#pp-heading[${marked}]`;
+  if (unit.kind === 'caption' || unit.kind === 'table-title') return `#pp-caption[${marked}]`;
+  if (unit.kind === 'reference') return `#pp-reference[${marked}]`;
+  return marked;
 }
 
 function assetExtension(asset: ImmutableAsset): string {

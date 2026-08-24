@@ -105,6 +105,17 @@ describe('parser: lines -> blocks', () => {
     expect(result.blocks[0].characterRects?.map((char) => char.sourceIndex)).toEqual([0, 1, 3, 4]);
     expect(result.blocks[0].characterRects?.[2].rect).toEqual({ x: 24, y: 20, w: 6, h: 10 });
   });
+
+  it('keeps short centered front matter and wrapped full-width continuations out of paper columns', () => {
+    const lines = classifyLines([
+      { y: 60, x1: 240, x2: 372, h: 11, text: 'Alice Example, Bob Example', items: [] },
+      { y: 100, x1: 48, x2: 560, h: 10, text: 'Abstract: a full-width line that reaches across the page', items: [] },
+      { y: 113, x1: 48, x2: 250, h: 10, text: 'and its short continuation.', items: [] },
+      { y: 140, x1: 48, x2: 280, h: 10, text: 'Keywords: layout, translation', items: [] },
+    ], 612);
+
+    expect(lines.map((line) => line.col)).toEqual(['full', 'full', 'full', 'full']);
+  });
 });
 
 describe('parser: pdfjsAdapter', () => {

@@ -119,11 +119,44 @@ function visualColumnBounds(doc: Doc, anchor: Doc['blocks'][number]): { x: numbe
   return { x, w: right - x };
 }
 
+function detectedPageFurnitureIds(doc: Doc): Set<string> {
+  const ids = new Set<string>();
+  const repeatedMargins = new Map<string, Array<{ id: string; pageIndex: number }>>();
+  for (const block of doc.blocks) {
+    const pageHeight = doc.pages[block.pageIndex]?.height ?? doc.meta.paperHeight;
+    const nearMargin = block.rect.y < pageHeight * 0.05
+      || block.rect.y + block.rect.h > pageHeight * 0.92;
+    if (!nearMargin) continue;
+    const normalized = block.text?.trim().replace(/\s+/g, ' ') ?? '';
+    if (/^(?:page\s*)?(?:\d+|[ivxlcdm]+)(?:\s*(?:\/|of)\s*\d+)?$/i.test(normalized)) {
+      ids.add(block.id);
+    }
+    if (normalized && normalized.length <= 80) {
+      const key = normalized.toLocaleLowerCase();
+      const records = repeatedMargins.get(key) ?? [];
+      records.push({ id: block.id, pageIndex: block.pageIndex });
+      repeatedMargins.set(key, records);
+    }
+  }
+  for (const records of repeatedMargins.values()) {
+    if (new Set(records.map((record) => record.pageIndex)).size < 2) continue;
+    records.forEach((record) => ids.add(record.id));
+  }
+  return ids;
+}
+
 export function prepareImmutableStructure(doc: Doc): PreparedImmutableStructure {
   const regions = doc.layoutRegions.map((region) => ({ ...region, orderedUnitIds: [...region.orderedUnitIds] }));
   let units = doc.semanticUnits.map((unit) => ({ ...unit, protectedTokens: [...unit.protectedTokens] }));
   const blocks = new Map(doc.blocks.map((block) => [block.id, block]));
   const assetRegions: DetectedAssetRegion[] = [];
+  const furnitureIds = detectedPageFurnitureIds(doc);
+  if (furnitureIds.size) {
+    units = units.filter((unit) => !furnitureIds.has(unit.id));
+    for (const region of regions) {
+      region.orderedUnitIds = region.orderedUnitIds.filter((unitId) => !furnitureIds.has(unitId));
+    }
+  }
 
   for (const unit of units) {
     if (unit.kind !== 'formula' && unit.kind !== 'code' && unit.kind !== 'page-furniture') continue;
