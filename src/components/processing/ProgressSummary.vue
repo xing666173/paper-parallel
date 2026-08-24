@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import type { TaskSnapshot } from '../../types/models';
 
 const props = defineProps<{
@@ -9,6 +9,17 @@ const props = defineProps<{
 }>();
 
 defineEmits<{ stop: []; resume: [] }>();
+
+const now = ref(Date.now());
+let heartbeat: ReturnType<typeof setInterval> | undefined;
+
+onMounted(() => {
+  heartbeat = setInterval(() => { now.value = Date.now(); }, 1_000);
+});
+
+onBeforeUnmount(() => {
+  if (heartbeat) clearInterval(heartbeat);
+});
 
 const percentage = computed(() => {
   if (props.task.status === 'completed') return 100;
@@ -23,6 +34,12 @@ const statusLabel = computed(() => ({
   failed: '需要处理', completed: '处理完成',
 }[props.task.status]));
 
+const terminal = computed(() => ['failed', 'completed', 'stopped'].includes(props.task.status));
+const stageOrder = [
+  'idle', 'parsing', 'analyzing-layout', 'building-glossary', 'translating',
+  'composing', 'compiling', 'aligning', 'validating', 'completed',
+];
+
 function formatDuration(milliseconds: number | null): string {
   if (milliseconds === null) return '正在估算';
   const totalSeconds = Math.max(0, Math.round(milliseconds / 1_000));
@@ -32,11 +49,23 @@ function formatDuration(milliseconds: number | null): string {
 }
 
 const elapsed = computed(() => formatDuration(
-  props.task.startedAt ? Date.now() - props.task.startedAt : 0,
+  props.task.startedAt
+    ? (terminal.value ? props.task.updatedAt : now.value) - props.task.startedAt
+    : 0,
 ));
+const remaining = computed(() => {
+  if (props.task.status === 'failed') return '无法估算';
+  if (props.task.status === 'stopped') return '已暂停';
+  if (props.task.status === 'completed') return '0 秒';
+  return formatDuration(props.estimatedRemainingMs);
+});
 const lastResponse = computed(() => (
   props.lastResponseAt === null
-    ? '等待首次响应'
+    ? props.task.status === 'failed' && stageOrder.indexOf(props.task.stage) < stageOrder.indexOf('translating')
+      ? '未进入 AI 翻译'
+      : props.task.status === 'failed'
+        ? '未收到 AI 响应'
+        : '等待首次响应'
     : new Date(props.lastResponseAt).toLocaleTimeString('zh-CN', { hour12: false })
 ));
 </script>
@@ -55,7 +84,7 @@ const lastResponse = computed(() => (
     </div>
     <dl class="task-metrics">
       <div><dt>已用时间</dt><dd>{{ elapsed }}</dd></div>
-      <div><dt>预计剩余</dt><dd>{{ formatDuration(estimatedRemainingMs) }}</dd></div>
+      <div><dt>预计剩余</dt><dd>{{ remaining }}</dd></div>
       <div><dt>最近响应</dt><dd>{{ lastResponse }}</dd></div>
       <div><dt>已通过</dt><dd>{{ task.progress.completed }}</dd></div>
       <div><dt>重试</dt><dd>{{ task.progress.retries }}</dd></div>
@@ -69,6 +98,8 @@ const lastResponse = computed(() => (
       v-else-if="task.status === 'stopped'"
       class="button primary" type="button" @click="$emit('resume')"
     >继续处理</button>
-    <p class="stop-note">停止会取消正在进行的请求，已经校验并写入的翻译缓存会保留。</p>
+    <p v-if="task.status === 'running' || task.status === 'stopping' || task.status === 'stopped'" class="stop-note">
+      停止会取消正在进行的请求，已经校验并写入的翻译缓存会保留。
+    </p>
   </section>
 </template>

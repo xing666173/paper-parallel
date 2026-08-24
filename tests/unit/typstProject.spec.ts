@@ -51,6 +51,12 @@ describe('Typst project generation', () => {
     expect(escapeTypstText('Cost is $5 and [x] #tag.')).toBe('Cost is \\$5 and \\[x\\] \\#tag.');
   });
 
+  it('escapes email, label, citation, emphasis, and raw-markup delimiters', () => {
+    expect(escapeTypstText('xi.wang@<seu.edu.cn> uses *ASIC* and `code_ref`.')).toBe(
+      'xi.wang\\@\\<seu.edu.cn\\> uses \\*ASIC\\* and \\`code\\_ref\\`.',
+    );
+  });
+
   it('rejects an asset whose bytes no longer match its recorded hash', async () => {
     const { assets } = await buildAssetManifest([{
       id: 'fig-1', kind: 'figure', pageIndex: 0,

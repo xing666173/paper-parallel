@@ -54,6 +54,7 @@ const internalVisible = ref<number[]>([0]);
 const currentPage = ref(0);
 const canvases = new Map<number, HTMLCanvasElement>();
 const renderTasks = new Map<number, RenderTask>();
+const renderGenerations = new Map<number, number>();
 let loadingTask: ReturnType<typeof getDocument> | undefined;
 let loadGeneration = 0;
 
@@ -88,11 +89,9 @@ function activeRectsFor(pageIndex: number) {
 }
 
 function cancelRender(pageIndex: number) {
+  renderGenerations.set(pageIndex, (renderGenerations.get(pageIndex) ?? 0) + 1);
   const task = renderTasks.get(pageIndex);
-  if (task) {
-    task.cancel();
-    renderTasks.delete(pageIndex);
-  }
+  task?.cancel();
 }
 
 function cancelAllRenders() {
@@ -100,11 +99,27 @@ function cancelAllRenders() {
 }
 
 async function renderPage(pageIndex: number) {
+  const generation = (renderGenerations.get(pageIndex) ?? 0) + 1;
+  renderGenerations.set(pageIndex, generation);
   const document = pdf.value;
   const canvas = canvases.get(pageIndex);
   if (!document || !canvas || !renderPages.value.has(pageIndex)) return;
-  cancelRender(pageIndex);
+  const previousTask = renderTasks.get(pageIndex);
+  if (previousTask) {
+    previousTask.cancel();
+    try {
+      await previousTask.promise;
+    } catch {
+      // The invocation that owns this task reports non-cancellation failures.
+    }
+  }
   const page = await document.getPage(pageIndex + 1);
+  if (
+    renderGenerations.get(pageIndex) !== generation
+    || pdf.value !== document
+    || canvases.get(pageIndex) !== canvas
+    || !renderPages.value.has(pageIndex)
+  ) return;
   const viewport = page.getViewport({ scale: props.zoom });
   const pixelRatio = Math.max(1, window.devicePixelRatio || 1);
   canvas.width = Math.floor(viewport.width * pixelRatio);

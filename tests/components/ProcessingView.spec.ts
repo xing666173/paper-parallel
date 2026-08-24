@@ -80,6 +80,34 @@ describe('processing dashboard', () => {
     expect(wrapper.text()).toContain('2 个受保护标记不一致');
   });
 
+  it('stops live indicators when layout analysis fails before any AI request', async () => {
+    const store = useTaskStore();
+    store.current = {
+      ...runningTask(),
+      stage: 'analyzing-layout',
+      status: 'running',
+      progress: { completed: 0, total: 0, retries: 0, failed: 0 },
+    };
+    const { wrapper } = await mountView();
+    await flushPromises();
+
+    store.current = {
+      ...store.current,
+      status: 'failed',
+      updatedAt: 5_000,
+      error: '无法可靠确定图 blk-54 的不可变区域',
+    };
+    await flushPromises();
+
+    expect(wrapper.text()).toContain('无法估算');
+    expect(wrapper.text()).toContain('未进入 AI 翻译');
+    expect(wrapper.text()).toContain('中文预览生成失败');
+    expect(wrapper.text()).toContain('更新已停止');
+    expect(wrapper.text()).not.toContain('等待首次响应');
+    expect(wrapper.text()).not.toContain('中文页面正在形成');
+    expect(wrapper.text()).not.toContain('实时更新');
+  });
+
   it('does not bounce a manual return when the prior completion summary is already present', async () => {
     const store = useTaskStore();
     store.current = {

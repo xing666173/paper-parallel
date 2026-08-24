@@ -45,6 +45,10 @@ watch(() => store.completionSummary, async (summary) => {
   await router.replace({ name: 'reader', params: { projectId: projectId.value }, query: { auto: '1' } });
 }, { deep: true });
 
+watch(() => task.value?.status, (status) => {
+  if (status === 'failed' && !previewUrl.value) previewState.value = 'failed';
+});
+
 function pipelineRunner(initial: TaskSnapshot) {
   return async (signal: AbortSignal) => {
     const stages = createBrowserPipelineStages({

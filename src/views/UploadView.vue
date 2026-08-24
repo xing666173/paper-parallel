@@ -6,7 +6,6 @@ import TranslationSettings from '../components/upload/TranslationSettings.vue';
 import { createProjectRepository } from '../core/project/repository';
 import { createTaskSnapshot } from '../core/task/stateMachine';
 import {
-  chatCompletion,
   CURRENT_DEEPSEEK_MODELS,
   listModels,
   type DeepSeekModel,
@@ -55,14 +54,6 @@ async function testConnection(): Promise<void> {
     if (discovered.length === 0) throw new Error('当前账户未返回受支持的模型');
     models.value = discovered;
     if (!discovered.some((item) => item.id === model.value)) model.value = discovered[0]!.id;
-    await chatCompletion({
-      baseUrl: 'https://api.deepseek.com',
-      apiKey: apiKey.value.trim(),
-      model: model.value,
-      thinkingMode: thinkingMode.value,
-      messages: [{ role: 'user', content: 'Reply with pong.' }],
-      maxTokens: 4,
-    });
     if (saveKey.value) localStorage.setItem(KEY_STORAGE, apiKey.value.trim());
     else localStorage.removeItem(KEY_STORAGE);
     connectionStatus.value = 'success';

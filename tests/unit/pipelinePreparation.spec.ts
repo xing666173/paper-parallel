@@ -41,6 +41,35 @@ describe('production pipeline preparation', () => {
     expect(order.indexOf('fig-caption-asset')).toBe(order.indexOf('fig-caption') - 1);
   });
 
+  it('uses the repeated page header as the top boundary for side-by-side figures at the page top', () => {
+    const doc = fixtureDoc();
+    const runningHeader = 'ZK-Tracer: A High-Performance Heterogeneous Accelerator for Zero-Knowledge VM Trace Generation';
+    doc.pageCount = 2;
+    doc.pages.push({ pageIndex: 1, width: 612, height: 792, columns: [] });
+    doc.blocks.push(
+      { id: 'header-1', docId: 'en', type: 'paragraph', pageIndex: 0, rect: { x: 54, y: 66, w: 294, h: 8 }, order: 4, text: runningHeader, splitAllowed: true, widthMode: 'column' },
+      { id: 'header-2', docId: 'en', type: 'paragraph', pageIndex: 1, rect: { x: 54, y: 66, w: 294, h: 8 }, order: 5, text: runningHeader, splitAllowed: true, widthMode: 'column' },
+      { id: 'paired-caption', docId: 'en', type: 'caption', pageIndex: 1, rect: { x: 71, y: 207, w: 487, h: 9 }, order: 6, text: 'Figure 3: Profiling Figure 4: Workload Analysis', splitAllowed: false, widthMode: 'span' },
+    );
+    doc.semanticUnits.push(
+      { id: 'header-1', kind: 'paragraph', sourceText: runningHeader, protectedTokens: [], layoutRegionId: 'r1', order: 4 },
+      { id: 'header-2', kind: 'paragraph', sourceText: runningHeader, protectedTokens: [], layoutRegionId: 'page-top', order: 5 },
+      { id: 'paired-caption', kind: 'caption', sourceText: 'Figure 3: Profiling Figure 4: Workload Analysis', protectedTokens: [], layoutRegionId: 'page-top', order: 6 },
+    );
+    doc.layoutRegions.push({
+      id: 'page-top', mode: 'full-width', sourcePage: 1,
+      bounds: { x: 71, y: 207, w: 487, h: 400 }, orderedUnitIds: ['header-2', 'paired-caption'],
+    });
+    doc.layoutRegions[0].orderedUnitIds.push('header-1');
+
+    const prepared = prepareImmutableStructure(doc);
+
+    expect(prepared.assetRegions).toContainEqual(expect.objectContaining({
+      id: 'paired-caption-asset', kind: 'figure', pageIndex: 1,
+      rect: { x: 71, y: 80, w: 487, h: 121 },
+    }));
+  });
+
   it('preserves a captioned table as one full-column asset and excludes its body from translation', () => {
     const doc = fixtureDoc();
     doc.blocks.push(

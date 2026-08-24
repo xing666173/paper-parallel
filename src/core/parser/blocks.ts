@@ -26,6 +26,30 @@ export interface ColumnBounds {
   max: number;
 }
 
+function hasCaptionSuffix(suffix: string | undefined): boolean {
+  if (suffix === undefined) return false;
+  const trimmed = suffix.trimStart();
+  if (!trimmed) return true;
+  if (/^[:：.\-–—]/.test(trimmed)) return true;
+  return trimmed.length < suffix.length && /^[A-Z\u4e00-\u9fff]/.test(trimmed);
+}
+
+export function isFigureCaptionText(text: string): boolean {
+  return hasCaptionSuffix(text.trim().match(/^fig(?:ure)?\.?\s*(?:\d+|[IVXLCDM]+)(.*)$/i)?.[1]);
+}
+
+export function isTableCaptionText(text: string): boolean {
+  return hasCaptionSuffix(text.trim().match(/^table\s*(?:\d+|[IVXLCDM]+)(.*)$/i)?.[1]);
+}
+
+function isNumberedCaptionText(text: string): boolean {
+  const trimmed = text.trim();
+  return isFigureCaptionText(trimmed)
+    || isTableCaptionText(trimmed)
+    || hasCaptionSuffix(trimmed.match(/^algorithm\s*(?:\d+|[IVXLCDM]+)(.*)$/i)?.[1])
+    || hasCaptionSuffix(trimmed.match(/^[图表]\s*(?:\d+|[IVXLCDM]+)(.*)$/i)?.[1]);
+}
+
 function median(arr: number[]): number {
   if (!arr.length) return 0;
   const a = [...arr].sort((x, y) => x - y);
@@ -57,7 +81,7 @@ function classifyLineRole(l: ClassifiedLine, col: ColumnBounds): RawBlock['type'
   if (/^(references|bibliography|acknowledge?ments?|参考文献|致谢)\s*$/i.test(t)) return 'section';
 
   // 图表题注
-  if (/^(fig(ure)?\.?|table|algorithm)\s*\d+/i.test(t) || /^[图表]\s*\d+/.test(t))
+  if (isNumberedCaptionText(t))
     return 'caption';
 
   // 独立公式:短、居中、含数学符号或右端编号

@@ -69,10 +69,7 @@ describe('upload workflow', () => {
           ],
         }), { status: 200 });
       }
-      return new Response(JSON.stringify({
-        choices: [{ message: { content: 'pong' } }],
-        usage: { prompt_tokens: 1, completion_tokens: 1 },
-      }), { status: 200 });
+      throw new Error(`测试连接不应发起收费的生成请求：${url}`);
     });
     vi.stubGlobal('fetch', fetchSpy as unknown as typeof fetch);
 
@@ -84,6 +81,7 @@ describe('upload workflow', () => {
     expect(start.element.disabled).toBe(true);
 
     await wrapper.get('[data-field="api-key"]').setValue('sk-browser-test');
+    await wrapper.findAll('select')[1]!.setValue('enabled');
     const file = new File(['%PDF-test'], 'paper.pdf', { type: 'application/pdf' });
     const input = wrapper.get<HTMLInputElement>('[data-field="pdf"]');
     Object.defineProperty(input.element, 'files', { configurable: true, value: [file] });
@@ -91,6 +89,7 @@ describe('upload workflow', () => {
     await wrapper.get('[data-action="test-connection"]').trigger('click');
     await flushPromises();
     expect(wrapper.text()).toContain('连接成功');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(start.element.disabled).toBe(false);
 
     await wrapper.get('form').trigger('submit');
@@ -113,7 +112,7 @@ describe('upload workflow', () => {
     expect(JSON.stringify(artifact)).not.toContain('sk-browser-test');
     const task = await createProjectRepository().loadTask(projectId);
     expect(task?.settings).toMatchObject({
-      modelId: 'deepseek-v4-flash', thinkingMode: 'disabled', sourceFileName: 'paper.pdf',
+      modelId: 'deepseek-v4-flash', thinkingMode: 'enabled', sourceFileName: 'paper.pdf',
     });
     expect(JSON.stringify(task)).not.toContain('sk-browser-test');
     expect(sessionStorage.getItem('paper-parallel.deepseek-key-session')).toBe('sk-browser-test');

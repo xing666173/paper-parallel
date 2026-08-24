@@ -11,6 +11,7 @@ const props = withDefaults(defineProps<{
 
 const validSourceUrl = computed(() => props.sourceUrl?.startsWith('blob:') === true);
 const validPreviewUrl = computed(() => props.previewUrl?.startsWith('blob:') === true);
+const updateLabel = computed(() => props.previewState === 'failed' ? '更新已停止' : '实时更新');
 
 function revoke(url?: string): void {
   if (url?.startsWith('blob:') && typeof URL.revokeObjectURL === 'function') URL.revokeObjectURL(url);
@@ -24,7 +25,7 @@ onBeforeUnmount(() => revoke(props.previewUrl));
   <section class="preview-card" aria-labelledby="paper-preview-title">
     <div class="panel-heading">
       <div><h2 id="paper-preview-title">论文预览</h2><p>英文原页与已通过校验的中文内容</p></div>
-      <span class="preview-live"><i /> 实时更新</span>
+      <span class="preview-live" :class="{ stopped: previewState === 'failed' }"><i /> {{ updateLabel }}</span>
     </div>
     <div class="paper-preview-grid">
       <article class="paper-pane">

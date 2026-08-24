@@ -7,6 +7,7 @@ import type {
 import type { DetectedAssetRegion } from '../assets/extract';
 import { buildSourceSentenceCandidates } from '../align/sourceSentences';
 import { extractProtectedTokens } from '../translate/protected';
+import { isFigureCaptionText, isTableCaptionText } from '../parser/blocks';
 import type {
   TranslationBlockKind,
   TranslationBlockRequest,
@@ -124,14 +125,14 @@ function detectedPageFurnitureIds(doc: Doc): Set<string> {
   const repeatedMargins = new Map<string, Array<{ id: string; pageIndex: number }>>();
   for (const block of doc.blocks) {
     const pageHeight = doc.pages[block.pageIndex]?.height ?? doc.meta.paperHeight;
-    const nearMargin = block.rect.y < pageHeight * 0.05
+    const nearMargin = block.rect.y < pageHeight * 0.12
       || block.rect.y + block.rect.h > pageHeight * 0.92;
     if (!nearMargin) continue;
     const normalized = block.text?.trim().replace(/\s+/g, ' ') ?? '';
     if (/^(?:page\s*)?(?:\d+|[ivxlcdm]+)(?:\s*(?:\/|of)\s*\d+)?$/i.test(normalized)) {
       ids.add(block.id);
     }
-    if (normalized && normalized.length <= 80) {
+    if (normalized && normalized.length <= 160) {
       const key = normalized.toLocaleLowerCase();
       const records = repeatedMargins.get(key) ?? [];
       records.push({ id: block.id, pageIndex: block.pageIndex });
@@ -171,7 +172,7 @@ export function prepareImmutableStructure(doc: Doc): PreparedImmutableStructure 
     });
   }
 
-  for (const caption of units.filter((unit) => unit.kind === 'caption' && /^fig(?:ure)?\.?\s*\d+/i.test(unit.sourceText ?? ''))) {
+  for (const caption of units.filter((unit) => unit.kind === 'caption' && isFigureCaptionText(unit.sourceText ?? ''))) {
     const captionBlock = blocks.get(caption.id);
     const region = regions.find((candidate) => candidate.id === caption.layoutRegionId);
     if (!captionBlock || !region) throw new Error(`图注 ${caption.id} 缺少版式坐标`);
@@ -182,8 +183,18 @@ export function prepareImmutableStructure(doc: Doc): PreparedImmutableStructure 
         block?.pageIndex === captionBlock.pageIndex
         && sameVisualColumn(block, captionBlock, pageWidth)
       ));
-    const top = previousBlock ? previousBlock.rect.y + previousBlock.rect.h + 6 : region.bounds.y;
     const bottom = captionBlock.rect.y - 6;
+    const furnitureBoundary = doc.blocks
+      .filter((block) => (
+        block.pageIndex === captionBlock.pageIndex
+        && furnitureIds.has(block.id)
+        && block.rect.y + block.rect.h <= bottom
+        && block.rect.x < captionBlock.rect.x + captionBlock.rect.w
+        && block.rect.x + block.rect.w > captionBlock.rect.x
+      ))
+      .reduce((boundary, block) => Math.max(boundary, block.rect.y + block.rect.h + 6), 0);
+    const previousBoundary = previousBlock ? previousBlock.rect.y + previousBlock.rect.h + 6 : 0;
+    const top = previousBlock && previousBoundary < bottom - 24 ? previousBoundary : furnitureBoundary;
     if (bottom - top < 24) {
       const previousId = previousBlock?.id ?? 'none';
       const previousText = previousBlock?.text?.replace(/\s+/g, ' ').slice(0, 48) ?? 'none';
@@ -206,7 +217,7 @@ export function prepareImmutableStructure(doc: Doc): PreparedImmutableStructure 
     region.orderedUnitIds.splice(captionIndex, 0, id);
   }
 
-  for (const caption of units.filter((unit) => unit.kind === 'caption' && /^table\s*\d+/i.test(unit.sourceText ?? ''))) {
+  for (const caption of units.filter((unit) => unit.kind === 'caption' && isTableCaptionText(unit.sourceText ?? ''))) {
     const captionBlock = blocks.get(caption.id);
     const region = regions.find((candidate) => candidate.id === caption.layoutRegionId);
     if (!captionBlock || !region) throw new Error(`表题 ${caption.id} 缺少版式坐标`);

@@ -96,6 +96,25 @@ describe('parser: lines -> blocks', () => {
     expect(r.blocks).toHaveLength(12);
   });
 
+  it('does not misclassify prose references to figures and tables as captions', () => {
+    const line = (text: string, y: number) => ({
+      y, x1: 50, x2: 290, h: 10, text, items: [], col: 'left' as const,
+    });
+    const blocks = groupLinesToBlocks([
+      line('Table 3 shows the comparison of execution time.', 100),
+      line('Figure 9, the sweet spot is 17 parallel units.', 125),
+      line('Figure 11 show that our pipeline improves performance.', 150),
+      line('Figure 3: Profiling before and after acceleration', 190),
+      line('Table 2: ZK-Tracer PPA Results', 220),
+    ], 612, 792);
+
+    for (const prose of ['Table 3 shows', 'Figure 9,', 'Figure 11 show']) {
+      expect(blocks.find((block) => block.text.includes(prose))?.type).toBe('paragraph');
+    }
+    expect(blocks.find((block) => block.text.includes('Figure 3:'))?.type).toBe('caption');
+    expect(blocks.find((block) => block.text.includes('Table 2:'))?.type).toBe('caption');
+  });
+
   it('在块文本中保留 PDF.js 文本项的字符索引和真实坐标', () => {
     const result = parsePageItems([
       { str: 'AB', x: 10, y: 20, w: 12, h: 10 },
