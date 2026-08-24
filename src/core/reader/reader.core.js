@@ -26,6 +26,34 @@ function buildPositionIndex(blocks, pageH) {
 }
 
 /**
+ * 把 getBoundingClientRect() 的页面/视口测量值转换为滚动内容区局部索引。
+ * @param {Array<{id:string,top:number,height:number}>} measurements
+ * @param {number} containerTop 内容区在同一坐标系中的 top
+ */
+function buildMeasuredPositionIndex(measurements, containerTop) {
+  const origin = Number(containerTop) || 0;
+  return buildPositionIndex(
+    (Array.isArray(measurements) ? measurements : []).map((item) => ({
+      id: item.id,
+      pageIndex: 0,
+      rect: { y: (Number(item.top) || 0) - origin, h: Math.max(1, Number(item.height) || 0) },
+    })),
+    0,
+  );
+}
+
+/** 只有目标位置发生可见变化时，程序化滚动才会产生需要抑制的回声事件。 */
+function shouldSuppressScrollEcho(currentScrollTop, targetScrollTop, epsilon = 0.5) {
+  return Math.abs((Number(currentScrollTop) || 0) - (Number(targetScrollTop) || 0)) > epsilon;
+}
+
+/** 把目标滚动值钳制到浏览器实际可到达的范围。 */
+function clampScrollTop(targetScrollTop, scrollHeight, clientHeight) {
+  const maxScrollTop = Math.max(0, (Number(scrollHeight) || 0) - (Number(clientHeight) || 0));
+  return Math.min(maxScrollTop, Math.max(0, Number(targetScrollTop) || 0));
+}
+
+/**
  * 定位某侧视口中心所在的块:二分最近块。
  * @param {{sorted:Array,byId:Map}} idx
  * @param {number} scrollTop
@@ -126,12 +154,110 @@ function locateSubstringRange(fullText, sub) {
   return { start: idx, end: idx + st.length };
 }
 
+/**
+ * 把项目包中的原始块整理成适合阅读器展示的纵向流。
+ * 原始 PDF 坐标保存在 sourcePageIndex/sourceRect 中；阅读器使用估算高度生成
+ * 稳定的虚拟坐标，避免翻译后文字变长时互相覆盖。
+ * @param {Array<Object>} blocks
+ * @param {{gap?:number,charsPerLine?:number,lineHeight?:number,minHeight?:number}} [opts]
+ */
+function buildFlowBlocks(blocks, opts = {}) {
+  const gap = opts.gap ?? 12;
+  const charsPerLine = opts.charsPerLine ?? 72;
+  const lineHeight = opts.lineHeight ?? 24;
+  const minHeight = opts.minHeight ?? 64;
+  let y = 16;
+  return [...(Array.isArray(blocks) ? blocks : [])]
+    .sort((a, b) => {
+      const ao = Number.isFinite(a?.order) ? a.order : Number.MAX_SAFE_INTEGER;
+      const bo = Number.isFinite(b?.order) ? b.order : Number.MAX_SAFE_INTEGER;
+      return ao - bo || (Number(a?.pageIndex) || 0) - (Number(b?.pageIndex) || 0) || String(a?.id || '').localeCompare(String(b?.id || ''));
+    })
+    .map((block) => {
+      const type = String(block?.type || 'paragraph');
+      const text = String(block?.text || block?.caption || `[${type}]`).trim() || `[${type}]`;
+      const lines = Math.max(1, Math.ceil([...text].length / charsPerLine));
+      const h = Math.max(minHeight, lines * lineHeight + 32);
+      const flow = {
+        ...block,
+        id: String(block?.id || ''),
+        type,
+        text,
+        pageIndex: 0,
+        sourcePageIndex: Number.isFinite(block?.pageIndex) ? block.pageIndex : null,
+        sourceRect: block?.rect || null,
+        rect: { x: 0, y, w: 1, h },
+      };
+      y += h + gap;
+      return flow;
+    })
+    .filter((block) => block.id);
+}
+
+/**
+ * 将 P19 项目包转换为阅读器模型。无效的对齐引用会被移除，未匹配块仍保留展示。
+ * @param {{enDoc?:{blocks?:Array},zhDoc?:{blocks?:Array},units?:Array,spans?:Array}} pkg
+ */
+function buildReaderModel(pkg) {
+  const enBlocks = buildFlowBlocks(pkg?.enDoc?.blocks || []);
+  const zhBlocks = buildFlowBlocks(pkg?.zhDoc?.blocks || []);
+  const enIds = new Set(enBlocks.map((block) => block.id));
+  const zhIds = new Set(zhBlocks.map((block) => block.id));
+  const units = (Array.isArray(pkg?.units) ? pkg.units : [])
+    .map((unit) => ({
+      enBlockIds: (Array.isArray(unit?.enBlockIds) ? unit.enBlockIds : []).filter((id) => enIds.has(id)),
+      zhBlockIds: (Array.isArray(unit?.zhBlockIds) ? unit.zhBlockIds : []).filter((id) => zhIds.has(id)),
+    }))
+    .filter((unit) => unit.enBlockIds.length && unit.zhBlockIds.length);
+  const matchedEn = new Set(units.flatMap((unit) => unit.enBlockIds));
+  const matchedZh = new Set(units.flatMap((unit) => unit.zhBlockIds));
+  const enUnitIndex = new Map();
+  const zhUnitIndex = new Map();
+  units.forEach((unit, unitIndex) => {
+    unit.enBlockIds.forEach((id) => enUnitIndex.set(id, unitIndex));
+    unit.zhBlockIds.forEach((id) => zhUnitIndex.set(id, unitIndex));
+  });
+  enBlocks.forEach((block) => {
+    block.matched = matchedEn.has(block.id);
+    block.unitIndex = enUnitIndex.get(block.id) ?? null;
+  });
+  zhBlocks.forEach((block) => {
+    block.matched = matchedZh.has(block.id);
+    block.unitIndex = zhUnitIndex.get(block.id) ?? null;
+  });
+  const spans = (Array.isArray(pkg?.spans) ? pkg.spans : []).filter(
+    (span) => enIds.has(span?.enBlockId) && zhIds.has(span?.zhBlockId),
+  );
+  return {
+    enBlocks,
+    zhBlocks,
+    units,
+    spans,
+    contentHeight: {
+      en: enBlocks.length ? enBlocks[enBlocks.length - 1].rect.y + enBlocks[enBlocks.length - 1].rect.h + 16 : 0,
+      zh: zhBlocks.length ? zhBlocks[zhBlocks.length - 1].rect.y + zhBlocks[zhBlocks.length - 1].rect.h + 16 : 0,
+    },
+    stats: {
+      enBlocks: enBlocks.length,
+      zhBlocks: zhBlocks.length,
+      matchedUnits: units.length,
+      unmatchedEn: enBlocks.length - matchedEn.size,
+      unmatchedZh: zhBlocks.length - matchedZh.size,
+    },
+  };
+}
+
 const __rootReader = typeof globalThis !== 'undefined' ? globalThis : this;
 __rootReader.PaperParallelReader = {
   buildPositionIndex,
+  buildMeasuredPositionIndex,
+  shouldSuppressScrollEcho,
+  clampScrollTop,
   locateBlockAtViewport,
   buildUnitIndex,
   resolveSyncCommand,
   createSyncController,
   locateSubstringRange,
+  buildFlowBlocks,
+  buildReaderModel,
 };

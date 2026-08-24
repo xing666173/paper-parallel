@@ -12,6 +12,10 @@ export interface PositionedBlock {
 export interface ReaderBlock extends PositionedBlock {
   type: string;
   text: string;
+  matched?: boolean;
+  unitIndex?: number | null;
+  sourcePageIndex?: number | null;
+  sourceRect?: Record<string, unknown> | null;
 }
 
 export interface ReaderSpan {
@@ -19,6 +23,22 @@ export interface ReaderSpan {
   zh: string;
   enBlockId: string;
   zhBlockId: string;
+}
+
+export interface ReaderProjectPackage {
+  enDoc?: { blocks?: Array<Record<string, unknown>> };
+  zhDoc?: { blocks?: Array<Record<string, unknown>> };
+  units?: { enBlockIds: string[]; zhBlockIds: string[] }[];
+  spans?: ReaderSpan[];
+}
+
+export interface ReaderModel {
+  enBlocks: ReaderBlock[];
+  zhBlocks: ReaderBlock[];
+  units: { enBlockIds: string[]; zhBlockIds: string[] }[];
+  spans: ReaderSpan[];
+  contentHeight: { en: number; zh: number };
+  stats: { enBlocks: number; zhBlocks: number; matchedUnits: number; unmatchedEn: number; unmatchedZh: number };
 }
 
 export interface SyncCommand {
@@ -31,8 +51,27 @@ export interface SyncCommand {
   targetBlockTop: number;
 }
 
+export interface ReaderPosition {
+  id: string;
+  absTop: number;
+  absBottom: number;
+  pageIndex: number;
+  rect: { y: number; h: number };
+}
+
+export interface ReaderPositionIndex {
+  sorted: ReaderPosition[];
+  byId: Map<string, ReaderPosition>;
+}
+
 interface ReaderCore {
   buildPositionIndex(blocks: PositionedBlock[], pageH: number): any;
+  buildMeasuredPositionIndex(
+    measurements: { id: string; top: number; height: number }[],
+    containerTop: number,
+  ): ReaderPositionIndex;
+  shouldSuppressScrollEcho(currentScrollTop: number, targetScrollTop: number, epsilon?: number): boolean;
+  clampScrollTop(targetScrollTop: number, scrollHeight: number, clientHeight: number): number;
   locateBlockAtViewport(idx: any, scrollTop: number, viewportH: number): any;
   buildUnitIndex(units: { enBlockIds: string[]; zhBlockIds: string[] }[]): Map<string, number>;
   resolveSyncCommand(
@@ -46,13 +85,18 @@ interface ReaderCore {
   ): SyncCommand | null;
   createSyncController(lockMs?: number): { shouldSync(side: 'en' | 'zh', now: number): boolean; reset(): void };
   locateSubstringRange(fullText: string, sub: string): { start: number; end: number } | null;
+  buildReaderModel(pkg: ReaderProjectPackage): ReaderModel;
 }
 
 const core = (globalThis as any).PaperParallelReader as ReaderCore;
 
 export const buildPositionIndex = core.buildPositionIndex.bind(core) as ReaderCore['buildPositionIndex'];
+export const buildMeasuredPositionIndex = core.buildMeasuredPositionIndex.bind(core) as ReaderCore['buildMeasuredPositionIndex'];
+export const shouldSuppressScrollEcho = core.shouldSuppressScrollEcho.bind(core) as ReaderCore['shouldSuppressScrollEcho'];
+export const clampScrollTop = core.clampScrollTop.bind(core) as ReaderCore['clampScrollTop'];
 export const locateBlockAtViewport = core.locateBlockAtViewport.bind(core) as ReaderCore['locateBlockAtViewport'];
 export const buildUnitIndex = core.buildUnitIndex.bind(core) as ReaderCore['buildUnitIndex'];
 export const resolveSyncCommand = core.resolveSyncCommand.bind(core) as ReaderCore['resolveSyncCommand'];
 export const createSyncController = core.createSyncController.bind(core) as ReaderCore['createSyncController'];
 export const locateSubstringRange = core.locateSubstringRange.bind(core) as ReaderCore['locateSubstringRange'];
+export const buildReaderModel = core.buildReaderModel.bind(core) as ReaderCore['buildReaderModel'];

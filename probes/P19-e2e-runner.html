@@ -21,6 +21,24 @@
   #out{white-space:pre-wrap;font-family:Consolas,monospace;font-size:12.5px;line-height:1.6;background:#f8fafc;border:1px solid var(--line);border-radius:6px;padding:10px;max-height:420px;overflow:auto}
   .ok{color:#0a7d4f;font-weight:700}.bad{color:#c0392b;font-weight:700}
   #toast{position:fixed;right:16px;bottom:16px;background:#101828;color:#fff;border-radius:8px;padding:10px 14px;z-index:99;max-width:520px;font-size:12px}
+  .reader-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+  .reader-head h2{margin:0}
+  #reader-summary{font-size:11px;color:var(--muted)}
+  .reader-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px;margin-top:12px}
+  .reader-pane{min-width:0;border:1px solid var(--line);border-radius:7px;overflow:hidden;background:#f8fafc}
+  .reader-pane h3{position:sticky;top:0;z-index:2;margin:0;padding:9px 12px;border-bottom:1px solid var(--line);background:#fff;font-size:13px}
+  .reader-scroller{height:min(66vh,620px);overflow:auto;scrollbar-gutter:stable}
+  .reader-content{padding:10px}
+  .reader-block{margin:0 0 10px;padding:10px 11px;border:1px solid #cbd5e1;border-radius:6px;background:#fff;line-height:1.65;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere;cursor:pointer;transition:border-color .12s,background .12s,box-shadow .12s}
+  .reader-block:last-child{margin-bottom:0}
+  .reader-block:hover{border-color:#6b9dcc}
+  .reader-block.title,.reader-block.section{font-weight:700;background:#f4f8fc}
+  .reader-block.reference{font-size:11px;color:#475569}
+  .reader-block.unmatched{border-style:dashed;border-color:#d97706;background:#fffaf0}
+  .reader-block.active{border-color:#f59e0b;background:#fffbeb;box-shadow:0 0 0 2px rgba(245,158,11,.24)}
+  .reader-meta{display:flex;gap:8px;margin-bottom:5px;color:#718096;font:10px/1.3 Consolas,monospace}
+  .reader-meta .unmatched-label{color:#b45309;font-weight:700}
+  @media(max-width:760px){.reader-grid{grid-template-columns:1fr}.reader-scroller{height:46vh}}
   .hidden{display:none}
 </style>
 </head>
@@ -53,6 +71,13 @@
   </div>
   <div class="card"><h2>阶段输出</h2><div id="out">就绪。先点"无文件合成演示"验证链路。</div></div>
   <div class="card"><h2>项目包</h2><a id="dl" class="hidden" download="paper-parallel-project.json">下载项目包 JSON</a></div>
+  <div id="reader-card" class="card hidden">
+    <div class="reader-head"><h2>真实双语阅读器</h2><span id="reader-summary"></span></div>
+    <div class="reader-grid">
+      <section class="reader-pane"><h3>左 · 英文原文</h3><div id="en-reader-scroller" class="reader-scroller"><div id="en-reader-content" class="reader-content"></div></div></section>
+      <section class="reader-pane"><h3>右 · 中文译文</h3><div id="zh-reader-scroller" class="reader-scroller"><div id="zh-reader-content" class="reader-content"></div></div></section>
+    </div>
+  </div>
 </main>
 <div id="toast" class="hidden"></div>
 
@@ -63,19 +88,113 @@
 <script src="../src/core/align/alignBlocks.core.js"></script>
 <script src="../src/core/audit/audit.core.js"></script>
 <script src="../src/core/review/review.core.js"></script>
+<script src="../src/core/reader/reader.core.js"></script>
 <script>
 'use strict';
 const $=id=>document.getElementById(id);
 function toast(m){const d=$('toast');d.textContent=m;d.classList.remove('hidden');clearTimeout(toast._t);toast._t=setTimeout(()=>d.classList.add('hidden'),6000);}
 function out(s){const o=$('out');o.textContent+=s+'\n';o.scrollTop=o.scrollHeight;}
-const PG=window.PaperParallelPaginator, PP=window.PaperParallelPipeline, TS=window.PaperParallelTranslateSession, AL=window.PaperParallelAlign, ALB=window.PaperParallelAlignBlocks, AU=window.PaperParallelAudit, RV=window.PaperParallelReview;
-let stopFlag=false;let lastPkg=null;
+const PG=window.PaperParallelPaginator, PP=window.PaperParallelPipeline, TS=window.PaperParallelTranslateSession, AL=window.PaperParallelAlign, ALB=window.PaperParallelAlignBlocks, AU=window.PaperParallelAudit, RV=window.PaperParallelReview, RR=window.PaperParallelReader;
+let stopFlag=false;let lastPkg=null;let readerState=null;
 $('stop').onclick=()=>{stopFlag=true;};
 $('copyout').onclick=async()=>{try{await navigator.clipboard.writeText($('out').textContent);$('copyout').textContent='已复制 ✅';setTimeout(()=>$('copyout').textContent='复制阶段输出',1500);}catch(e){toast('复制失败,请手动全选阶段输出');}};
 $('clearsession').onclick=()=>{const keys=Object.keys(localStorage).filter(k=>k.startsWith('pp-session-'));keys.forEach(k=>localStorage.removeItem(k));toast('已清除 '+keys.length+' 个翻译会话,下次将从第一块重新翻译');};
 const KEY_LS='paper-parallel.dsKey';
 (function(){const k=localStorage.getItem(KEY_LS);if(k){$('key').value=k;$('savekey').checked=true;}})();
 $('savekey').onchange=function(){if(this.checked&&$('key').value.trim())localStorage.setItem(KEY_LS,$('key').value.trim());if(!this.checked)localStorage.removeItem(KEY_LS);};
+
+/* ---------- P19 真实项目包阅读器 ---------- */
+function resetReader(){
+  if(readerState?.lock)readerState.lock.reset();
+  readerState=null;
+  $('reader-card').classList.add('hidden');
+  $('reader-summary').textContent='';
+  $('en-reader-content').replaceChildren();
+  $('zh-reader-content').replaceChildren();
+  $('en-reader-scroller').scrollTop=0;
+  $('zh-reader-scroller').scrollTop=0;
+}
+function readerElement(side,id){return document.getElementById(side+'-reader-block-'+id);}
+function setActiveReaderUnit(unitIndex){
+  if(!readerState||unitIndex===null||unitIndex===undefined)return;
+  readerState.activeUnit=unitIndex;
+  document.querySelectorAll('#reader-card .reader-block.active').forEach(el=>el.classList.remove('active'));
+  const unit=readerState.model.units[unitIndex];if(!unit)return;
+  unit.enBlockIds.forEach(id=>readerElement('en',id)?.classList.add('active'));
+  unit.zhBlockIds.forEach(id=>readerElement('zh',id)?.classList.add('active'));
+}
+function readerPositionIndex(side){
+  const blocks=side==='en'?readerState.model.enBlocks:readerState.model.zhBlocks;
+  const content=$(side+'-reader-content');const contentTop=content.getBoundingClientRect().top;
+  return RR.buildMeasuredPositionIndex(blocks.map(block=>{
+    const el=readerElement(side,block.id);
+    const rect=el?.getBoundingClientRect();
+    return {id:block.id,top:rect?.top??contentTop,height:rect?.height||1};
+  }),contentTop);
+}
+function scrollReaderToUnit(unitIndex,originSide){
+  if(!readerState)return;
+  const targetSide=originSide==='en'?'zh':'en';
+  const unit=readerState.model.units[unitIndex];
+  const ids=unit?.[targetSide==='en'?'enBlockIds':'zhBlockIds']||[];
+  const targetId=ids.find(id=>readerElement(targetSide,id));if(!targetId)return;
+  const scroller=$(targetSide+'-reader-scroller');
+  const position=readerPositionIndex(targetSide).byId.get(targetId);if(!position)return;
+  const targetScrollTop=RR.clampScrollTop(position.absTop-(scroller.clientHeight-position.rect.h)/2,scroller.scrollHeight,scroller.clientHeight);
+  const willScroll=RR.shouldSuppressScrollEcho(scroller.scrollTop,targetScrollTop);
+  readerState.suppressNext=willScroll?targetSide:'';
+  if(willScroll)scroller.scrollTop=targetScrollTop;
+}
+function onReaderScroll(side){
+  if(!readerState)return;
+  if(readerState.suppressNext===side){readerState.suppressNext='';return;}
+  if(!readerState.lock.shouldSync(side,performance.now()))return;
+  const scroller=$(side+'-reader-scroller');
+  const cmd=RR.resolveSyncCommand(
+    readerPositionIndex('en'),readerPositionIndex('zh'),readerState.model.units,readerState.unitIndex,
+    side,scroller.scrollTop,scroller.clientHeight
+  );
+  if(!cmd)return;
+  setActiveReaderUnit(cmd.unitIndex);
+  const other=$(cmd.targetSide+'-reader-scroller');
+  const targetScrollTop=RR.clampScrollTop(cmd.targetScrollTop,other.scrollHeight,other.clientHeight);
+  const willScroll=RR.shouldSuppressScrollEcho(other.scrollTop,targetScrollTop);
+  readerState.suppressNext=willScroll?cmd.targetSide:'';
+  if(willScroll)other.scrollTop=targetScrollTop;
+}
+function buildReaderPane(side,blocks){
+  const content=$(side+'-reader-content');content.replaceChildren();
+  blocks.forEach((block,index)=>{
+    const el=document.createElement('article');
+    el.id=side+'-reader-block-'+block.id;
+    el.className='reader-block '+block.type+(block.matched?'':' unmatched');
+    const meta=document.createElement('div');meta.className='reader-meta';
+    const page=document.createElement('span');
+    page.textContent=block.sourcePageIndex===null?'顺序 '+(index+1):'来源第 '+(block.sourcePageIndex+1)+' 页';
+    const type=document.createElement('span');type.textContent=block.type;
+    meta.append(page,type);
+    if(!block.matched){const missing=document.createElement('span');missing.className='unmatched-label';missing.textContent='未匹配';meta.appendChild(missing);}
+    const body=document.createElement('div');body.textContent=block.text;
+    el.append(meta,body);
+    el.onclick=()=>{
+      if(block.unitIndex===null){toast('该块暂无对应译文,已保留供人工检查');return;}
+      setActiveReaderUnit(block.unitIndex);scrollReaderToUnit(block.unitIndex,side);
+    };
+    content.appendChild(el);
+  });
+}
+function renderReader(pkg){
+  const model=RR.buildReaderModel(pkg);
+  if(!model.enBlocks.length&&!model.zhBlocks.length){resetReader();return;}
+  readerState={model,unitIndex:RR.buildUnitIndex(model.units),lock:RR.createSyncController(140),activeUnit:null,suppressNext:''};
+  buildReaderPane('en',model.enBlocks);buildReaderPane('zh',model.zhBlocks);
+  const s=model.stats;
+  $('reader-summary').textContent=`英文 ${s.enBlocks} 块 · 中文 ${s.zhBlocks} 块 · 对齐 ${s.matchedUnits} 单元 · 未匹配 EN ${s.unmatchedEn} / ZH ${s.unmatchedZh}`;
+  $('reader-card').classList.remove('hidden');
+  $('en-reader-scroller').onscroll=()=>onReaderScroll('en');
+  $('zh-reader-scroller').onscroll=()=>onReaderScroll('zh');
+  if(model.units.length)setActiveReaderUnit(0);
+}
 
 /* ---------- 内联简化解析器(P4/P5 同算法,单页) ---------- */
 function itemsToLines(items){
@@ -193,6 +312,7 @@ async function runScenarioB(enBlocks,zhBlocks){
   lastPkg=pkg;
   const blob=new Blob([JSON.stringify(pkg,null,2)],{type:'application/json'});
   const url=URL.createObjectURL(blob);const a=$('dl');a.href=url;a.classList.remove('hidden');a.textContent='下载项目包 JSON('+pkg.checksum+')';
+  renderReader(pkg);
   return pkg;
 }
 
@@ -246,6 +366,7 @@ async function runPipeline(enBlocks, sessionKey){
   lastPkg=pkg;
   const blob=new Blob([JSON.stringify(pkg,null,2)],{type:'application/json'});
   const url=URL.createObjectURL(blob);const a=$('dl');a.href=url;a.classList.remove('hidden');a.textContent='下载项目包 JSON('+pkg.checksum+')';
+  renderReader(pkg);
   return pkg;
 }
 
@@ -263,7 +384,7 @@ const SYNTH=[
  {id:'en-b10',type:'reference',text:'[1] Prior work.',fontSize:11,order:9},
 ];
 
-$('demo').onclick=async()=>{stopFlag=false;$('out').textContent='';$('engine').value='mock';try{await runPipeline(SYNTH,'pp-demo-synthetic');out('\n✅ 合成演示完成(无文件)。真实论文:选择 PDF 后点"开始端到端"。');}catch(e){out('❌ '+e.message);}};
+$('demo').onclick=async()=>{stopFlag=false;resetReader();$('out').textContent='';$('engine').value='mock';try{await runPipeline(SYNTH,'pp-demo-synthetic');out('\n✅ 合成演示完成(无文件)。真实论文:选择 PDF 后点"开始端到端"。');}catch(e){out('❌ '+e.message);}};
 const SYNTH_B_EN=[
  {id:'b-e1',type:'title',text:'A High-Performance Accelerator for ZKVM Trace Generation',order:0},
  {id:'b-e2',type:'section',text:'1 Introduction',order:1},
@@ -283,8 +404,8 @@ const SYNTH_B_ZH=[
  {id:'b-z6',type:'section',text:'2 背景',order:5},
  {id:'b-z7',type:'paragraph',text:'已有工作使用 GPU 进行多标量乘法。',order:6},
 ];
-$('demoB').onclick=async()=>{stopFlag=false;$('out').textContent='';$('engine').value='mock';try{await runScenarioB(SYNTH_B_EN,SYNTH_B_ZH);out('\n✅ 场景B 合成演示完成。真实场景:同时选择英文与中文 PDF 后点"开始端到端"。');}catch(e){out('❌ '+e.message);}};
-$('run').onclick=async()=>{stopFlag=false;$('out').textContent='';try{
+$('demoB').onclick=async()=>{stopFlag=false;resetReader();$('out').textContent='';$('engine').value='mock';try{await runScenarioB(SYNTH_B_EN,SYNTH_B_ZH);out('\n✅ 场景B 合成演示完成。真实场景:同时选择英文与中文 PDF 后点"开始端到端"。');}catch(e){out('❌ '+e.message);}};
+$('run').onclick=async()=>{stopFlag=false;resetReader();$('out').textContent='';try{
   const f=$('enfile').files[0];if(!f){toast('请先选择英文 PDF');return;}
   out('阶段0 解析英文 PDF('+f.name+')...');const parsed=await parsePdf(f);out(`  共 ${parsed.pageCount} 页,${parsed.blocks.length} 块`);
   const zf=$('zhfile').files[0];
