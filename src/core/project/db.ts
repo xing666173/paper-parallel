@@ -15,7 +15,13 @@ export interface TranslationCacheRecord {
   validatedAt: number;
 }
 
-export type ProjectArtifactKind = 'english-pdf';
+export type ProjectArtifactKind =
+  | 'english-pdf'
+  | 'chinese-pdf'
+  | 'typst-source'
+  | 'typst-preview'
+  | 'alignment-manifest'
+  | 'project-package';
 
 export interface ProjectArtifactRecord {
   key: string;

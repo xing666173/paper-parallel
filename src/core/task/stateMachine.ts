@@ -3,8 +3,15 @@ import type { TaskSnapshot } from '../../types/models';
 export type TaskEvent =
   | { type: 'START_PARSE'; at: number }
   | { type: 'PARSE_DONE'; at: number }
+  | { type: 'LAYOUT_DONE'; at: number }
+  | { type: 'GLOSSARY_DONE'; at: number }
   | { type: 'START_TRANSLATION'; total: number; at: number }
   | { type: 'BLOCKS_VALIDATED'; count: number; at: number }
+  | { type: 'TRANSLATION_DONE'; at: number }
+  | { type: 'COMPOSITION_DONE'; at: number }
+  | { type: 'COMPILE_DONE'; at: number }
+  | { type: 'ALIGNMENT_DONE'; at: number }
+  | { type: 'QUALITY_STARTED'; at: number }
   | { type: 'STOP_REQUESTED'; at: number }
   | { type: 'STOPPED'; at: number }
   | { type: 'RESUME'; at: number }
@@ -37,6 +44,14 @@ export function reduceTaskEvent(state: TaskSnapshot, event: TaskEvent): TaskSnap
     return { ...state, stage: 'analyzing-layout', updatedAt: event.at };
   }
 
+  if (event.type === 'LAYOUT_DONE' && state.stage === 'analyzing-layout') {
+    return { ...state, stage: 'building-glossary', updatedAt: event.at };
+  }
+
+  if (event.type === 'GLOSSARY_DONE' && state.stage === 'building-glossary') {
+    return { ...state, stage: 'translating', updatedAt: event.at };
+  }
+
   if (event.type === 'START_TRANSLATION') {
     return {
       ...state,
@@ -49,11 +64,37 @@ export function reduceTaskEvent(state: TaskSnapshot, event: TaskEvent): TaskSnap
   }
 
   if (event.type === 'BLOCKS_VALIDATED' && state.stage === 'translating') {
+    if (state.progress.completed + event.count > state.progress.total) {
+      throw new Error('Validated block count exceeds the translation total');
+    }
     return {
       ...state,
       progress: { ...state.progress, completed: state.progress.completed + event.count },
       updatedAt: event.at,
     };
+  }
+
+  if (event.type === 'TRANSLATION_DONE' && state.stage === 'translating') {
+    if (state.progress.completed !== state.progress.total || state.progress.failed !== 0) {
+      throw new Error('Translation cannot complete with pending or failed blocks');
+    }
+    return { ...state, stage: 'composing', updatedAt: event.at };
+  }
+
+  if (event.type === 'COMPOSITION_DONE' && state.stage === 'composing') {
+    return { ...state, stage: 'compiling', updatedAt: event.at };
+  }
+
+  if (event.type === 'COMPILE_DONE' && state.stage === 'compiling') {
+    return { ...state, stage: 'aligning', updatedAt: event.at };
+  }
+
+  if (event.type === 'ALIGNMENT_DONE' && state.stage === 'aligning') {
+    return { ...state, updatedAt: event.at };
+  }
+
+  if (event.type === 'QUALITY_STARTED' && state.stage === 'aligning') {
+    return { ...state, stage: 'validating', updatedAt: event.at };
   }
 
   if (event.type === 'STOP_REQUESTED' && state.status === 'running') {

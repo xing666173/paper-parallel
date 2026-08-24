@@ -31,3 +31,30 @@ describe('task state machine', () => {
     );
   });
 });
+
+describe('composition task transitions', () => {
+  it('advances only through composition, compilation, alignment and quality', () => {
+    let task = reduceTaskEvent(createTaskSnapshot('p-compose', 1), {
+      type: 'START_TRANSLATION', total: 2, at: 2,
+    });
+    task = reduceTaskEvent(task, { type: 'BLOCKS_VALIDATED', count: 2, at: 3 });
+    task = reduceTaskEvent(task, { type: 'TRANSLATION_DONE', at: 4 });
+    expect(task.stage).toBe('composing');
+    task = reduceTaskEvent(task, { type: 'COMPOSITION_DONE', at: 5 });
+    expect(task.stage).toBe('compiling');
+    task = reduceTaskEvent(task, { type: 'COMPILE_DONE', at: 6 });
+    expect(task.stage).toBe('aligning');
+    task = reduceTaskEvent(task, { type: 'ALIGNMENT_DONE', at: 7 });
+    task = reduceTaskEvent(task, { type: 'QUALITY_STARTED', at: 8 });
+    expect(task.stage).toBe('validating');
+    task = reduceTaskEvent(task, { type: 'QUALITY_PASSED', at: 9 });
+    expect(task).toMatchObject({ stage: 'completed', status: 'completed' });
+  });
+
+  it('rejects translation completion while mandatory blocks remain', () => {
+    const task = reduceTaskEvent(createTaskSnapshot('p-incomplete', 1), {
+      type: 'START_TRANSLATION', total: 2, at: 2,
+    });
+    expect(() => reduceTaskEvent(task, { type: 'TRANSLATION_DONE', at: 3 })).toThrow();
+  });
+});
