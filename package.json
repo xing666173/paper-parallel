@@ -17,6 +17,10 @@
     "probe:p3": "npx vite --host 127.0.0.1 probes"
   },
   "dependencies": {
+    "@myriaddreamin/typst-all-in-one.ts": "0.7.0",
+    "@myriaddreamin/typst-ts-renderer": "0.7.0",
+    "@myriaddreamin/typst-ts-web-compiler": "0.7.0",
+    "@myriaddreamin/typst.ts": "0.7.0",
     "dexie": "^4.0.8",
     "jszip": "^3.10.1",
     "katex": "^0.16.11",

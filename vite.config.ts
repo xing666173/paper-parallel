@@ -14,6 +14,16 @@ export default defineConfig({
         // /probes/P19-e2e-runner.html 等页面直接可用
         copyDir('probes', join('dist', 'probes'), new Set(['assets']));
         copyDir('src/core', join('dist', 'src', 'core'), new Set());
+        const typstVendor = join('dist', 'vendor', 'typst');
+        mkdirSync(typstVendor, { recursive: true });
+        copyFileSync(
+          join('node_modules', '@myriaddreamin', 'typst-ts-web-compiler', 'pkg', 'typst_ts_web_compiler_bg.wasm'),
+          join(typstVendor, 'typst_ts_web_compiler_bg.wasm'),
+        );
+        copyFileSync(
+          join('node_modules', '@myriaddreamin', 'typst-ts-renderer', 'pkg', 'typst_ts_renderer_bg.wasm'),
+          join(typstVendor, 'typst_ts_renderer_bg.wasm'),
+        );
       },
     },
   ],
