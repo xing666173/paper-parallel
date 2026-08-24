@@ -9,7 +9,10 @@ interface PromptBlock {
   sourceSentences: Array<{ id: string; text: string }>;
 }
 
-async function mockDeepSeek(page: Page): Promise<{ translatedBatches: () => number }> {
+async function mockDeepSeek(
+  page: Page,
+  options: { firstTranslationDelayMs?: number } = {},
+): Promise<{ translatedBatches: () => number }> {
   let translatedBatches = 0;
 
   await page.route('https://api.deepseek.com/models', async (route) => {
@@ -34,6 +37,9 @@ async function mockDeepSeek(page: Page): Promise<{ translatedBatches: () => numb
     if (userMessage !== 'Reply with pong.') {
       const prompt = JSON.parse(userMessage) as { blocks: PromptBlock[] };
       translatedBatches += 1;
+      if (translatedBatches === 1 && options.firstTranslationDelayMs) {
+        await new Promise((resolve) => setTimeout(resolve, options.firstTranslationDelayMs));
+      }
       content = JSON.stringify({
         blocks: prompt.blocks.map((block) => {
           const translation = `译文：${block.source}`;
@@ -102,4 +108,25 @@ test('uploads a mixed-layout PDF and reaches the synchronized dual-PDF reader', 
   expect(deepSeek.translatedBatches()).toBeGreaterThan(0);
   expect(pageErrors).toEqual([]);
   expect(await page.evaluate(() => localStorage.getItem('paper-parallel.deepseek-key'))).toBeNull();
+});
+
+test('safely stops an active translation request and resumes the recoverable task', async ({ page }) => {
+  const deepSeek = await mockDeepSeek(page, { firstTranslationDelayMs: 3_000 });
+
+  await page.goto('/');
+  await page.locator('[data-field="pdf"]').setInputFiles(FIXTURE);
+  await page.locator('[data-field="api-key"]').fill(FAKE_KEY);
+  await page.locator('[data-action="test-connection"]').click();
+  await expect(page.getByText('连接成功')).toBeVisible();
+  await page.locator('[data-action="start"]').click();
+
+  await expect(page.getByText(/开始批次 batch-/)).toBeVisible({ timeout: 30_000 });
+  await page.getByRole('button', { name: '安全停止' }).click();
+  await expect(page.getByRole('button', { name: '继续处理' })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText('已安全停止')).toBeVisible();
+
+  await page.getByRole('button', { name: '继续处理' }).click();
+  await page.waitForURL(/#\/task\/pp-[a-f0-9]{64}\/read(?:\?|$)/, { timeout: 180_000 });
+  await expect(page.getByLabel('英文 PDF 控制')).toContainText('英文 1 / 1');
+  expect(deepSeek.translatedBatches()).toBeGreaterThanOrEqual(2);
 });
