@@ -122,5 +122,8 @@ describe('parser: docBuilder', () => {
     expect(doc.pageCount).toBe(2);
     expect(doc.pages[0].pageIndex).toBe(0);
     expect(doc.pages[1].pageIndex).toBe(1);
+    expect(doc.layoutRegions.map((region) => region.mode)).toEqual(['full-width', 'double']);
+    expect(doc.semanticUnits.map((unit) => unit.id)).toEqual(doc.blocks.map((block) => block.id));
+    expect(doc.semanticUnits.find((unit) => unit.kind === 'figure')?.assetId).toBeDefined();
   });
 });

@@ -91,6 +91,33 @@ export interface TableJson {
 /** 版式模式(单栏 / 双栏 / 混合) */
 export type LayoutMode = 'single' | 'double' | 'mixed';
 
+export interface LayoutRegion {
+  id: string;
+  mode: 'single' | 'double' | 'full-width';
+  sourcePage: number;
+  bounds: Rect;
+  columnGap?: number;
+  orderedUnitIds: string[];
+}
+
+export type SemanticUnitKind =
+  | 'title' | 'author' | 'affiliation' | 'abstract' | 'heading'
+  | 'paragraph' | 'sentence' | 'list-item' | 'caption' | 'table-title'
+  | 'figure' | 'table' | 'formula' | 'code' | 'reference' | 'page-furniture';
+
+export interface SemanticUnit {
+  id: string;
+  parentId?: string;
+  kind: SemanticUnitKind;
+  sourceText?: string;
+  translation?: string;
+  protectedTokens: string[];
+  sourceSentenceIds?: string[];
+  assetId?: string;
+  layoutRegionId: string;
+  order: number;
+}
+
 /** 统一文档模型:英文侧与中文侧是同一类型的两个实例 */
 export interface Doc {
   id: string;
@@ -98,6 +125,8 @@ export interface Doc {
   pageCount: number;
   pages: PageInfo[];
   blocks: Block[];
+  layoutRegions: LayoutRegion[];
+  semanticUnits: SemanticUnit[];
   layoutMode: LayoutMode;
   meta: { paperWidth: number; paperHeight: number; title?: string };
 }

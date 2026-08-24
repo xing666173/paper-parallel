@@ -2,7 +2,10 @@
 // docBuilder.ts —— 跨页装配:逐页解析结果 -> 统一 Doc
 // 算法基准:P7 探针(合成双页夹具 8 项断言全部通过)。纯函数、零依赖。
 // ============================================================================
-import type { Block, BlockFragment, Doc, LayoutMode, PageInfo, Rect } from '../../types/models';
+import type {
+  Block, BlockFragment, Doc, LayoutMode, PageInfo, Rect, SemanticUnitKind,
+} from '../../types/models';
+import { buildLayoutRegions } from '../layout/regions';
 import type { ColumnKind } from './columns';
 
 /** 单页解析器产物(由 parsePageItems + regions 检测装配而来) */
@@ -171,12 +174,44 @@ export function buildDoc(pages: ParsedPage[], docId: 'en' | 'zh'): Doc {
     splitAllowed: b.splitAllowed,
   }));
 
+  const layoutRegions = buildLayoutRegions({
+    pageWidth: pages[0]?.w ?? 0,
+    pageModes: Object.fromEntries(pages.map((page) => [page.no, page.layoutMode])),
+    blocks: merged.map((block) => ({
+      id: block.id,
+      pageIndex: block.pageIndex,
+      order: block.order,
+      col: block.col,
+      rect: block.rect,
+    })),
+  });
+  const regionByUnit = new Map(
+    layoutRegions.flatMap((region) => region.orderedUnitIds.map((id) => [id, region.id] as const)),
+  );
+  const semanticKind: Record<Block['type'], SemanticUnitKind> = {
+    title: 'title', authors: 'author', abstract: 'abstract', keywords: 'paragraph',
+    section: 'heading', paragraph: 'paragraph', figure: 'figure', table: 'table',
+    equation: 'formula', caption: 'caption', reference: 'reference', other: 'paragraph',
+  };
+  const semanticUnits = blocks.map((block) => ({
+    id: block.id,
+    parentId: block.parentSectionId,
+    kind: semanticKind[block.type],
+    sourceText: block.text,
+    protectedTokens: [],
+    assetId: ['figure', 'table', 'equation'].includes(block.type) ? block.id : undefined,
+    layoutRegionId: regionByUnit.get(block.id)!,
+    order: block.order,
+  }));
+
   return {
     id: docId,
     role: docId === 'zh' ? 'zh' : 'en',
     pageCount: pages.length,
     pages: pageInfos,
     blocks,
+    layoutRegions,
+    semanticUnits,
     layoutMode,
     meta: {
       paperWidth: pages[0]?.w ?? 0,
