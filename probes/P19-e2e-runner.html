@@ -102,7 +102,7 @@ function groupLinesToBlocks(lines,pageW,pageIndex){
   const role=(l,col)=>{const t=l.text.trim(),cc=(col.min+col.max)/2,lc=(l.x1+l.x2)/2,centered=Math.abs(lc-cc)<=Math.max(20,(col.max-col.min)*0.12);
     if(l.col==='full'){if(/^(abstract|摘要)[\s—\-:：]/i.test(t))return'abstract';if(/^key ?words|^关键词/i.test(t))return'keywords';
       if(/[,，]/.test(t)&&/university|大学|学院|实验室|lab/i.test(t))return'authors';if(t.length<90&&l.h>=13)return'title';}
-    if(/^\s*(\d+(\.\d+)*|IV|V|VI|VII|VIII|IX|X)\s+[A-Z\u4e00-\u9fa5]/.test(t)&&t.length<80)return'section';
+    if(/^\s*(\d+(\.\d+)*|IV|V|VI|VII|VIII|IX|X)\s+[A-Z\u4e00-\u9fa5]/.test(t)&&t.length<80&&!/[.!?。！？]$/.test(t)&&!/[,;]/.test(t))return'section';
     if(/^(references|bibliography|acknowledge?ments?|参考文献|致谢)\s*$/i.test(t))return'section';
     if(/^(fig(ure)?\.?|table|algorithm)\s*\d+/i.test(t)||/^[图表]\s*\d+/.test(t))return'caption';
     const syms=(t.match(/[=+\-*/^(){}[\]<>≤≥×÷√∑∫]/g)||[]).length;
@@ -142,6 +142,7 @@ async function mockTranslate(ctx){
   if(ctx.block.type==='authors')return '作者等 东南大学集成电路学院';
   if(ctx.block.type==='abstract')return '摘要——本文研究零知识虚拟机（Zero-Knowledge Virtual Machine, zkVM）的硬件加速。';
   if(ctx.block.type==='section')return t.replace(/^(\d+(?:\.\d+)*).*/,(m,p)=>p+' 节');
+    if(ctx.block.type==='caption'){const mm=t.match(/^(?:fig(?:ure)?\.?)\s*(\d+)|^图\s*(\d+)/i);if(mm)return '图 '+(mm[1]||mm[2])+'：示意图';return '表：示意图';}
   return '已译段落：'+t.slice(0,20)+'的中文翻译。';
 }
 async function dsChat(messages,maxTokens){

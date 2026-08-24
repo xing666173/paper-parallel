@@ -22,8 +22,9 @@ function issue(id, severity, blockId, message, rule) {
 function extractSectionNumbers(blocks) {
   const out = [];
   for (const b of blocks) {
+    if (b.type !== 'section') continue; // 只统计章节块,参考文献/表格行不算
     const m = String(b.text || '').trim().match(/^\s*(\d+(?:\.\d+)*)\s/);
-    if (m && b.type !== 'caption') out.push(m[1]);
+    if (m) out.push(m[1]);
   }
   return out;
 }

@@ -53,8 +53,13 @@ function classifyLineRole(l: ClassifiedLine, col: ColumnBounds): RawBlock['type'
     if (t.length < 90 && l.h >= 14) return 'title';
   }
 
-  // 章节标题:数字编号 + 短文本;或参考文献/致谢
-  if (/^\s*(\d+(\.\d+)*|IV|V|VI|VII|VIII|IX|X)\s+[A-Z\u4e00-\u9fa5]/.test(t) && t.length < 80)
+  // 章节标题:数字编号 + 短文本;排除"2021 IEEE..."这类文献行(含逗号/句末标点)
+  if (
+    /^\s*(\d+(\.\d+)*|IV|V|VI|VII|VIII|IX|X)\s+[A-Z\u4e00-\u9fa5]/.test(t) &&
+    t.length < 80 &&
+    !/[.!?。！？]$/.test(t) &&
+    !/[,;]/.test(t)
+  )
     return 'section';
   if (/^(references|bibliography|acknowledge?ments?|参考文献|致谢)\s*$/i.test(t)) return 'section';
 
