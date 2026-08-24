@@ -47,44 +47,84 @@ export function buildTranslationRequestsFromDoc(doc: Doc): TranslationBlockReque
     });
 }
 
-function array(value: unknown): unknown[] {
-  if (!Array.isArray(value)) throw new Error('DeepSeek JSON 字段必须为数组');
-  return value;
+export class DeepSeekProtocolError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'DeepSeekProtocolError';
+  }
+}
+
+export function parseDeepSeekTranslationJson(content: string): unknown {
+  const trimmed = content.trim();
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  try {
+    return JSON.parse(fenced ? fenced[1] : trimmed);
+  } catch {
+    throw new DeepSeekProtocolError('DeepSeek 返回的 JSON 无法解析');
+  }
+}
+
+function object(value: unknown, path: string): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new DeepSeekProtocolError(`DeepSeek JSON ${path} 必须为对象`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function objectArray(value: unknown, path: string): unknown[] {
+  if (Array.isArray(value)) return value;
+  if (value && typeof value === 'object') return [value];
+  throw new DeepSeekProtocolError(`DeepSeek JSON ${path} 必须为数组或对象`);
+}
+
+function stringArray(value: unknown, path: string): unknown[] {
+  if (Array.isArray(value)) return value;
+  if (typeof value === 'string') return [value];
+  throw new DeepSeekProtocolError(`DeepSeek JSON ${path} 必须为数组或字符串`);
 }
 
 function text(value: unknown, field: string): string {
-  if (typeof value !== 'string') throw new Error(`DeepSeek JSON 缺少 ${field}`);
+  if (typeof value !== 'string') throw new DeepSeekProtocolError(`DeepSeek JSON 缺少 ${field}`);
   return value;
 }
 
 export function normalizeDeepSeekTranslationResponse(input: unknown): TranslationResponse {
-  if (!input || typeof input !== 'object') throw new Error('DeepSeek 未返回 JSON 对象');
+  if (!input || typeof input !== 'object') throw new DeepSeekProtocolError('DeepSeek 未返回 JSON 对象');
   const root = input as Record<string, unknown>;
   return {
-    blocks: array(root.blocks).map((raw) => {
-      if (!raw || typeof raw !== 'object') throw new Error('DeepSeek blocks 项无效');
-      const block = raw as Record<string, unknown>;
+    blocks: objectArray(root.blocks, 'blocks').map((raw, blockIndex) => {
+      const blockPath = `blocks[${blockIndex}]`;
+      const block = object(raw, blockPath);
       const groups = block.alignmentGroups ?? block.alignment_groups;
       const terms = block.newTerms ?? block.new_terms ?? [];
       return {
-        blockId: text(block.blockId ?? block.block_id, 'block_id'),
-        translation: text(block.translation, 'translation'),
-        alignmentGroups: array(groups).map((rawGroup) => {
-          const group = rawGroup as Record<string, unknown>;
+        blockId: text(block.blockId ?? block.block_id, `${blockPath}.block_id`),
+        translation: text(block.translation, `${blockPath}.translation`),
+        alignmentGroups: objectArray(groups, `${blockPath}.alignment_groups`).map((rawGroup, groupIndex) => {
+          const groupPath = `${blockPath}.alignment_groups[${groupIndex}]`;
+          const group = object(rawGroup, groupPath);
           return {
-            sourceSentenceIds: array(group.sourceSentenceIds ?? group.source_sentence_ids).map((id) => text(id, 'source_sentence_id')),
-            targetSegments: array(group.targetSegments ?? group.target_segments).map((segment) => text(segment, 'target_segment')),
+            sourceSentenceIds: stringArray(
+              group.sourceSentenceIds ?? group.source_sentence_ids,
+              `${groupPath}.source_sentence_ids`,
+            ).map((id, index) => text(id, `${groupPath}.source_sentence_ids[${index}]`)),
+            targetSegments: stringArray(
+              group.targetSegments ?? group.target_segments,
+              `${groupPath}.target_segments`,
+            ).map((segment, index) => text(segment, `${groupPath}.target_segments[${index}]`)),
           };
         }),
-        newTerms: array(terms).map((rawTerm) => {
-          const term = rawTerm as Record<string, unknown>;
+        newTerms: objectArray(terms, `${blockPath}.new_terms`).map((rawTerm, termIndex) => {
+          const termPath = `${blockPath}.new_terms[${termIndex}]`;
+          const term = object(rawTerm, termPath);
           return {
-            source: text(term.source, 'term.source'),
-            target: text(term.target, 'term.target'),
+            source: text(term.source, `${termPath}.source`),
+            target: text(term.target, `${termPath}.target`),
             abbreviation: typeof term.abbreviation === 'string' ? term.abbreviation : undefined,
           };
         }),
-        warnings: array(block.warnings ?? []).map((warning) => text(warning, 'warning')),
+        warnings: stringArray(block.warnings ?? [], `${blockPath}.warnings`)
+          .map((warning, index) => text(warning, `${blockPath}.warnings[${index}]`)),
       };
     }),
   };

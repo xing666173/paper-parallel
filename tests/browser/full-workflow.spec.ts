@@ -11,7 +11,7 @@ interface PromptBlock {
 
 async function mockDeepSeek(
   page: Page,
-  options: { firstTranslationDelayMs?: number } = {},
+  options: { firstTranslationDelayMs?: number; firstProtocolError?: boolean } = {},
 ): Promise<{
   translatedBatches: () => number;
   translationRequests: () => Array<{ maxTokens: number; thinking: string; blockCount: number }>;
@@ -51,21 +51,31 @@ async function mockDeepSeek(
       if (translatedBatches === 1 && options.firstTranslationDelayMs) {
         await new Promise((resolve) => setTimeout(resolve, options.firstTranslationDelayMs));
       }
-      content = JSON.stringify({
-        blocks: prompt.blocks.map((block) => {
-          const translation = `译文：${block.source}`;
-          return {
-            block_id: block.blockId,
-            translation,
-            alignment_groups: [{
-              source_sentence_ids: block.sourceSentences.map((sentence) => sentence.id),
-              target_segments: [translation],
-            }],
+      content = translatedBatches === 1 && options.firstProtocolError
+        ? JSON.stringify({
+          blocks: [{
+            block_id: prompt.blocks[0]?.blockId,
+            translation: 'malformed response',
+            alignment_groups: 42,
             new_terms: [],
             warnings: [],
-          };
-        }),
-      });
+          }],
+        })
+        : JSON.stringify({
+          blocks: prompt.blocks.map((block) => {
+            const translation = `译文：${block.source}`;
+            return {
+              block_id: block.blockId,
+              translation,
+              alignment_groups: [{
+                source_sentence_ids: block.sourceSentences.map((sentence) => sentence.id),
+                target_segments: [translation],
+              }],
+              new_terms: [],
+              warnings: [],
+            };
+          }),
+        });
     }
 
     await route.fulfill({
@@ -85,7 +95,7 @@ async function mockDeepSeek(
 }
 
 test('uploads a mixed-layout PDF and reaches the synchronized dual-PDF reader', async ({ page }) => {
-  const deepSeek = await mockDeepSeek(page);
+  const deepSeek = await mockDeepSeek(page, { firstProtocolError: true });
   const pageErrors: string[] = [];
   page.on('pageerror', (error) => pageErrors.push(error.message));
 
@@ -119,6 +129,7 @@ test('uploads a mixed-layout PDF and reaches the synchronized dual-PDF reader', 
   await page.getByRole('button', { name: '返回翻译任务' }).click();
   await expect(page.getByRole('heading', { name: '总体进度' })).toBeVisible();
   await expect(page.locator('.progress-number-row')).toContainText(/([1-9]\d*) \/ \1 个文本块/);
+  await expect(page.getByText(/响应异常，已拆分为/).first()).toBeVisible();
 
   expect(deepSeek.translatedBatches()).toBeGreaterThan(0);
   expect(deepSeek.translationRequests().every((request) => (

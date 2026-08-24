@@ -6,7 +6,12 @@ import { getDocument } from '../pdf/runtime';
 import { normalizeTextItem } from '../parser/pdfjsAdapter';
 import { parsePageItems } from '../parser';
 import { buildDoc, type ParsedPage } from '../parser/docBuilder';
-import { prepareImmutableStructure, buildTranslationRequestsFromDoc, normalizeDeepSeekTranslationResponse } from './preparation';
+import {
+  prepareImmutableStructure,
+  buildTranslationRequestsFromDoc,
+  normalizeDeepSeekTranslationResponse,
+  parseDeepSeekTranslationJson,
+} from './preparation';
 import { extractImmutableAssets } from '../assets/extract';
 import { cropPageRegionLossless } from '../assets/crop';
 import { buildTranslationBatches, translationLimitsFor } from '../translate/batcher';
@@ -81,12 +86,6 @@ function normalizeDocPages(doc: Doc): Doc {
       ...region, sourcePage: Math.max(0, region.sourcePage - 1), orderedUnitIds: [...region.orderedUnitIds],
     })),
   };
-}
-
-function stripJsonFence(content: string): string {
-  const trimmed = content.trim();
-  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-  return fenced ? fenced[1] : trimmed;
 }
 
 function responseGroups(
@@ -227,7 +226,7 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
             ],
           });
           return {
-            ...normalizeDeepSeekTranslationResponse(JSON.parse(stripJsonFence(completion.content))),
+            ...normalizeDeepSeekTranslationResponse(parseDeepSeekTranslationJson(completion.content)),
             usage: completion.usage,
           };
         },

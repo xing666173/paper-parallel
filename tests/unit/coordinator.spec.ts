@@ -219,4 +219,69 @@ describe('cancellable translation coordinator', () => {
     expect(events).not.toContain('retry');
     expect(result.completedBlockIds).toEqual(['b1', 'b2', 'b3', 'b4']);
   });
+
+  it('splits a malformed protocol response instead of retrying the same paid request', async () => {
+    const requested: string[][] = [];
+    const events: string[] = [];
+    const blocks = ['b1', 'b2', 'b3', 'b4'].map((id) => block(id, `${id} source.`));
+
+    const result = await runTranslationTask({
+      projectId: 'p1', modelId: 'deepseek-v4-pro', batches: [batch('batch-1', blocks)],
+      concurrency: 1, maxRetries: 2,
+      request: async (pending) => {
+        requested.push(pending.blocks.map((item) => item.blockId));
+        if (pending.blocks.length > 2) {
+          const error = new Error('DeepSeek JSON blocks 必须为数组');
+          error.name = 'DeepSeekProtocolError';
+          throw error;
+        }
+        return {
+          blocks: pending.blocks.map((item) => translated(item.blockId, `${item.source}译`)),
+          usage: { promptTokens: 10, completionTokens: 5 },
+        };
+      },
+      findCached: async () => undefined,
+      saveValidated: async () => undefined,
+      onEvent: (event) => { events.push(event.type); },
+    });
+
+    expect(requested).toEqual([
+      ['b1', 'b2', 'b3', 'b4'],
+      ['b1', 'b2'],
+      ['b3', 'b4'],
+    ]);
+    expect(events).toContain('batch-split');
+    expect(events).not.toContain('retry');
+    expect(result.completedBlockIds).toEqual(['b1', 'b2', 'b3', 'b4']);
+  });
+
+  it('persists valid blocks from a partial response and retries only the unresolved block', async () => {
+    const requested: string[][] = [];
+    const saved: string[] = [];
+    const progress: string[][] = [];
+
+    const result = await runTranslationTask({
+      projectId: 'p1', modelId: 'deepseek-v4-pro',
+      batches: [batch('batch-1', [block('b1', 'One.'), block('b2', 'Two.')])],
+      concurrency: 1, maxRetries: 2,
+      request: async (pending) => {
+        requested.push(pending.blocks.map((item) => item.blockId));
+        const returned = requested.length === 1 ? pending.blocks.slice(0, 1) : pending.blocks;
+        return {
+          blocks: returned.map((item) => translated(item.blockId, `${item.source}译`)),
+          usage: { promptTokens: 10, completionTokens: 5 },
+        };
+      },
+      findCached: async () => undefined,
+      saveValidated: async (record) => { saved.push(record.blockId); },
+      onEvent: (event) => {
+        if (event.type === 'batch-validated') progress.push(event.blockIds);
+      },
+    });
+
+    expect(requested).toEqual([['b1', 'b2'], ['b2']]);
+    expect(saved).toEqual(['b1', 'b2']);
+    expect(progress).toEqual([['b1'], ['b2']]);
+    expect(result.completedBlockIds).toEqual(['b1', 'b2']);
+  });
 });

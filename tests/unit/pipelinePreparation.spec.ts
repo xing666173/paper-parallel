@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildTranslationRequestsFromDoc,
   normalizeDeepSeekTranslationResponse,
+  parseDeepSeekTranslationJson,
   prepareImmutableStructure,
 } from '../../src/core/pipeline/preparation';
 import type { Doc } from '../../src/types/models';
@@ -18,6 +19,38 @@ describe('production pipeline preparation', () => {
       alignmentGroups: [{ sourceSentenceIds: ['p1-s-1'], targetSegments: ['译文。'] }],
       newTerms: [{ source: 'trace', target: '执行轨迹' }], warnings: [],
     });
+  });
+
+  it('safely normalizes singleton nested fields while preserving strict downstream validation', () => {
+    const response = normalizeDeepSeekTranslationResponse({ blocks: {
+      block_id: 'p1', translation: '译文。',
+      alignment_groups: { source_sentence_ids: 'p1-s-1', target_segments: '译文。' },
+      new_terms: { source: 'trace', target: '执行轨迹' }, warnings: 'normalized singleton',
+    } });
+
+    expect(response.blocks).toEqual([{
+      blockId: 'p1', translation: '译文。',
+      alignmentGroups: [{ sourceSentenceIds: ['p1-s-1'], targetSegments: ['译文。'] }],
+      newTerms: [{ source: 'trace', target: '执行轨迹', abbreviation: undefined }],
+      warnings: ['normalized singleton'],
+    }]);
+  });
+
+  it('reports the exact JSON field path without including response content', () => {
+    expect(() => normalizeDeepSeekTranslationResponse({ blocks: [{
+      block_id: 'secret-block', translation: 'private translation', alignment_groups: 42,
+    }] })).toThrowError(expect.objectContaining({
+      name: 'DeepSeekProtocolError',
+      message: 'DeepSeek JSON blocks[0].alignment_groups 必须为数组或对象',
+    }));
+  });
+
+  it('classifies malformed fenced JSON as a protocol error without echoing its content', () => {
+    expect(() => parseDeepSeekTranslationJson('```json\n{"blocks":[private-content\n```'))
+      .toThrowError(expect.objectContaining({
+        name: 'DeepSeekProtocolError',
+        message: 'DeepSeek 返回的 JSON 无法解析',
+      }));
   });
 
   it('creates stable candidates for text and never sends immutable assets for translation', () => {

@@ -57,6 +57,14 @@ function isOutputLimitError(error: unknown): error is Error {
   return error instanceof Error && error.name === 'DeepSeekOutputLimitError';
 }
 
+function isAdaptiveSplitError(error: unknown): error is Error {
+  return error instanceof Error && [
+    'DeepSeekOutputLimitError',
+    'DeepSeekProtocolError',
+    'TranslationValidationError',
+  ].includes(error.name);
+}
+
 function splitBatch(batch: TranslationBatch): [TranslationBatch, TranslationBatch] {
   const midpoint = Math.ceil(batch.blocks.length / 2);
   const child = (suffix: 'a' | 'b', blocks: TranslationBlockRequest[]): TranslationBatch => ({
@@ -104,15 +112,16 @@ export async function runTranslationTask(
     }
     if (missing.length === 0) return;
 
-    const pendingBatch: TranslationBatch = { ...batch, blocks: missing };
+    let pendingBlocks = missing;
     for (let attempt = 0; attempt <= options.maxRetries; attempt += 1) {
       if (options.signal?.aborted) throw abortError();
+      const pendingBatch: TranslationBatch = { ...batch, blocks: pendingBlocks };
       const startedAt = now();
       options.onEvent({
         type: 'batch-started',
         at: startedAt,
         batchId: batch.id,
-        blockIds: missing.map((block) => block.blockId),
+        blockIds: pendingBlocks.map((block) => block.blockId),
         modelId: options.modelId,
       });
 
@@ -129,37 +138,38 @@ export async function runTranslationTask(
           completionTokens: response.usage.completionTokens,
         });
 
-        const validation = validateBatchResponse(missing, response);
-        if (!validation.ok) {
-          throw new TranslationValidationError(validation.issues.map((issue) => issue.code));
+        const validation = validateBatchResponse(pendingBlocks, response);
+        if (validation.accepted.length) {
+          options.onEvent({
+            type: 'batch-validated',
+            at: now(),
+            batchId: batch.id,
+            blockIds: validation.accepted.map((record) => record.blockId),
+          });
+          for (const record of validation.accepted) {
+            await options.saveValidated(record);
+            completed.set(record.blockId, record);
+            options.onEvent({ type: 'cache-written', at: now(), blockId: record.blockId });
+          }
+          const acceptedIds = new Set(validation.accepted.map((record) => record.blockId));
+          pendingBlocks = pendingBlocks.filter((block) => !acceptedIds.has(block.blockId));
         }
-
-        options.onEvent({
-          type: 'batch-validated',
-          at: now(),
-          batchId: batch.id,
-          blockIds: validation.accepted.map((record) => record.blockId),
-        });
-        for (const record of validation.accepted) {
-          await options.saveValidated(record);
-          completed.set(record.blockId, record);
-          options.onEvent({ type: 'cache-written', at: now(), blockId: record.blockId });
-        }
-        return;
+        if (pendingBlocks.length === 0) return;
+        throw new TranslationValidationError(validation.issues.map((issue) => issue.code));
       } catch (error) {
         if (isAbortError(error, options.signal)) throw abortError();
         const reason = safeErrorMessage(error);
+        if (isAdaptiveSplitError(error) && pendingBlocks.length > 1) {
+          const children = splitBatch({ ...batch, blocks: pendingBlocks });
+          options.onEvent({
+            type: 'batch-split', at: now(), batchId: batch.id,
+            childBatchIds: [children[0].id, children[1].id], reason,
+          });
+          await processBatch(children[0]);
+          await processBatch(children[1]);
+          return;
+        }
         if (isOutputLimitError(error)) {
-          if (pendingBatch.blocks.length > 1) {
-            const children = splitBatch(pendingBatch);
-            options.onEvent({
-              type: 'batch-split', at: now(), batchId: batch.id,
-              childBatchIds: [children[0].id, children[1].id], reason,
-            });
-            await processBatch(children[0]);
-            await processBatch(children[1]);
-            return;
-          }
           options.onEvent({ type: 'error', at: now(), batchId: batch.id, message: reason });
           throw error;
         }

@@ -1,6 +1,19 @@
 import type { TranslationRequest } from './protocol';
 
-export const SYSTEM_PROMPT_VERSION = 'academic-json-v2';
+export const SYSTEM_PROMPT_VERSION = 'academic-json-v3';
+
+const RESPONSE_SCHEMA_EXAMPLE = JSON.stringify({
+  blocks: [{
+    block_id: 'copy the input block_id exactly',
+    translation: 'complete translated block text',
+    alignment_groups: [{
+      source_sentence_ids: ['copy one or more input sentence IDs in source order'],
+      target_segments: ['one or more translated segments whose concatenation equals translation'],
+    }],
+    new_terms: [{ source: 'source term', target: 'fixed translation', abbreviation: 'optional abbreviation' }],
+    warnings: [],
+  }],
+});
 
 export function buildSystemPrompt(): string {
   return [
@@ -11,7 +24,10 @@ export function buildSystemPrompt(): string {
     'Translate each supplied block as a coherent whole. Natural target-language sentence splitting and merging are allowed.',
     'Return continuous sourceSentenceIds-to-targetSegments alignment groups; cover every source ID exactly once and never cross source order.',
     'Do not make layout, pagination, column, font, figure, table, or asset-placement decisions.',
-    'Return JSON only and follow the supplied response schema. Do not include commentary or hidden reasoning.',
+    'Return exactly one JSON object matching the response schema below. Do not include commentary or hidden reasoning.',
+    `RESPONSE_SCHEMA_EXAMPLE=${RESPONSE_SCHEMA_EXAMPLE}`,
+    'Every field shown is required. blocks, alignment_groups, source_sentence_ids, target_segments, new_terms, and warnings must always be JSON arrays; use [] when an optional list is empty.',
+    'Return exactly one response block for every input block, preserving input block order and copying every block_id exactly.',
   ].join('\n');
 }
 

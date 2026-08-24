@@ -35,7 +35,7 @@ function projectAiMessage(event: AiLogEvent): string {
     case 'cache-written':
       return `已保存：${event.blockId}`;
     case 'batch-split':
-      return `批次 ${event.batchId} 输出过长，已拆分为 ${event.childBatchIds.join('、')}：${safeReason(event.reason)}`;
+      return `批次 ${event.batchId} 响应异常，已拆分为 ${event.childBatchIds.join('、')}：${safeReason(event.reason)}`;
     case 'retry':
       return `批次 ${event.batchId} 正在进行第 ${event.attempt} 次重试：${safeReason(event.reason)}`;
     case 'error':

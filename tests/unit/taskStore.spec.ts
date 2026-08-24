@@ -52,7 +52,7 @@ describe('project task store', () => {
     });
 
     expect(store.aiLog.map((entry) => entry.message)).toEqual([
-      '批次 batch-1 输出过长，已拆分为 batch-1a、batch-1b：输出额度耗尽（reasoning_content=present）',
+      '批次 batch-1 响应异常，已拆分为 batch-1a、batch-1b：输出额度耗尽（reasoning_content=present）',
       '批次 batch-1a 正在进行第 1 次重试：DeepSeek HTTP 503',
     ]);
     expect(store.lastResponseAt).toBe(1);

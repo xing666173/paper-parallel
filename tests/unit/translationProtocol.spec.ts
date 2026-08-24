@@ -50,10 +50,14 @@ describe('generic academic translation protocol', () => {
 
   it('keeps the fixed prompt domain-neutral and puts paper context only in the payload', () => {
     const systemPrompt = buildSystemPrompt();
-    expect(SYSTEM_PROMPT_VERSION).toBe('academic-json-v2');
+    expect(SYSTEM_PROMPT_VERSION).toBe('academic-json-v3');
     expect(systemPrompt).not.toMatch(/zkVM|Zero-Knowledge|计算机体系结构|密码学|医学/);
     expect(systemPrompt).toContain('document_context');
     expect(systemPrompt).toContain('protected_tokens');
+    expect(systemPrompt).toContain('"blocks"');
+    expect(systemPrompt).toContain('"alignment_groups"');
+    expect(systemPrompt).toContain('"source_sentence_ids"');
+    expect(systemPrompt).toContain('Every field shown is required');
 
     const payload = buildBatchPrompt({
       documentContext: {
