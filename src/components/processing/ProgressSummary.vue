@@ -8,7 +8,7 @@ const props = defineProps<{
   lastResponseAt: number | null;
 }>();
 
-defineEmits<{ stop: [] }>();
+defineEmits<{ stop: []; resume: [] }>();
 
 const percentage = computed(() => {
   if (props.task.status === 'completed') return 100;
@@ -65,6 +65,10 @@ const lastResponse = computed(() => (
       v-if="task.status === 'running' || task.status === 'stopping'"
       class="button danger" type="button" :disabled="task.status === 'stopping'" @click="$emit('stop')"
     >{{ task.status === 'stopping' ? '正在停止…' : '安全停止' }}</button>
+    <button
+      v-else-if="task.status === 'stopped'"
+      class="button primary" type="button" @click="$emit('resume')"
+    >继续处理</button>
     <p class="stop-note">停止会取消正在进行的请求，已经校验并写入的翻译缓存会保留。</p>
   </section>
 </template>

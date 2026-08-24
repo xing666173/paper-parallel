@@ -10,6 +10,9 @@ import { createProjectRepository } from '../core/project/repository';
 import { canEnterReader } from '../core/task/completion';
 import { estimateRemainingMs } from '../core/task/metrics';
 import { useTaskStore } from '../stores/task';
+import { runProductionPipeline } from '../core/pipeline/productionPipeline';
+import { createBrowserPipelineStages } from '../core/pipeline/browserStages';
+import type { TaskSnapshot } from '../types/models';
 
 const route = useRoute();
 const router = useRouter();
@@ -39,8 +42,50 @@ const estimatedRemainingMs = computed(() => {
 watch(() => store.completionSummary, async (summary) => {
   if (enteredReader || !summary || !canEnterReader(summary)) return;
   enteredReader = true;
-  await router.replace({ name: 'reader', params: { projectId: projectId.value } });
+  await router.replace({ name: 'reader', params: { projectId: projectId.value }, query: { auto: '1' } });
 }, { deep: true, immediate: true });
+
+function pipelineRunner(initial: TaskSnapshot) {
+  return async (signal: AbortSignal) => {
+    const stages = createBrowserPipelineStages({
+      projectId: projectId.value,
+      snapshot: initial,
+      repository,
+      onAiEvent: store.recordAiEvent,
+      onValidated: (count) => {
+        if (!store.current || store.current.stage !== 'translating') return;
+        store.current = {
+          ...store.current,
+          progress: {
+            ...store.current.progress,
+            completed: Math.min(store.current.progress.total, store.current.progress.completed + count),
+          },
+          updatedAt: Date.now(),
+        };
+        void repository.saveTask(store.current);
+      },
+    });
+    const result = await runProductionPipeline({
+      snapshot: initial,
+      repository,
+      signal,
+      stages,
+      onSnapshot: (snapshot) => { store.current = snapshot; },
+    });
+    store.current = result.snapshot;
+    store.completionSummary = result.completion;
+  };
+}
+
+function startIdleTask(snapshot: TaskSnapshot) {
+  void store.start(snapshot, pipelineRunner(snapshot)).catch(() => undefined);
+}
+
+function resumeTask() {
+  if (!store.current) return;
+  const snapshot = store.current;
+  void store.resume(pipelineRunner(snapshot)).catch(() => undefined);
+}
 
 onMounted(async () => {
   loading.value = !task.value;
@@ -60,6 +105,7 @@ onMounted(async () => {
       previewState.value = 'building';
     }
     if (!store.current) loadError.value = '未找到该翻译任务，请重新选择论文。';
+    else if (store.current.status === 'idle') startIdleTask(store.current);
   } catch (error) {
     loadError.value = error instanceof Error ? error.message : String(error);
   } finally {
@@ -90,6 +136,7 @@ onBeforeRouteLeave(() => {
         :estimated-remaining-ms="estimatedRemainingMs"
         :last-response-at="store.lastResponseAt"
         @stop="store.safeStop()"
+        @resume="resumeTask"
       />
       <p v-if="task.status === 'failed'" class="quality-error" role="alert">
         <strong>当前阶段未通过：</strong>{{ task.error }}
