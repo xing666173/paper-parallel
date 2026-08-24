@@ -111,5 +111,11 @@ describe('upload workflow', () => {
       key: `${projectId}:english-pdf`, projectId, kind: 'english-pdf',
     });
     expect(JSON.stringify(artifact)).not.toContain('sk-browser-test');
+    const task = await createProjectRepository().loadTask(projectId);
+    expect(task?.settings).toMatchObject({
+      modelId: 'deepseek-v4-flash', thinkingMode: 'disabled', sourceFileName: 'paper.pdf',
+    });
+    expect(JSON.stringify(task)).not.toContain('sk-browser-test');
+    expect(sessionStorage.getItem('paper-parallel.deepseek-key-session')).toBe('sk-browser-test');
   });
 });

@@ -292,4 +292,10 @@ export interface TaskSnapshot {
   startedAt?: number;
   updatedAt: number;
   error?: string;
+  settings?: {
+    modelId: string;
+    thinkingMode: 'enabled' | 'disabled';
+    sourceFileName: string;
+    sourceFileHash: string;
+  };
 }

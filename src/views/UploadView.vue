@@ -13,6 +13,7 @@ import {
 } from '../core/translate/client';
 
 const KEY_STORAGE = 'paper-parallel.deepseek-key';
+const SESSION_KEY_STORAGE = 'paper-parallel.deepseek-key-session';
 const router = useRouter();
 const repository = createProjectRepository();
 const file = ref<File | null>(null);
@@ -93,7 +94,16 @@ async function startTask(): Promise<void> {
       blob: file.value,
       updatedAt: Date.now(),
     });
-    await repository.saveTask(createTaskSnapshot(projectId));
+    sessionStorage.setItem(SESSION_KEY_STORAGE, apiKey.value.trim());
+    await repository.saveTask({
+      ...createTaskSnapshot(projectId),
+      settings: {
+        modelId: model.value,
+        thinkingMode: thinkingMode.value,
+        sourceFileName: file.value.name,
+        sourceFileHash: fileHash,
+      },
+    });
     await router.push({ name: 'process', params: { projectId } });
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : String(error);
