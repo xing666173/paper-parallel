@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router';
 import AiLogPanel from '../components/processing/AiLogPanel.vue';
 import PaperPreview from '../components/processing/PaperPreview.vue';
+import type { PreviewState } from '../components/processing/PaperPreview.vue';
 import ProgressSummary from '../components/processing/ProgressSummary.vue';
 import StageTimeline from '../components/processing/StageTimeline.vue';
 import { createProjectRepository } from '../core/project/repository';
@@ -18,6 +19,8 @@ const projectId = computed(() => String(route.params.projectId));
 const loading = ref(false);
 const loadError = ref('');
 const sourceUrl = ref<string>();
+const previewUrl = ref<string>();
+const previewState = ref<PreviewState>('empty');
 let enteredReader = false;
 
 const task = computed(() => (
@@ -47,6 +50,15 @@ onMounted(async () => {
     if (artifact?.blob instanceof Blob && typeof URL.createObjectURL === 'function') {
       sourceUrl.value = URL.createObjectURL(artifact.blob);
     }
+    const preview = await repository.findArtifact(`${projectId.value}:typst-preview`);
+    if (preview?.blob instanceof Blob && typeof URL.createObjectURL === 'function') {
+      previewUrl.value = URL.createObjectURL(preview.blob);
+      previewState.value = 'ready';
+    } else if (task.value?.status === 'failed') {
+      previewState.value = 'failed';
+    } else if (task.value?.stage === 'composing' || task.value?.stage === 'compiling') {
+      previewState.value = 'building';
+    }
     if (!store.current) loadError.value = '未找到该翻译任务，请重新选择论文。';
   } catch (error) {
     loadError.value = error instanceof Error ? error.message : String(error);
@@ -57,6 +69,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   if (sourceUrl.value) URL.revokeObjectURL(sourceUrl.value);
+  if (previewUrl.value) URL.revokeObjectURL(previewUrl.value);
 });
 
 onBeforeRouteLeave(() => {
@@ -86,7 +99,11 @@ onBeforeRouteLeave(() => {
           <StageTimeline :task="task" />
           <AiLogPanel :entries="store.aiLog" />
         </aside>
-        <PaperPreview :source-url="sourceUrl" />
+        <PaperPreview
+          :source-url="sourceUrl"
+          :preview-url="previewUrl"
+          :preview-state="previewState"
+        />
       </div>
     </template>
   </main>
