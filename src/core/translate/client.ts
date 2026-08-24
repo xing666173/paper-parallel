@@ -41,7 +41,7 @@ export interface ChatCompletionResult {
   usage: ChatUsage;
 }
 
-const CURRENT_MODELS: readonly DeepSeekModel[] = [
+export const CURRENT_DEEPSEEK_MODELS: readonly DeepSeekModel[] = [
   { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash' },
   { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
 ];
@@ -78,10 +78,10 @@ export async function listModels(opts: DeepSeekConnectionOptions): Promise<DeepS
 
     const data = (await response.json()) as { data?: Array<{ id?: string }> };
     const available = new Set(data.data?.map((model) => model.id) ?? []);
-    return CURRENT_MODELS.filter((model) => available.has(model.id)).map((model) => ({ ...model }));
+    return CURRENT_DEEPSEEK_MODELS.filter((model) => available.has(model.id)).map((model) => ({ ...model }));
   } catch (error) {
     if (opts.signal?.aborted) throw abortError();
-    if (opts.offlineFallback) return CURRENT_MODELS.map((model) => ({ ...model }));
+    if (opts.offlineFallback) return CURRENT_DEEPSEEK_MODELS.map((model) => ({ ...model }));
     throw error;
   }
 }

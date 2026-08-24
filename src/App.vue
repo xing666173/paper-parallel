@@ -1,31 +1,26 @@
 <script setup lang="ts">
-const nav = [
-  { to: '/', label: '首页' },
-  { to: '/setup', label: '设置' },
-  { to: '/workbench', label: '工作台' },
-  { to: '/reader', label: '阅读器' },
-  { to: '/review', label: '审核' },
-];
+import { computed } from 'vue';
+import { useRoute } from 'vue-router';
+
+const route = useRoute();
+const activeStep = computed(() => {
+  if (route.name === 'reader') return 3;
+  if (route.name === 'process') return 2;
+  return 1;
+});
+const steps = ['上传论文', '翻译排版', '对照阅读'];
 </script>
 
 <template>
-  <div class="app">
-    <header class="topbar">
-      <strong>论文双子 <small>Paper Parallel</small></strong>
-      <nav>
-        <router-link v-for="n in nav" :key="n.to" :to="n.to">{{ n.label }}</router-link>
-      </nav>
+  <div class="app-shell">
+    <header class="app-header">
+      <div class="brand">论文双子 <small>PAPER PARALLEL</small></div>
+      <ol class="workflow-steps" aria-label="任务步骤">
+        <li v-for="(step, index) in steps" :key="step" :class="{ 'is-active': activeStep === index + 1 }">
+          <span>{{ index + 1 }}</span>{{ step }}
+        </li>
+      </ol>
     </header>
-    <router-view />
+    <RouterView />
   </div>
 </template>
-
-<style scoped>
-.app { font-family: 'Microsoft YaHei', system-ui, sans-serif; }
-.topbar { display: flex; align-items: center; gap: 18px; background: #101828; color: #fff; padding: 10px 18px; }
-.topbar strong { font-size: 15px; }
-.topbar small { font-weight: 400; color: #9cc7ff; font-size: 11px; }
-nav { display: flex; gap: 6px; }
-nav a { color: #cbd5e1; text-decoration: none; font-size: 13px; padding: 4px 10px; border-radius: 4px; }
-nav a.router-link-active { background: #1f3a5f; color: #fff; }
-</style>
