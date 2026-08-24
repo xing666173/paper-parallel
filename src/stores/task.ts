@@ -2,6 +2,7 @@ import { markRaw, ref, shallowRef } from 'vue';
 import { defineStore } from 'pinia';
 import { createProjectRepository, type ProjectRepository } from '../core/project/repository';
 import type { ThroughputSample } from '../core/task/metrics';
+import type { CompletionSummary } from '../core/task/completion';
 import { reduceTaskEvent } from '../core/task/stateMachine';
 import type { AiLogEvent } from '../core/translate/events';
 import type { TaskSnapshot } from '../types/models';
@@ -48,6 +49,7 @@ export function createTaskStore(dependencies: TaskStoreDependencies, id = 'task'
     const abortController = shallowRef<AbortController | null>(null);
     const throughputSamples = ref<ThroughputSample[]>([]);
     const lastResponseAt = ref<number | null>(null);
+    const completionSummary = ref<CompletionSummary | null>(null);
     let runningPromise: Promise<void> | null = null;
     let activeRunToken: symbol | null = null;
 
@@ -126,6 +128,7 @@ export function createTaskStore(dependencies: TaskStoreDependencies, id = 'task'
       abortController,
       throughputSamples,
       lastResponseAt,
+      completionSummary,
       start,
       safeStop,
       resume,

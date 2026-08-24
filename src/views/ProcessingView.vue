@@ -1,21 +1,24 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
-import { onBeforeRouteLeave, useRoute } from 'vue-router';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router';
 import AiLogPanel from '../components/processing/AiLogPanel.vue';
 import PaperPreview from '../components/processing/PaperPreview.vue';
 import ProgressSummary from '../components/processing/ProgressSummary.vue';
 import StageTimeline from '../components/processing/StageTimeline.vue';
 import { createProjectRepository } from '../core/project/repository';
+import { canEnterReader } from '../core/task/completion';
 import { estimateRemainingMs } from '../core/task/metrics';
 import { useTaskStore } from '../stores/task';
 
 const route = useRoute();
+const router = useRouter();
 const store = useTaskStore();
 const repository = createProjectRepository();
 const projectId = computed(() => String(route.params.projectId));
 const loading = ref(false);
 const loadError = ref('');
 const sourceUrl = ref<string>();
+let enteredReader = false;
 
 const task = computed(() => (
   store.current?.projectId === projectId.value ? store.current : null
@@ -29,6 +32,12 @@ const estimatedRemainingMs = computed(() => {
   const tokensPerBlock = sampledTokens / task.value.progress.completed;
   return estimateRemainingMs(store.throughputSamples, Math.ceil(tokensPerBlock * remainingBlocks));
 });
+
+watch(() => store.completionSummary, async (summary) => {
+  if (enteredReader || !summary || !canEnterReader(summary)) return;
+  enteredReader = true;
+  await router.replace({ name: 'reader', params: { projectId: projectId.value } });
+}, { deep: true, immediate: true });
 
 onMounted(async () => {
   loading.value = !task.value;

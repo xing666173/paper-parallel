@@ -29,9 +29,10 @@ async function mountView() {
   });
   await router.push('/task/p1/process');
   await router.isReady();
-  return mount(defineComponent({ template: '<RouterView />' }), {
+  const wrapper = mount(defineComponent({ template: '<RouterView />' }), {
     global: { plugins: [router] },
   });
+  return { wrapper, router };
 }
 
 describe('processing dashboard', () => {
@@ -50,7 +51,7 @@ describe('processing dashboard', () => {
       blockIds: ['p-8', 'p-9'], modelId: 'deepseek-v4-flash',
     });
 
-    const wrapper = await mountView();
+    const { wrapper } = await mountView();
     await flushPromises();
 
     expect(wrapper.text()).toContain('总体进度');
@@ -72,10 +73,28 @@ describe('processing dashboard', () => {
       error: '2 个受保护标记不一致',
     };
 
-    const wrapper = await mountView();
+    const { wrapper } = await mountView();
     await flushPromises();
 
     expect(wrapper.text()).not.toContain('处理完成');
     expect(wrapper.text()).toContain('2 个受保护标记不一致');
+  });
+
+  it('enters the reader only after the full completion summary passes', async () => {
+    const store = useTaskStore();
+    store.current = {
+      ...runningTask(), stage: 'completed', status: 'completed',
+      progress: { completed: 20, total: 20, retries: 0, failed: 0 },
+    };
+    store.completionSummary = {
+      requiredBlocks: 20, validatedBlocks: 20, failedBlocks: 0,
+      protectedContentPass: true, pdfCompiled: true, assetsPass: true,
+      alignmentBuilt: true, persisted: true,
+    };
+
+    const { router } = await mountView();
+    await flushPromises();
+
+    expect(router.currentRoute.value.name).toBe('reader');
   });
 });
