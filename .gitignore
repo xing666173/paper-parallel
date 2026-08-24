@@ -4,6 +4,7 @@ dist/
 *.local
 .vite/
 coverage/
+.worktrees/
 
 # 本地真实论文测试夹具(版权材料,绝不入库)
 tests/fixtures/local/
