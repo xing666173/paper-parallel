@@ -3,7 +3,7 @@
 // 算法基准:P7 探针(合成双页夹具 8 项断言全部通过)。纯函数、零依赖。
 // ============================================================================
 import type {
-  Block, BlockFragment, Doc, LayoutMode, PageInfo, Rect, SemanticUnitKind,
+  Block, BlockFragment, CharacterRect, Doc, LayoutMode, PageInfo, Rect, SemanticUnitKind,
 } from '../../types/models';
 import { buildLayoutRegions } from '../layout/regions';
 import type { ColumnKind } from './columns';
@@ -15,6 +15,7 @@ export interface ParsedPageBlock {
   col: ColumnKind;
   rect: Rect;
   text: string;
+  characterRects?: CharacterRect[];
 }
 
 export interface ParsedPage {
@@ -95,8 +96,16 @@ function mergePass(
         prev.col === 'left' &&
         b.col === 'right';
       if (crossPage || crossCol) {
+        const sourceOffset = (prev.text || '').length + 1;
         prev.text = `${prev.text || ''}\n${b.text || ''}`;
         prev.fragments.push({ pageIndex: b.pageIndex, rect: b.rect });
+        prev.characterRects = [
+          ...(prev.characterRects ?? []),
+          ...(b.characterRects ?? []).map((char) => ({
+            ...char,
+            sourceIndex: char.sourceIndex + sourceOffset,
+          })),
+        ];
         continue;
       }
     }
@@ -117,7 +126,20 @@ export function buildDoc(pages: ParsedPage[], docId: 'en' | 'zh'): Doc {
     const sorted = [...pg.blocks].sort(
       (a, b) => COL_RANK[a.col] - COL_RANK[b.col] || a.rect.y - b.rect.y,
     );
-    for (const b of sorted) seq.push({ ...b, pageIndex: pg.no, fragments: [], widthMode: 'column', splitAllowed: true, order: -1 });
+    for (const b of sorted) {
+      seq.push({
+        ...b,
+        pageIndex: pg.no,
+        characterRects: b.characterRects?.map((char) => ({
+          ...char,
+          pageIndex: pg.no - 1,
+        })),
+        fragments: [],
+        widthMode: 'column',
+        splitAllowed: true,
+        order: -1,
+      });
+    }
   }
 
   // 2) 续接合并:第一遍跨页同栏,第二遍同页左→右
@@ -169,6 +191,7 @@ export function buildDoc(pages: ParsedPage[], docId: 'en' | 'zh'): Doc {
     nextBlockId: b.nextBlockId,
     fragments: b.fragments,
     text: b.text,
+    characterRects: b.characterRects,
     widthMode: b.widthMode,
     parentSectionId: b.parentSectionId,
     splitAllowed: b.splitAllowed,

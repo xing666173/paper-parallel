@@ -95,6 +95,16 @@ describe('parser: lines -> blocks', () => {
     expect(r.layoutMode).toBe('mixed');
     expect(r.blocks).toHaveLength(12);
   });
+
+  it('在块文本中保留 PDF.js 文本项的字符索引和真实坐标', () => {
+    const result = parsePageItems([
+      { str: 'AB', x: 10, y: 20, w: 12, h: 10 },
+      { str: 'CD', x: 24, y: 20, w: 12, h: 10 },
+    ], 200, 300);
+    expect(result.blocks[0].text).toBe('AB CD');
+    expect(result.blocks[0].characterRects?.map((char) => char.sourceIndex)).toEqual([0, 1, 3, 4]);
+    expect(result.blocks[0].characterRects?.[2].rect).toEqual({ x: 24, y: 20, w: 6, h: 10 });
+  });
 });
 
 describe('parser: pdfjsAdapter', () => {

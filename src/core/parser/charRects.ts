@@ -12,17 +12,34 @@ export interface CharRect {
   y: number;
   w: number;
   h: number;
+  sourceIndex?: number;
+  pageIndex?: number;
 }
 
-export function itemsToCharRects(items: SimpleTextItem[]): CharRect[] {
+export function itemsToCharRects(
+  items: SimpleTextItem[],
+  options: { pageIndex?: number; sourceOffset?: number; itemSeparator?: string } = {},
+): CharRect[] {
   const out: CharRect[] = [];
+  const separator = options.itemSeparator ?? '';
+  let sourceIndex = options.sourceOffset ?? 0;
   for (const it of items) {
+    if (out.length) sourceIndex += separator.length;
     const n = it.str.length;
     if (!n) continue;
     const w = it.w / n;
     for (let i = 0; i < n; i++) {
-      out.push({ ch: it.str[i], x: it.x + i * w, y: it.y, w, h: it.h });
+      out.push({
+        ch: it.str[i],
+        sourceIndex: sourceIndex + i,
+        pageIndex: options.pageIndex,
+        x: it.x + i * w,
+        y: it.y,
+        w,
+        h: it.h,
+      });
     }
+    sourceIndex += n;
   }
   return out;
 }

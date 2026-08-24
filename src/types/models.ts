@@ -54,6 +54,14 @@ export interface BlockFragment {
   rect: Rect;
 }
 
+/** PDF.js 文字在原块文本中的索引与真实页面坐标。 */
+export interface CharacterRect {
+  ch: string;
+  sourceIndex: number;
+  pageIndex: number;
+  rect: Rect;
+}
+
 /** 块 —— 整个系统的原子单位 */
 export interface Block {
   id: string; // 全项目唯一,如 'en-b42'
@@ -80,6 +88,8 @@ export interface Block {
   zipped?: boolean;
   /** 字符级坐标映射:文本下标 -> PDF 视口矩形(词级高亮用) */
   charRects?: Rect[];
+  /** 新对齐管线使用的跨页字符索引。 */
+  characterRects?: CharacterRect[];
 }
 
 export interface TableJson {

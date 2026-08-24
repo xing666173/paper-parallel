@@ -126,4 +126,25 @@ describe('parser: docBuilder', () => {
     expect(doc.semanticUnits.map((unit) => unit.id)).toEqual(doc.blocks.map((block) => block.id));
     expect(doc.semanticUnits.find((unit) => unit.kind === 'figure')?.assetId).toBeDefined();
   });
+
+  it('跨页合并时同步偏移字符索引并使用零基 PDF 页号', () => {
+    const pages: ParsedPage[] = [1, 2].map((no) => ({
+      no, w: 612, h: 792, layoutMode: 'single',
+      blocks: [{
+        id: `p-${no}`, type: 'paragraph', col: 'full',
+        rect: { x: 10, y: 20, w: 50, h: 10 },
+        text: no === 1 ? 'First' : 'Second.',
+        characterRects: [{
+          ch: no === 1 ? 'F' : 'S', sourceIndex: 0, pageIndex: 0,
+          rect: { x: 10, y: 20, w: 5, h: 10 },
+        }],
+      }],
+    }));
+
+    const block = buildDoc(pages, 'en').blocks[0];
+    expect(block.characterRects).toEqual([
+      expect.objectContaining({ ch: 'F', sourceIndex: 0, pageIndex: 0 }),
+      expect.objectContaining({ ch: 'S', sourceIndex: 6, pageIndex: 1 }),
+    ]);
+  });
 });

@@ -4,7 +4,8 @@
 // 块级保序 R5:同栏按 y 归块,跨栏按 通栏→左→右 的阅读顺序输出。
 // ============================================================================
 import type { ClassifiedLine, ColumnKind } from './columns';
-import type { BlockType, Rect } from '../../types/models';
+import type { BlockType, CharacterRect, Rect } from '../../types/models';
+import { itemsToCharRects } from './charRects';
 
 /** 解析器产出的原始块(尚未装配 docId/pageIndex 等文档上下文) */
 export interface RawBlock {
@@ -15,6 +16,7 @@ export interface RawBlock {
   text: string;
   lineCount: number;
   order: number;
+  characterRects?: CharacterRect[];
 }
 
 const COLUMN_ORDER: ColumnKind[] = ['full', 'left', 'right'];
@@ -106,6 +108,23 @@ export function groupLinesToBlocks(
     const y2 = Math.max(...ls.map((l) => l.y + l.h));
     const x1 = Math.min(...ls.map((l) => l.x1));
     const x2 = Math.max(...ls.map((l) => l.x2));
+    const characterRects: CharacterRect[] = [];
+    let sourceOffset = 0;
+    ls.forEach((line, lineIndex) => {
+      if (lineIndex > 0) sourceOffset += 1; // block text joins visual lines with "\n"
+      const chars = itemsToCharRects(line.items, {
+        pageIndex: 0,
+        sourceOffset,
+        itemSeparator: ' ',
+      });
+      characterRects.push(...chars.map((char) => ({
+        ch: char.ch,
+        sourceIndex: char.sourceIndex!,
+        pageIndex: 0,
+        rect: { x: char.x, y: char.y, w: char.w, h: char.h },
+      })));
+      sourceOffset += line.text.length;
+    });
     blocks.push({
       id: `blk${++n}`,
       type,
@@ -114,6 +133,7 @@ export function groupLinesToBlocks(
       text: ls.map((l) => l.text).join('\n'),
       lineCount: ls.length,
       order: -1,
+      characterRects,
     });
   };
 

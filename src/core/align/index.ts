@@ -152,3 +152,4 @@ export type {
   OrderedSemanticInput,
   SourceCandidateBlock,
 } from './semanticUnits';
+export { resolveSourceGeometry, resolveTextRangeRects } from './sourceGeometry';
