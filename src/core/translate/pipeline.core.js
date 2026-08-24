@@ -93,6 +93,54 @@ function validateTranslation(text, source) {
   return { ok: true };
 }
 
+function extractStructuralNumbers(text) {
+  const token = /[+\-−]?(?:(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?|\.\d+)(?:[eE][+\-−]?\d+)?(?:\s*[×x]\s*10\s*\^\s*[+\-−]?\d+)?/g;
+  return String(text || '').match(token) || [];
+}
+
+/**
+ * 离线端到端测试用结构化 mock：不追求语义翻译质量，只保证审核依赖的
+ * 章节/图表编号与正文数字不丢失。
+ * @param {TranslateContext} ctx
+ * @returns {string}
+ */
+function mockTranslatePreservingStructure(ctx) {
+  if (ctx.pass === 1) {
+    return '零知识虚拟机（Zero-Knowledge Virtual Machine, zkVM）。执行轨迹（Trace）。加速器（Accelerator）。';
+  }
+
+  const block = ctx.block || {};
+  const source = String(block.text || '').trim();
+  let translated;
+  if (block.type === 'title') translated = '结构保真的模拟论文标题';
+  else if (block.type === 'authors') translated = '模拟作者与机构信息';
+  else if (block.type === 'abstract') {
+    translated = '摘要——本文研究零知识虚拟机（Zero-Knowledge Virtual Machine, zkVM）的硬件加速。';
+  } else if (block.type === 'section') {
+    translated = source.replace(/^(\d+(?:\.\d+)*).*/, (_m, number) => `${number} 节`);
+  } else if (block.type === 'caption') {
+    const enLabel = source.match(/^(fig(?:ure)?\.?|table|algorithm)\s*(\d+)/i);
+    const zhLabel = source.match(/^([图表])\s*(\d+)/);
+    if (enLabel) {
+      const kind = /^fig/i.test(enLabel[1]) ? '图' : /^table/i.test(enLabel[1]) ? '表' : '算法';
+      translated = `${kind} ${enLabel[2]}：模拟说明`;
+    } else if (zhLabel) {
+      translated = `${zhLabel[1]} ${zhLabel[2]}：模拟说明`;
+    } else {
+      translated = '模拟图表说明';
+    }
+  } else {
+    translated = '结构保真的模拟译文。';
+  }
+
+  const outputNumbers = new Set(extractStructuralNumbers(translated));
+  const missingNumbers = [...new Set(extractStructuralNumbers(source))]
+    .filter((number) => !outputNumbers.has(number));
+  return missingNumbers.length
+    ? `${translated}（保留数字：${missingNumbers.join('、')}）`
+    : translated;
+}
+
 /**
  * 两遍法翻译管线。
  * @param {TranslateBlock[]} blocks 已按 order 排序
@@ -221,4 +269,9 @@ async function runTranslationPipeline(blocks, opts) {
 }
 
 const __rootPipeline = typeof globalThis !== 'undefined' ? globalThis : this;
-__rootPipeline.PaperParallelPipeline = { extractTerms, validateTranslation, runTranslationPipeline };
+__rootPipeline.PaperParallelPipeline = {
+  extractTerms,
+  validateTranslation,
+  mockTranslatePreservingStructure,
+  runTranslationPipeline,
+};

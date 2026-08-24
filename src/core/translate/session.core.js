@@ -38,6 +38,11 @@ function buildUserPrompt(opts) {
   return parts.join('');
 }
 
+/** 同一论文的不同翻译引擎/实现版本必须使用独立断点缓存。 */
+function buildSessionStorageKey(baseKey, engine, version) {
+  return `${baseKey}:${engine}@${version}`;
+}
+
 /**
  * 断点续跑:已完成的块永不重跑;术语表已抽取则跳过第 1 遍;
  * 每个块成功后立即通过 saveState 持久化。
@@ -182,4 +187,9 @@ async function runResumableTranslation(blocks, opts) {
 }
 
 const __rootSession = typeof globalThis !== 'undefined' ? globalThis : this;
-__rootSession.PaperParallelTranslateSession = { buildSystemPrompt, buildUserPrompt, runResumableTranslation };
+__rootSession.PaperParallelTranslateSession = {
+  buildSystemPrompt,
+  buildUserPrompt,
+  buildSessionStorageKey,
+  runResumableTranslation,
+};

@@ -57,6 +57,7 @@ export interface PipelineResult {
 interface Core {
   extractTerms(text: string): TermEntry[];
   validateTranslation(text: string, source: string): { ok: boolean; reason?: string };
+  mockTranslatePreservingStructure(ctx: TranslateContext): string;
   runTranslationPipeline(
     blocks: TranslateBlockInput[],
     opts: {
@@ -74,6 +75,7 @@ const core = (globalThis as any).PaperParallelPipeline as Core;
 
 export const extractTerms = core.extractTerms.bind(core) as Core['extractTerms'];
 export const validateTranslation = core.validateTranslation.bind(core) as Core['validateTranslation'];
+export const mockTranslatePreservingStructure = core.mockTranslatePreservingStructure.bind(core) as Core['mockTranslatePreservingStructure'];
 export const runTranslationPipeline = core.runTranslationPipeline.bind(core) as Core['runTranslationPipeline'];
 
 export interface SessionState {
@@ -100,6 +102,7 @@ interface SessionCore {
     priorContext?: string;
     block?: TranslateBlockInput;
   }): string;
+  buildSessionStorageKey(baseKey: string, engine: 'mock' | 'real', version: string): string;
   runResumableTranslation(
     blocks: TranslateBlockInput[],
     opts: {
@@ -123,6 +126,7 @@ const session = (globalThis as any).PaperParallelTranslateSession as SessionCore
 
 export const buildSystemPrompt = session.buildSystemPrompt.bind(session) as SessionCore['buildSystemPrompt'];
 export const buildUserPrompt = session.buildUserPrompt.bind(session) as SessionCore['buildUserPrompt'];
+export const buildSessionStorageKey = session.buildSessionStorageKey.bind(session) as SessionCore['buildSessionStorageKey'];
 export const runResumableTranslation = session.runResumableTranslation.bind(session) as SessionCore['runResumableTranslation'];
 
 export * from './client';

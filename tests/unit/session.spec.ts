@@ -27,6 +27,20 @@ describe('translate: prompt assembly', () => {
 });
 
 describe('translate: resumable session', () => {
+  it('mock 与 real 及不同翻译器版本使用互不冲突的缓存键', () => {
+    const buildKey = (globalThis as any).PaperParallelTranslateSession
+      .buildSessionStorageKey as (base: string, engine: string, version: string) => string;
+    expect(typeof buildKey).toBe('function');
+
+    const keys = [
+      buildKey('paper.pdf@123', 'mock', '2'),
+      buildKey('paper.pdf@123', 'real', '1'),
+      buildKey('paper.pdf@123', 'mock', '3'),
+    ];
+    expect(new Set(keys).size).toBe(3);
+    expect(keys).not.toContain('paper.pdf@123');
+  });
+
   async function makeEnv() {
     const store: SessionState = { byId: {}, terms: [] };
     let run = 0;

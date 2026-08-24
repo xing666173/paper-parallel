@@ -68,7 +68,7 @@
 const $=id=>document.getElementById(id);
 function toast(m){const d=$('toast');d.textContent=m;d.classList.remove('hidden');clearTimeout(toast._t);toast._t=setTimeout(()=>d.classList.add('hidden'),6000);}
 function out(s){const o=$('out');o.textContent+=s+'\n';o.scrollTop=o.scrollHeight;}
-const PG=window.PaperParallelPaginator, TS=window.PaperParallelTranslateSession, AL=window.PaperParallelAlign, ALB=window.PaperParallelAlignBlocks, AU=window.PaperParallelAudit, RV=window.PaperParallelReview;
+const PG=window.PaperParallelPaginator, PP=window.PaperParallelPipeline, TS=window.PaperParallelTranslateSession, AL=window.PaperParallelAlign, ALB=window.PaperParallelAlignBlocks, AU=window.PaperParallelAudit, RV=window.PaperParallelReview;
 let stopFlag=false;let lastPkg=null;
 $('stop').onclick=()=>{stopFlag=true;};
 $('copyout').onclick=async()=>{try{await navigator.clipboard.writeText($('out').textContent);$('copyout').textContent='已复制 ✅';setTimeout(()=>$('copyout').textContent='复制阶段输出',1500);}catch(e){toast('复制失败,请手动全选阶段输出');}};
@@ -134,17 +134,6 @@ const TRANSLATION_USER='你现在是一名计算机体系结构领域的专业�
 const AUDIT_SYSTEM='你是一名严谨的学术论文翻译审校专家,只负责检查,不负责重新翻译。\n逐对检查英文原文与中文译文,输出 JSON:{"issues":[{"severity":"error|warn","message":"问题描述","blockId":"可选"}]}。没有问题时输出 {"issues":[]}。\n检查项:1) 忠实性(数字、符号、名称、否定、逻辑是否被改动);2) 漏译/多译;3) 术语一致性;4) 是否夹带翻译说明或总结;5) 技术含义是否改变。severity=error 表示必须人工处理,severity=warn 表示建议复核。只输出 JSON,不输出任何解释。';
 const AUDIT_USER='【英文原文】\n{enText}\n\n【中文译文】\n{zhText}';
 
-/* ---------- mock 翻译 ---------- */
-async function mockTranslate(ctx){
-  if(ctx.pass===1)return '零知识虚拟机（Zero-Knowledge Virtual Machine, zkVM）。执行轨迹（Trace）。加速器（Accelerator）。';
-  const t=(ctx.block.text||'').trim();
-  if(ctx.block.type==='title')return '面向零知识虚拟机轨迹生成的高性能异构加速器';
-  if(ctx.block.type==='authors')return '作者等 东南大学集成电路学院';
-  if(ctx.block.type==='abstract')return '摘要——本文研究零知识虚拟机（Zero-Knowledge Virtual Machine, zkVM）的硬件加速。';
-  if(ctx.block.type==='section')return t.replace(/^(\d+(?:\.\d+)*).*/,(m,p)=>p+' 节');
-    if(ctx.block.type==='caption'){const mm=t.match(/^(?:fig(?:ure)?\.?)\s*(\d+)|^图\s*(\d+)/i);if(mm)return '图 '+(mm[1]||mm[2])+'：示意图';return '表：示意图';}
-  return '已译段落：'+t.slice(0,20)+'的中文翻译。';
-}
 async function dsChat(messages,maxTokens){
   const key=$('key').value.trim();if(!key)throw new Error('请填 API Key');
   const res=await fetch('https://api.deepseek.com/chat/completions',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+key},
@@ -214,13 +203,15 @@ async function runPipeline(enBlocks, sessionKey){
   const TEXT=new Set(['title','authors','abstract','keywords','section','paragraph','reference','caption']);
   const textBlocks=enBlocks.filter(b=>TEXT.has(b.type)&&(b.text||'').trim());
   const nonText=enBlocks.filter(b=>!TEXT.has(b.type));
-  const translate=$('engine').value==='real'?realTranslate:mockTranslate;
+  const engine=$('engine').value;
+  const translate=engine==='real'?realTranslate:PP.mockTranslatePreservingStructure;
+  const storageKey=TS.buildSessionStorageKey(sessionKey||'pp-session-default',engine,engine==='real'?'1':'2');
   // 断点持久化:每个块成功后写入 localStorage;刷新/重跑时自动续跑
-  const store=JSON.parse(localStorage.getItem(sessionKey||'pp-session-default')||'null')||{byId:{},terms:[]};
-  out('阶段1 翻译:文字块 '+textBlocks.length+' 个(断点会话:'+(sessionKey||'default')+',已存 '+(Object.keys(store.byId||{}).length)+' 块)...');
+  const store=JSON.parse(localStorage.getItem(storageKey)||'null')||{byId:{},terms:[]};
+  out('阶段1 翻译:文字块 '+textBlocks.length+' 个(断点会话:'+storageKey+',已存 '+(Object.keys(store.byId||{}).length)+' 块)...');
   const tr=await TS.runResumableTranslation(textBlocks,{translate,
     loadState:async()=>store,
-    saveState:async s=>{store.byId=s.byId;store.terms=s.terms;localStorage.setItem(sessionKey||'pp-session-default',JSON.stringify(store));},
+    saveState:async s=>{store.byId=s.byId;store.terms=s.terms;localStorage.setItem(storageKey,JSON.stringify(store));},
     maxRetries:1,systemPrompt:'SYS',userPrompt:'USER'});
   out(`  完成 ${tr.stats.done}(复用 ${tr.stats.resumed}),失败 ${tr.stats.failed},术语 ${tr.terms.length}`);
   if(tr.stats.failed)throw new Error('存在翻译失败块,请检查 API');

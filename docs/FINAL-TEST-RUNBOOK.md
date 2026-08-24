@@ -37,13 +37,15 @@ P19 页点「无文件合成演示(mock)」,预期输出:
 
 1. 选择 `C:\Users\axezt\Desktop\文献\导师文章\18：ZK-Tracer：A High-Performance Heterogeneous Accelerator for Zero-Knowledge VM Trace Generation.pdf`
 2. 引擎保持 mock → 「开始端到端」
-3. 观察「阶段输出」:解析页数/块数、翻译 100%、审核 error 数
+3. 观察「阶段输出」:解析页数/块数、翻译 100%、审核应为 `errors=0,warns=0`
 
 ## 第四步:真实 DeepSeek 翻译
 
 1. 引擎选 real,填 API Key(勾选"Key 存本机"仅写 localStorage)
 2. 「开始端到端」
 3. 关注:阶段1 完成数、阶段4 的 error/warn、门禁与项目包校验
+
+mock 与 real 使用不同的断点缓存,切换引擎不会复用另一引擎的译文。
 
 ## 验收标准
 
