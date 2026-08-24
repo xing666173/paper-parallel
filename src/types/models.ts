@@ -186,3 +186,36 @@ export interface Project {
     | 'auditing'
     | 'approved';
 }
+
+/** 端到端处理任务的显式阶段。 */
+export type TaskStage =
+  | 'idle'
+  | 'parsing'
+  | 'analyzing-layout'
+  | 'building-glossary'
+  | 'translating'
+  | 'composing'
+  | 'compiling'
+  | 'aligning'
+  | 'validating'
+  | 'completed';
+
+export type TaskStatus = 'idle' | 'running' | 'stopping' | 'stopped' | 'failed' | 'completed';
+
+export interface TaskProgress {
+  completed: number;
+  total: number;
+  retries: number;
+  failed: number;
+}
+
+export interface TaskSnapshot {
+  projectId: string;
+  stage: TaskStage;
+  status: TaskStatus;
+  progress: TaskProgress;
+  createdAt: number;
+  startedAt?: number;
+  updatedAt: number;
+  error?: string;
+}
