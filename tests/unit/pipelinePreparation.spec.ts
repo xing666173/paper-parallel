@@ -35,10 +35,37 @@ describe('production pipeline preparation', () => {
       id: 'eq1', kind: 'formula', rect: { x: 330, y: 500, w: 200, h: 30 },
     }));
     expect(prepared.assetRegions).toContainEqual(expect.objectContaining({
-      id: 'fig-caption-asset', kind: 'figure',
+      id: 'fig-caption-asset', kind: 'figure', rect: { x: 50, y: 146, w: 230, h: 208 },
     }));
     const order = prepared.regions[0].orderedUnitIds;
     expect(order.indexOf('fig-caption-asset')).toBe(order.indexOf('fig-caption') - 1);
+  });
+
+  it('preserves a captioned table as one full-column asset and excludes its body from translation', () => {
+    const doc = fixtureDoc();
+    doc.blocks.push(
+      { id: 'table-caption', docId: 'en', type: 'caption', pageIndex: 0, rect: { x: 330, y: 570, w: 200, h: 18 }, order: 4, text: 'Table 1: Results', splitAllowed: false, widthMode: 'column' },
+      { id: 'table-body', docId: 'en', type: 'paragraph', pageIndex: 0, rect: { x: 330, y: 596, w: 200, h: 62 }, order: 5, text: 'Method Throughput Baseline 1.0 Ours 2.4', splitAllowed: true, widthMode: 'column' },
+      { id: 'after-table', docId: 'en', type: 'paragraph', pageIndex: 0, rect: { x: 330, y: 690, w: 200, h: 28 }, order: 6, text: 'The results confirm the trend.', splitAllowed: true, widthMode: 'column' },
+    );
+    doc.semanticUnits.push(
+      { id: 'table-caption', kind: 'caption', sourceText: 'Table 1: Results', protectedTokens: [], layoutRegionId: 'r1', order: 4 },
+      { id: 'table-body', kind: 'paragraph', sourceText: 'Method Throughput Baseline 1.0 Ours 2.4', protectedTokens: [], layoutRegionId: 'r1', order: 5 },
+      { id: 'after-table', kind: 'paragraph', sourceText: 'The results confirm the trend.', protectedTokens: [], layoutRegionId: 'r1', order: 6 },
+    );
+    doc.layoutRegions[0].orderedUnitIds.push('table-caption', 'table-body', 'after-table');
+
+    const prepared = prepareImmutableStructure(doc);
+
+    expect(prepared.assetRegions).toContainEqual(expect.objectContaining({
+      id: 'table-caption-asset', kind: 'table', rect: { x: 330, y: 594, w: 200, h: 70 },
+    }));
+    expect(prepared.units.some((unit) => unit.id === 'table-body')).toBe(false);
+    expect(prepared.units.some((unit) => unit.id === 'after-table')).toBe(true);
+    expect(prepared.regions[0].orderedUnitIds).toEqual(expect.arrayContaining([
+      'table-caption', 'table-caption-asset', 'after-table',
+    ]));
+    expect(prepared.regions[0].orderedUnitIds).not.toContain('table-body');
   });
 });
 
