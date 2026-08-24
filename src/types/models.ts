@@ -143,13 +143,48 @@ export interface WordSpan {
   validated: boolean;
 }
 
-/** 对齐单元 —— 同步滚动/句级高亮/词级联动/审核的唯一数据源 */
+/** 一个语义单元在某份 PDF 中的一组可视矩形。 */
+export interface AlignmentRectSet {
+  page: number;
+  rects: Rect[];
+}
+
+export type AlignmentRelation =
+  | '1:1'
+  | '1:n'
+  | 'n:1'
+  | 'n:m'
+  | 'paragraph-fallback'
+  | 'block'
+  | 'asset'
+  | 'reference';
+
+/** 对齐单元 —— 同步滚动/语义组高亮/审核的唯一数据源。 */
 export interface AlignmentUnit {
+  id: string;
+  parentId?: string;
+  kind: 'semantic-group' | 'block' | 'asset' | 'reference';
+  relation: AlignmentRelation;
+  sourceUnitIds: string[];
+  targetUnitIds: string[];
+  sourceText?: string;
+  targetText?: string;
+  source: AlignmentRectSet[];
+  target: AlignmentRectSet[];
+  confidence: number;
+  status: 'aligned' | 'low-confidence' | 'unmatched';
+  fallbackReason?: string;
+  order?: number;
+  spans?: WordSpan[];
+}
+
+/** 仅供旧对齐核心迁移期使用；新阅读器不再消费该结构。 */
+export interface LegacyAlignmentUnit {
   id: string;
   enBlockIds: string[];
   zhBlockIds: string[];
   level: AlignmentLevel;
-  confidence: number; // 0~1
+  confidence: number;
   status: 'aligned' | 'needs-review' | 'fallback';
   spans?: WordSpan[];
 }
@@ -157,7 +192,7 @@ export interface AlignmentUnit {
 export interface AlignmentTable {
   projectId: string;
   source: 'pipeline-a' | 'engine-b' | 'imported';
-  units: AlignmentUnit[];
+  units: Array<AlignmentUnit | LegacyAlignmentUnit>;
 }
 
 /** 术语条目(R14:从译文首次出现格式自动抽取) */

@@ -143,3 +143,12 @@ export const matchAnchors = blocksCore.matchAnchors.bind(blocksCore) as BlocksCo
 export const applyManualAnchorOverrides = blocksCore.applyManualAnchorOverrides.bind(blocksCore) as BlocksCore['applyManualAnchorOverrides'];
 export const alignBlockRange = blocksCore.alignBlockRange.bind(blocksCore) as BlocksCore['alignBlockRange'];
 export const alignBlocksWithAnchors = blocksCore.alignBlocksWithAnchors.bind(blocksCore) as BlocksCore['alignBlocksWithAnchors'];
+
+export {
+  buildBlockAndAssetAlignmentUnits,
+  buildSemanticGroups,
+} from './semanticUnits';
+export type {
+  OrderedSemanticInput,
+  SourceCandidateBlock,
+} from './semanticUnits';
