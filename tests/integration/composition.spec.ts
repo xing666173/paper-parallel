@@ -37,7 +37,7 @@ describe('Chinese PDF composition', () => {
       onProgress: (event) => progress.push(event),
     });
 
-    expect(result.pdfKey).toBe('project-1:zh-pdf');
+    expect(result.pdfKey).toBe('project-1:chinese-pdf');
     expect(persisted.map((record) => record.kind)).toEqual([
       'chinese-pdf', 'typst-source', 'typst-preview',
     ]);

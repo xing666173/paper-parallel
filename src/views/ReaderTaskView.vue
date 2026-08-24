@@ -5,6 +5,7 @@ import ReaderView from '../components/reader/ReaderView.vue';
 import { createProjectRepository, type ProjectRepository } from '../core/project/repository';
 import type { AlignmentManifest } from '../core/align/manifest';
 import { useTaskStore } from '../stores/task';
+import { buildProjectPackage } from '../core/project/package';
 
 const props = withDefaults(defineProps<{
   repository?: ProjectRepository;
@@ -63,17 +64,25 @@ async function clearCache() {
 
 async function downloadPackage() {
   actionError.value = '';
-  const artifact = await repository.findArtifact(`${projectId}:project-package`);
-  if (!artifact) {
-    actionError.value = '项目包尚未生成，请返回翻译任务检查完成状态。';
-    return;
+  try {
+    let artifact = await repository.findArtifact(`${projectId}:project-package`);
+    if (!artifact) {
+      const blob = await buildProjectPackage(projectId, repository);
+      artifact = {
+        key: `${projectId}:project-package`, projectId, kind: 'project-package',
+        blob, updatedAt: Date.now(),
+      };
+      await repository.putArtifact(artifact);
+    }
+    const url = URL.createObjectURL(artifact.blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `${projectId}.paper-parallel.zip`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    actionError.value = error instanceof Error ? error.message : '项目包生成失败';
   }
-  const url = URL.createObjectURL(artifact.blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = `${projectId}.paper-parallel.zip`;
-  anchor.click();
-  URL.revokeObjectURL(url);
 }
 </script>
 

@@ -80,5 +80,7 @@ function readerRepository(): ProjectRepository {
       stats: { total: 0, aligned: 0, lowConfidence: 0, unmatched: 0, coverage: 1 },
     })),
     clearProjectDerivedData: vi.fn(),
+    listProjectTranslations: vi.fn(async () => []),
+    listProjectArtifacts: vi.fn(async () => [...artifacts.values()]),
   } as ProjectRepository;
 }

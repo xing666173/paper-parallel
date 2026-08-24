@@ -17,6 +17,8 @@ export interface ProjectRepository {
   saveAlignmentManifest(manifest: AlignmentManifest): Promise<void>;
   loadAlignmentManifest(projectId: string): Promise<AlignmentManifest | undefined>;
   clearProjectDerivedData(projectId: string): Promise<void>;
+  listProjectTranslations(projectId: string): Promise<TranslationCacheRecord[]>;
+  listProjectArtifacts(projectId: string): Promise<ProjectArtifactRecord[]>;
 }
 
 export function createProjectRepository(name = 'paper-parallel'): ProjectRepository {
@@ -79,6 +81,14 @@ export function createProjectRepository(name = 'paper-parallel'): ProjectReposit
           .map((artifact) => artifact.key);
         if (derivedKeys.length) await db.artifacts.bulkDelete(derivedKeys);
       });
+    },
+
+    async listProjectTranslations(projectId) {
+      return db.translations.where('projectId').equals(projectId).sortBy('blockId');
+    },
+
+    async listProjectArtifacts(projectId) {
+      return db.artifacts.where('projectId').equals(projectId).sortBy('kind');
     },
   };
 }

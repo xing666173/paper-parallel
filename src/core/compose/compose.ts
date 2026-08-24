@@ -60,7 +60,7 @@ export async function composeChinesePdf(
 
   dependencies.onProgress({ phase: 'persisting-pdf', at: now() });
   const updatedAt = now();
-  const pdfKey = `${input.projectId}:zh-pdf`;
+  const pdfKey = `${input.projectId}:chinese-pdf`;
   const sourceKey = `${input.projectId}:typst-source`;
   const previewKey = `${input.projectId}:typst-preview`;
   const records: ProjectArtifactRecord[] = [
