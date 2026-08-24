@@ -4,21 +4,12 @@
 // 块级保序 R5:同栏按 y 归块,跨栏按 通栏→左→右 的阅读顺序输出。
 // ============================================================================
 import type { ClassifiedLine, ColumnKind } from './columns';
-import type { Rect } from '../../types/models';
+import type { BlockType, Rect } from '../../types/models';
 
 /** 解析器产出的原始块(尚未装配 docId/pageIndex 等文档上下文) */
 export interface RawBlock {
   id: string;
-  type:
-    | 'title'
-    | 'authors'
-    | 'abstract'
-    | 'keywords'
-    | 'section'
-    | 'paragraph'
-    | 'caption'
-    | 'equation'
-    | 'reference';
+  type: BlockType;
   col: ColumnKind;
   rect: Rect;
   text: string;

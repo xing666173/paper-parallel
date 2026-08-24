@@ -1,14 +1,5 @@
 import { describe, it, expect } from 'vitest';
-
-// 加载共享核心:经典脚本,执行后把 API 挂在 globalThis 上。
-// 与浏览器探针 P8/ext-p8-core-test 加载的是同一份文件,保证测试与探针不分叉。
-await import('../../src/core/paginate/paginator.core.js');
-const core = (globalThis as any).PaperParallelPaginator as {
-  paginate: (blocks: any[], opts: any) => any;
-  validateOrder: (blocks: any[], log: any[]) => any;
-  chunkText: (text: string, w: number, maxH: number, fs: number, measure: any) => { text: string; h: number }[];
-  DEFAULT_GEOM: any;
-};
+import { chunkText, paginate, validateOrder } from '../../src/core/paginate';
 
 /** 与浏览器探针相同的确定性假测量:等宽近似 */
 function fakeMeasure(text: string, w: number, fs: number): number {
@@ -53,8 +44,8 @@ describe('paginator.core(与浏览器探针同一份源码)', () => {
   it('三种版式:块序校验全部通过,页数自然延伸', () => {
     const blocks = makeBlocks();
     for (const mode of ['double', 'single', 'mixed'] as const) {
-      const r = core.paginate(blocks, { mode, measureText: fakeMeasure });
-      const v = core.validateOrder(blocks, r.log);
+      const r = paginate(blocks, { mode, measureText: fakeMeasure });
+      const v = validateOrder(blocks, r.log);
       expect(v.ok).toBe(true);
       expect(r.pages.length).toBeGreaterThanOrEqual(2);
     }
@@ -63,16 +54,17 @@ describe('paginator.core(与浏览器探针同一份源码)', () => {
   it('超高原子块降级:缩放并记录 issue,不阻塞', () => {
     const blocks = makeBlocks();
     for (const mode of ['double', 'single', 'mixed'] as const) {
-      const r = core.paginate(blocks, { mode, measureText: fakeMeasure });
+      const r = paginate(blocks, { mode, measureText: fakeMeasure });
       expect(r.issues).toHaveLength(1);
       expect(r.issues[0].block).toBe('b17');
-      expect(r.issues[0].msg).toContain('超高');
+      const placement = r.log.find((entry) => entry.id === 'b17');
+      expect(placement).toMatchObject({ h: r.geom.usableH, frags: '整' });
     }
   });
 
   it('双栏首页 frontMatter 进通栏区,标题不被压进左栏', () => {
     const blocks = makeBlocks();
-    const r = core.paginate(blocks, { mode: 'double', measureText: fakeMeasure });
+    const r = paginate(blocks, { mode: 'double', measureText: fakeMeasure });
     const p0 = r.pages[0];
     expect(p0.full.blocks.map((b: any) => b.block.type)).toEqual(['title', 'authors', 'abstract', 'keywords']);
     expect(p0.left.blocks.length).toBeGreaterThan(0);
@@ -80,14 +72,14 @@ describe('paginator.core(与浏览器探针同一份源码)', () => {
 
   it('单栏模式所有栏位只出现 single/span', () => {
     const blocks = makeBlocks();
-    const r = core.paginate(blocks, { mode: 'single', measureText: fakeMeasure });
+    const r = paginate(blocks, { mode: 'single', measureText: fakeMeasure });
     const cols = new Set(r.log.map((l: any) => l.col));
     expect([...cols].sort()).toEqual(['single', 'span']);
   });
 
   it('原子块永不劈开:log 中 frags 恒为整', () => {
     const blocks = makeBlocks();
-    const r = core.paginate(blocks, { mode: 'double', measureText: fakeMeasure });
+    const r = paginate(blocks, { mode: 'double', measureText: fakeMeasure });
     for (const l of r.log) {
       if (['figure', 'table', 'equation'].includes(l.type)) expect(l.frags).toBe('整');
     }
@@ -95,7 +87,7 @@ describe('paginator.core(与浏览器探针同一份源码)', () => {
 
   it('chunkText 每片高度不超过 maxH', () => {
     const text = '执行轨迹的生成速度直接决定了整个证明流水线的端到端延迟。本文提出一种新的架构。'.repeat(8);
-    const chunks = core.chunkText(text, 300, 60, 13, fakeMeasure);
+    const chunks = chunkText(text, 300, 60, 13, fakeMeasure);
     expect(chunks.length).toBeGreaterThan(1);
     for (const c of chunks) expect(c.h).toBeLessThanOrEqual(60 + 1e-9);
     expect(chunks.map((c: any) => c.text).join('')).toBe(text);

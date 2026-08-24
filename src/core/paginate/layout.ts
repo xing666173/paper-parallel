@@ -3,7 +3,7 @@
 // Vue 渲染器 / 打印导出 / 审计都消费这份布局描述。
 // 算法基准:P9 探针(浏览器实测 dom=data、无越界 AUDIT=PASS)
 // ============================================================================
-import type { PaginatorPageGeom, PaginatorResult } from './index';
+import type { PaginatorResult } from './index';
 
 export interface LayoutPlacement {
   pageIndex: number;

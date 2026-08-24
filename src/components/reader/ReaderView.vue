@@ -168,7 +168,7 @@ onBeforeUnmount(() => {
             :class="[b.type, { 'hl-unit': activeUnitEls.has('zh:' + b.id) }]"
             :style="{ left: '40px', top: b.pageIndex * pageH + b.rect.y + 'px', width: 'calc(100% - 80px)', height: b.rect.h + 'px' }"
           >
-            <template v-for="(part, i) in zhTextParts(b)" :key="i">
+            <template v-for="part in zhTextParts(b)">
               <span :class="{ word: part.word }" @click="part.word ? clickWord(part.word) : undefined">
                 {{ part.word ? part.word.zh : part.text }}
               </span>

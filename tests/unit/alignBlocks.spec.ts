@@ -25,8 +25,8 @@ function kwScore(a: string, b: string): number {
   const bl = b.toLowerCase();
   let hit = 0;
   for (const [en, zh] of KW) if (al.includes(en) && bl.includes(zh)) hit++;
-  const na = al.match(/\d+(\.\d+)?/g) || [];
-  const nb = bl.match(/\d+(\.\d+)?/g) || [];
+  const na: string[] = al.match(/\d+(\.\d+)?/g) || [];
+  const nb: string[] = bl.match(/\d+(\.\d+)?/g) || [];
   if (na.length && na.some((x) => nb.includes(x))) hit += 2;
   return Math.min(1, hit / 3);
 }

@@ -53,6 +53,10 @@ function startsLikeHeading(b: ParsedPageBlock): boolean {
   );
 }
 
+function lastFragmentPage(b: WorkBlock): number {
+  return b.fragments[b.fragments.length - 1]?.pageIndex ?? b.pageIndex;
+}
+
 /** 两遍法合并:先跨页同栏(优先),再同页左→右栏 */
 function mergePass(
   list: WorkBlock[],
@@ -60,23 +64,45 @@ function mergePass(
   allowCrossCol: boolean,
 ): WorkBlock[] {
   const out: WorkBlock[] = [];
+  const seenPageColumns = new Set<string>();
   for (const b of list) {
-    const prev = out[out.length - 1];
+    const pageColumn = `${b.pageIndex}:${b.col}`;
+    const firstInPageColumn = !seenPageColumns.has(pageColumn);
+    seenPageColumns.add(pageColumn);
+    const crossPagePrev = allowCrossPage && firstInPageColumn
+      ? [...out].reverse().find((candidate) =>
+          lastFragmentPage(candidate) === b.pageIndex - 1 && candidate.col === b.col,
+        )
+      : undefined;
+    const prev = crossPagePrev ?? out[out.length - 1];
     if (
       prev &&
       isContinuable(prev) &&
       b.type === 'paragraph' &&
       !startsLikeHeading(b)
     ) {
-      const crossPage = allowCrossPage && b.pageIndex === prev.pageIndex + 1 && b.col === prev.col;
-      const crossCol = allowCrossCol && b.pageIndex === prev.pageIndex && prev.col === 'left' && b.col === 'right';
+      const crossPage =
+        allowCrossPage &&
+        firstInPageColumn &&
+        b.pageIndex === lastFragmentPage(prev) + 1 &&
+        b.col === prev.col;
+      const crossCol =
+        allowCrossCol &&
+        b.pageIndex === lastFragmentPage(prev) &&
+        prev.col === 'left' &&
+        b.col === 'right';
       if (crossPage || crossCol) {
         prev.text = `${prev.text || ''}\n${b.text || ''}`;
         prev.fragments.push({ pageIndex: b.pageIndex, rect: b.rect });
         continue;
       }
     }
-    out.push({ ...b, fragments: [{ pageIndex: b.pageIndex, rect: b.rect }] });
+    out.push({
+      ...b,
+      fragments: b.fragments.length
+        ? [...b.fragments]
+        : [{ pageIndex: b.pageIndex, rect: b.rect }],
+    });
   }
   return out;
 }

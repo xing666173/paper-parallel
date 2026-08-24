@@ -62,6 +62,38 @@ describe('parser: docBuilder', () => {
     expect(doc.blocks[7].text!).toContain('双缓冲');
   });
 
+  it('连续三页的同栏段落合并为一个三片段块', () => {
+    const pages: ParsedPage[] = [1, 2, 3].map((no) => ({
+      no,
+      w: 612,
+      h: 792,
+      layoutMode: 'double',
+      blocks: [
+        {
+          id: `left-${no}`,
+          type: 'paragraph',
+          col: 'left',
+          rect: { x: 50, y: 70, w: 240, h: 48 },
+          text: no === 1 ? '跨页段落第一部分' : no === 2 ? '跨页段落第二部分' : '跨页段落第三部分。',
+        },
+        {
+          id: `right-${no}`,
+          type: 'paragraph',
+          col: 'right',
+          rect: { x: 330, y: 70, w: 240, h: 48 },
+          text: `右栏独立段落 ${no}。`,
+        },
+      ],
+    }));
+
+    const doc = buildDoc(pages, 'en');
+    const continued = doc.blocks.find((b) => b.text?.includes('跨页段落第一部分'))!;
+    expect(continued.fragments).toHaveLength(3);
+    expect(continued.text).toContain('跨页段落第二部分');
+    expect(continued.text).toContain('跨页段落第三部分');
+    expect(doc.blocks.filter((b) => b.text?.includes('右栏独立段落'))).toHaveLength(3);
+  });
+
   it('prev/next 链连续,新 id 生效', () => {
     const doc = buildDoc(fixture(), 'en');
     doc.blocks.forEach((b, i) => {

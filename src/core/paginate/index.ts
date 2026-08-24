@@ -73,6 +73,13 @@ interface Core {
     contOk: boolean;
     complete: boolean;
   };
+  chunkText(
+    text: string,
+    widthPx: number,
+    maxH: number,
+    fontSize: number,
+    measure: (text: string, width: number, fontSize: number) => number,
+  ): { text: string; h: number }[];
 }
 
 const core = (globalThis as any).PaperParallelPaginator as Core;
@@ -81,6 +88,7 @@ export const DEFAULT_GEOM = core.DEFAULT_GEOM;
 
 export const paginate = core.paginate.bind(core) as Core['paginate'];
 export const validateOrder = core.validateOrder.bind(core) as Core['validateOrder'];
+export const chunkText = core.chunkText.bind(core) as Core['chunkText'];
 
 /** DOM 测量适配器:浏览器中用隐藏元素测量真实断行高度(单例,避免频繁创建) */
 let measurer: HTMLDivElement | null = null;

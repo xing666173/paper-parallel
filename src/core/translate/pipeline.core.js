@@ -59,7 +59,7 @@ function extractTerms(text) {
   const seen = new Set();
   let m;
   while ((m = re.exec(text)) !== null) {
-    let zh = (m[1] || '').trim().replace(/^[和与及、,，\s]+/, '');
+    let zh = (m[1] || '').trim().replace(/^(?:(?:以及|并且|或者|和|与|及|、|,|，)\s*)+/, '');
     const en = (m[2] || '').trim();
     const abbr = (m[3] || '').trim();
     if (!zh || !en) continue;
