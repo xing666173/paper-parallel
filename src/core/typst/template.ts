@@ -14,7 +14,7 @@ export function buildAcademicTemplate(options: AcademicTemplateOptions): string 
   const margin = options.margin ?? Math.max(36, options.paperWidth * 0.1);
   const gutter = options.columnGap ?? 12;
   return `#set page(width: ${points(options.paperWidth)}, height: ${points(options.paperHeight)}, margin: ${points(margin)})
-#set text(font: ("Noto Serif CJK SC", "Noto Serif CJK TC", "Source Han Serif SC", "Times New Roman"), size: 10pt)
+#set text(font: ("Noto Serif SC", "Noto Serif CJK SC", "Source Han Serif SC"), size: 10pt)
 #set par(justify: true, leading: 0.65em)
 #set heading(numbering: "1.1")
 

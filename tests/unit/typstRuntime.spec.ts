@@ -6,6 +6,7 @@ describe('Typst runtime paths', () => {
     expect(getTypstRuntimePaths('/paper-parallel/')).toEqual({
       compilerWasm: '/paper-parallel/vendor/typst/typst_ts_web_compiler_bg.wasm',
       rendererWasm: '/paper-parallel/vendor/typst/typst_ts_renderer_bg.wasm',
+      fontFiles: ['/paper-parallel/vendor/typst/noto-serif-sc-400.woff'],
     });
   });
 
@@ -13,6 +14,11 @@ describe('Typst runtime paths', () => {
     expect(getTypstRuntimePaths('./')).toEqual({
       compilerWasm: './vendor/typst/typst_ts_web_compiler_bg.wasm',
       rendererWasm: './vendor/typst/typst_ts_renderer_bg.wasm',
+      fontFiles: ['./vendor/typst/noto-serif-sc-400.woff'],
     });
+  });
+
+  it('does not create a protocol-relative URL at the site root', () => {
+    expect(getTypstRuntimePaths('/').compilerWasm).toBe('/vendor/typst/typst_ts_web_compiler_bg.wasm');
   });
 });

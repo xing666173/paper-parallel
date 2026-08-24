@@ -21,6 +21,12 @@ workerScope.onmessage = async (event: MessageEvent<TypstWorkerRequest>) => {
     progress('initializing');
     if (!initialized) {
       $typst.use(TypstSnippet.disableDefaultFontAssets());
+      const fontData = await Promise.all(request.runtimePaths.fontFiles.map(async (fontUrl) => {
+        const response = await fetch(fontUrl);
+        if (!response.ok) throw new Error(`Unable to load local Typst font (${response.status})`);
+        return new Uint8Array(await response.arrayBuffer());
+      }));
+      $typst.use(...fontData.map((font) => TypstSnippet.preloadFontData(font)));
       $typst.setCompilerInitOptions({ getModule: () => request.runtimePaths.compilerWasm });
       $typst.setRendererInitOptions({ getModule: () => request.runtimePaths.rendererWasm });
       initialized = true;

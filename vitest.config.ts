@@ -5,7 +5,7 @@ export default defineConfig({
   plugins: [vue()],
   test: {
     environment: 'node',
-    include: ['tests/**/*.spec.ts'],
+    include: ['tests/{unit,integration,components}/**/*.spec.ts'],
     globals: false,
   },
 });

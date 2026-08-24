@@ -9,7 +9,9 @@ const project: TypstProject = {
   markerIds: ['title'],
   regionIds: ['front'],
 };
-const runtimePaths = { compilerWasm: './compiler.wasm', rendererWasm: './renderer.wasm' };
+const runtimePaths = {
+  compilerWasm: './compiler.wasm', rendererWasm: './renderer.wasm', fontFiles: ['./font.woff'],
+};
 
 class FakeTypstWorker {
   onmessage: ((event: MessageEvent<TypstWorkerResponse>) => void) | null = null;
