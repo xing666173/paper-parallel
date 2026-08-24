@@ -20,7 +20,10 @@ export function createProjectRepository(name = 'paper-parallel'): ProjectReposit
 
   return {
     async saveTask(task) {
-      await db.tasks.put(task);
+      await db.tasks.put({
+        ...task,
+        progress: { ...task.progress },
+      });
     },
 
     async loadTask(projectId) {
