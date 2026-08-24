@@ -216,7 +216,7 @@ import { buildTranslationCacheKey } from '../../src/core/project/cacheKey';
 describe('translation cache identity', () => {
   const base = {
     fileHash: 'sha256:file',
-    promptVersion: 'academic-v1',
+    promptVersion: 'academic-json-v2',
     modelId: 'deepseek-v4-flash',
     thinkingMode: 'disabled' as const,
     glossaryHash: 'sha256:terms',
@@ -252,8 +252,8 @@ describe('project repository', () => {
 
   it('clears only the selected project translation cache', async () => {
     const repo = createProjectRepository('paper-parallel-test');
-    await repo.putTranslation({ key: 'a:1', projectId: 'a', blockId: '1', translation: '甲', validatedAt: 1 });
-    await repo.putTranslation({ key: 'b:1', projectId: 'b', blockId: '1', translation: '乙', validatedAt: 1 });
+    await repo.putTranslation({ key: 'a:1', projectId: 'a', blockId: '1', translation: '甲', alignmentGroups: [], validatedAt: 1 });
+    await repo.putTranslation({ key: 'b:1', projectId: 'b', blockId: '1', translation: '乙', alignmentGroups: [], validatedAt: 1 });
     await repo.clearProjectTranslation('a');
     expect(await repo.findTranslation('a:1')).toBeUndefined();
     expect((await repo.findTranslation('b:1'))?.translation).toBe('乙');
@@ -317,6 +317,7 @@ export interface TranslationCacheRecord {
   projectId: string;
   blockId: string;
   translation: string;
+  alignmentGroups: Array<{ sourceSentenceIds: string[]; targetSegments: string[] }>;
   validatedAt: number;
 }
 
@@ -462,11 +463,12 @@ git commit -m "feat: support current DeepSeek models and thinking mode"
 - Create: `src/core/translate/protocol.ts`
 - Create: `src/core/translate/prompts.ts`
 - Create: `src/core/translate/protected.ts`
+- Create: `src/core/align/sourceSentences.ts`
 - Test: `tests/unit/translationProtocol.spec.ts`
 
 **Interfaces:**
 - Consumes: parsed semantic text blocks.
-- Produces: `TranslationRequest`, `TranslationResponse`, `SYSTEM_PROMPT_VERSION`, `buildSystemPrompt()`, `buildBatchPrompt()`, `extractProtectedTokens()`, and `validateBatchResponse()`.
+- Produces: `TranslationRequest`, `TranslationResponse`, `SYSTEM_PROMPT_VERSION`, `buildSourceSentenceCandidates()`, `buildSystemPrompt()`, `buildBatchPrompt()`, `extractProtectedTokens()`, and `validateBatchResponse()`.
 
 - [ ] **Step 1: Write tests for genericity and protected content**
 
@@ -478,11 +480,22 @@ import {
   SYSTEM_PROMPT_VERSION,
 } from '../../src/core/translate/prompts';
 import { validateBatchResponse } from '../../src/core/translate/protected';
+import { buildSourceSentenceCandidates } from '../../src/core/align/sourceSentences';
 
 describe('generic academic translation protocol', () => {
+  it('creates stable source candidates before any translation request', () => {
+    expect(buildSourceSentenceCandidates('p1', 'First result. Second result!')).toEqual({
+      mode: 'sentence-candidates',
+      sentences: [
+        { id: 'p1-s-1', text: 'First result.' },
+        { id: 'p1-s-2', text: 'Second result!' },
+      ],
+    });
+  });
+
   it('does not hardcode a discipline or paper-specific terminology', () => {
     const prompt = buildSystemPrompt();
-    expect(SYSTEM_PROMPT_VERSION).toBe('academic-json-v1');
+    expect(SYSTEM_PROMPT_VERSION).toBe('academic-json-v2');
     expect(prompt).not.toMatch(/zkVM|Zero-Knowledge|计算机体系结构|密码学|医学/);
     expect(prompt).toContain('document_context');
     expect(prompt).toContain('protected_tokens');
@@ -494,7 +507,14 @@ describe('generic academic translation protocol', () => {
       terminologyPolicy: { firstOccurrence: '中文名称（英文全称, 缩写）', laterOccurrence: '固定译名或缩写' },
       entityPolicy: { authorNames: 'keep', organizationNames: 'translate_when_clear', modelNames: 'keep', productNames: 'keep' },
       glossary: [{ source: 'myocardial infarction', target: '心肌梗死' }],
-      blocks: [{ blockId: 'p1', kind: 'paragraph', source: 'Myocardial infarction affected 12%.', protectedTokens: ['12%'] }],
+      blocks: [{
+        blockId: 'p1',
+        kind: 'paragraph',
+        source: 'Myocardial infarction affected 12%.',
+        alignmentMode: 'sentence-candidates',
+        sourceSentences: [{ id: 'p1-s-1', text: 'Myocardial infarction affected 12%.' }],
+        protectedTokens: ['12%'],
+      }],
     });
     expect(prompt).toContain('心肌梗死');
     expect(prompt).toContain('12%');
@@ -502,11 +522,43 @@ describe('generic academic translation protocol', () => {
 
   it('rejects changed numbers and protected markers', () => {
     const result = validateBatchResponse(
-      [{ blockId: 'p1', kind: 'paragraph', source: 'Accuracy was 96%. ⟦CITE:4⟧', protectedTokens: ['96%', '⟦CITE:4⟧'] }],
-      { blocks: [{ blockId: 'p1', translation: '准确率为 69%。⟦CITE:5⟧', newTerms: [], warnings: [] }] },
+      [{
+        blockId: 'p1', kind: 'paragraph', source: 'Accuracy was 96%. ⟦CITE:4⟧',
+        alignmentMode: 'sentence-candidates',
+        sourceSentences: [{ id: 'p1-s-1', text: 'Accuracy was 96%. ⟦CITE:4⟧' }],
+        protectedTokens: ['96%', '⟦CITE:4⟧'],
+      }],
+      { blocks: [{
+        blockId: 'p1', translation: '准确率为 69%。⟦CITE:5⟧',
+        alignmentGroups: [{ sourceSentenceIds: ['p1-s-1'], targetSegments: ['准确率为 69%。⟦CITE:5⟧'] }],
+        newTerms: [], warnings: [],
+      }] },
     );
     expect(result.ok).toBe(false);
     expect(result.issues.map((issue) => issue.code)).toEqual(['protected-token-changed', 'protected-token-changed']);
+  });
+
+  it('accepts continuous sentence groups without forcing equal sentence counts', () => {
+    const source = [{
+      blockId: 'p1', kind: 'paragraph' as const, source: 'First result. Second result. Third result.',
+      alignmentMode: 'sentence-candidates' as const,
+      sourceSentences: [
+        { id: 'p1-s-1', text: 'First result.' },
+        { id: 'p1-s-2', text: 'Second result.' },
+        { id: 'p1-s-3', text: 'Third result.' },
+      ],
+      protectedTokens: [],
+    }];
+    const response = { blocks: [{
+      blockId: 'p1',
+      translation: '前两个结果合并说明。第三个结果拆成两句。补充说明。',
+      alignmentGroups: [
+        { sourceSentenceIds: ['p1-s-1', 'p1-s-2'], targetSegments: ['前两个结果合并说明。'] },
+        { sourceSentenceIds: ['p1-s-3'], targetSegments: ['第三个结果拆成两句。', '补充说明。'] },
+      ],
+      newTerms: [], warnings: [],
+    }] };
+    expect(validateBatchResponse(source, response).ok).toBe(true);
   });
 });
 ```
@@ -522,14 +574,22 @@ Expected: FAIL because the protocol files do not exist.
 ```ts
 export interface TranslationBlockRequest {
   blockId: string;
-  kind: 'title' | 'author' | 'affiliation' | 'abstract' | 'heading' | 'paragraph' | 'sentence' | 'list-item' | 'caption' | 'table-title';
+  kind: 'title' | 'author' | 'affiliation' | 'abstract' | 'heading' | 'paragraph' | 'list-item' | 'caption' | 'table-title';
   source: string;
+  alignmentMode: 'sentence-candidates' | 'paragraph-fallback';
+  sourceSentences: Array<{ id: string; text: string }>;
   protectedTokens: string[];
+}
+
+export interface TranslationAlignmentGroup {
+  sourceSentenceIds: string[];
+  targetSegments: string[];
 }
 
 export interface TranslationBlockResponse {
   blockId: string;
   translation: string;
+  alignmentGroups: TranslationAlignmentGroup[];
   newTerms: Array<{ source: string; target: string; abbreviation?: string }>;
   warnings: string[];
 }
@@ -539,15 +599,19 @@ export interface TranslationResponse {
 }
 ```
 
-The request must not include `figure`, `table`, `formula`, `code`, `reference`, or `page-furniture` as translatable kinds.
+The request must not include `figure`, `table`, `formula`, `code`, `reference`, or `page-furniture` as translatable kinds. Paragraphs, list items, and captions remain whole translation blocks; `sourceSentences` are alignment candidates and must not be sent as independent translation requests.
 
-- [ ] **Step 4: Implement the fixed system prompt and JSON payload builder**
+- [ ] **Step 4: Generate stable source sentence candidates before translation**
 
-`buildSystemPrompt()` returns the approved generic rules from the spec: fidelity, domain adaptation through supplied context, glossary precedence, immutable content, unchanged IDs/order, no layout decisions, and JSON-only output. `buildBatchPrompt()` returns `JSON.stringify(request)` with no prose concatenation and no API key.
+Move deterministic source segmentation ahead of batching. `buildSourceSentenceCandidates(blockId, text)` reuses the existing `splitSentences()` logic and accepts sentence mode only when rejoining normalized candidates covers at least 98% of normalized source text. Stable IDs are `${blockId}-s-${oneBasedIndex}`. If the threshold fails or technical punctuation makes boundaries ambiguous, return one candidate `{ id: blockId, text }` with `mode: 'paragraph-fallback'`. These IDs are cached with the block and never delegated to DeepSeek.
 
-- [ ] **Step 5: Implement deterministic validation**
+- [ ] **Step 5: Implement the fixed system prompt and JSON payload builder**
 
-`validateBatchResponse(sourceBlocks, response)` must verify exact ID set and order, non-empty translation, all protected tokens, all numbers and citation markers, and absence of extra blocks. It returns:
+`buildSystemPrompt()` returns the approved generic rules from the spec: fidelity, domain adaptation through supplied context, glossary precedence, immutable content, unchanged source IDs/order, no layout decisions, and JSON-only output. It explicitly permits natural Chinese sentence splitting and merging, but requires continuous `sourceSentenceIds[]` to continuous `targetSegments[]` groups. `buildBatchPrompt()` returns `JSON.stringify(request)` with no prose concatenation and no API key.
+
+- [ ] **Step 6: Implement deterministic validation**
+
+`validateBatchResponse(sourceBlocks, response)` must verify exact block ID set and order, non-empty translation, all protected tokens, all numbers and citation markers, and absence of extra blocks. For each block, every source sentence ID must occur exactly once across `alignmentGroups`, group IDs must be contiguous and source-ordered, every target segment must be non-empty, and concatenated normalized target segments must equal the normalized `translation`. This admits `1→1`, `1→N`, `N→1`, and `N→M` while rejecting crossed or invented mappings. It returns:
 
 ```ts
 export interface TranslationValidationResult {
@@ -559,16 +623,16 @@ export interface TranslationValidationResult {
 
 Use exact token occurrence counts, not only `includes`, so duplicate citations and values cannot silently disappear.
 
-- [ ] **Step 6: Run protocol and existing audit tests**
+- [ ] **Step 7: Run protocol and existing audit tests**
 
 Run: `npm test -- tests/unit/translationProtocol.spec.ts tests/unit/audit.spec.ts`
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit the protocol**
+- [ ] **Step 8: Commit the protocol**
 
 ```bash
-git add src/core/translate/protocol.ts src/core/translate/prompts.ts src/core/translate/protected.ts tests/unit/translationProtocol.spec.ts
+git add src/core/align/sourceSentences.ts src/core/translate/protocol.ts src/core/translate/prompts.ts src/core/translate/protected.ts tests/unit/translationProtocol.spec.ts
 git commit -m "feat: add generic validated translation protocol"
 ```
 
@@ -676,7 +740,12 @@ it('persists only validated batches and emits lifecycle events', async () => {
     batches: [{ id: 'batch-1', blocks: [sourceBlock], estimatedTokens: 40, oversized: false }],
     concurrency: 2,
     maxRetries: 2,
-    request: async () => ({ blocks: [{ blockId: 'b1', translation: '准确率为 96%。', newTerms: [], warnings: [] }], usage: { promptTokens: 20, completionTokens: 8 } }),
+    request: async () => ({ blocks: [{
+      blockId: 'b1',
+      translation: '准确率为 96%。',
+      alignmentGroups: [{ sourceSentenceIds: ['b1-s-1'], targetSegments: ['准确率为 96%。'] }],
+      newTerms: [], warnings: [],
+    }], usage: { promptTokens: 20, completionTokens: 8 } }),
     findCached: async () => undefined,
     saveValidated: async (record) => saved.push(record.blockId),
     onEvent: (event) => events.push(event.type),

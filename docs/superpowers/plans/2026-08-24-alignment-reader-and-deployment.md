@@ -14,8 +14,8 @@
 
 - English and Chinese PDFs have independent page counts and zoom state.
 - Synchronization uses semantic IDs and actual PDF rectangles, never equal page numbers or raw scroll percentages.
-- Body, list, and caption alignment is sentence-level; headings are block-level; figures, tables, and formulas are asset-level; references are entry-level.
-- Units that cannot be segmented reliably fall back to paragraph-level alignment and record that fallback.
+- Body, list, and caption alignment uses sentence candidates grouped into continuous semantic relations (`1:1`, `1:n`, `n:1`, or `n:m`); headings are block-level; figures, tables, and formulas are asset-level; references are entry-level.
+- The system never assumes equal English/Chinese sentence counts. Units that cannot be segmented or mapped reliably fall back to paragraph-level alignment and record that fallback.
 - Immutable visual assets remain unchanged and align by stable `assetId`; captions align separately.
 - Low-confidence and unmatched units remain visible in the quality report and cannot be silently counted as aligned.
 - Scroll synchronization is bidirectional, throttled, echo-suppressed, and user-toggleable.
@@ -25,7 +25,7 @@
 
 ---
 
-### Task 1: Extend alignment contracts and assign stable sentence IDs
+### Task 1: Build sentence-group relations from stable source candidates
 
 **Files:**
 - Modify: `src/types/models.ts`
@@ -34,29 +34,54 @@
 - Test: `tests/unit/semanticUnits.spec.ts`
 
 **Interfaces:**
-- Consumes: ordered semantic paragraph/caption/reference units.
-- Produces: expanded `AlignmentUnit`, `AlignmentRectSet`, and `buildHybridUnits(units)`.
+- Consumes: the stable source candidates created before translation, validated translation `alignmentGroups`, and ordered non-text semantic units.
+- Produces: expanded `AlignmentUnit`, `AlignmentRectSet`, `buildSemanticGroups(sourceCandidates, mappings)`, and `buildBlockAndAssetAlignmentUnits(units)`.
 
-- [ ] **Step 1: Write stable-ID and fallback tests**
+- [ ] **Step 1: Write cardinality, stable-target-ID, and fallback tests**
 
 ```ts
 import { describe, expect, it } from 'vitest';
-import { buildHybridUnits } from '../../src/core/align/semanticUnits';
-
-it('creates deterministic sentence IDs inside a paragraph', () => {
-  const units = buildHybridUnits([{ id: 'sec-1-p-3', kind: 'paragraph', sourceText: 'First result. Second result!', order: 8 }]);
-  expect(units.map((unit) => unit.id)).toEqual(['sec-1-p-3-s-1', 'sec-1-p-3-s-2']);
-  expect(units.map((unit) => unit.kind)).toEqual(['sentence', 'sentence']);
-});
-
-it('uses one block unit when sentence splitting is unreliable', () => {
-  const units = buildHybridUnits([{ id: 'eq-lead', kind: 'paragraph', sourceText: 'where x_i: y_i; z_i', order: 9 }]);
-  expect(units).toEqual([expect.objectContaining({ id: 'eq-lead', kind: 'block', fallbackReason: 'sentence-boundary-ambiguous' })]);
-});
+import { buildSemanticGroups, buildBlockAndAssetAlignmentUnits } from '../../src/core/align/semanticUnits';
 
 it.each(['figure', 'table', 'formula'] as const)('creates one asset unit for %s', (kind) => {
-  const units = buildHybridUnits([{ id: `${kind}-1`, kind, assetId: `${kind}-1`, order: 10 }]);
+  const units = buildBlockAndAssetAlignmentUnits([{ id: `${kind}-1`, kind, assetId: `${kind}-1`, order: 10 }]);
   expect(units).toEqual([expect.objectContaining({ id: `${kind}-1`, kind: 'asset' })]);
+});
+
+it('represents merge and split mappings without forcing one-to-one sentences', () => {
+  const source = {
+    blockId: 'sec-1-p-3', mode: 'sentence-candidates' as const,
+    sentences: [
+      { id: 'sec-1-p-3-s-1', text: 'First result.' },
+      { id: 'sec-1-p-3-s-2', text: 'Second result!' },
+      { id: 'sec-1-p-3-s-3', text: 'Third result.' },
+    ],
+  };
+  const groups = buildSemanticGroups(source, [
+    { sourceSentenceIds: ['sec-1-p-3-s-1', 'sec-1-p-3-s-2'], targetSegments: ['前两个结果合并说明。'] },
+    { sourceSentenceIds: ['sec-1-p-3-s-3'], targetSegments: ['第三个结果。', '补充说明。'] },
+  ]);
+  expect(groups[0]).toMatchObject({
+    id: 'sec-1-p-3-g-1', relation: 'n:1',
+    sourceUnitIds: ['sec-1-p-3-s-1', 'sec-1-p-3-s-2'],
+    targetUnitIds: ['sec-1-p-3-g-1-t-1'],
+  });
+  expect(groups[1]).toMatchObject({
+    id: 'sec-1-p-3-g-2', relation: '1:n',
+    sourceUnitIds: ['sec-1-p-3-s-3'],
+    targetUnitIds: ['sec-1-p-3-g-2-t-1', 'sec-1-p-3-g-2-t-2'],
+  });
+});
+
+it('keeps an ambiguous source block as an explicit paragraph fallback', () => {
+  const groups = buildSemanticGroups(
+    { blockId: 'eq-lead', mode: 'paragraph-fallback', sentences: [{ id: 'eq-lead', text: 'where x_i: y_i; z_i' }] },
+    [{ sourceSentenceIds: ['eq-lead'], targetSegments: ['其中 x_i：y_i；z_i。'] }],
+  );
+  expect(groups).toEqual([expect.objectContaining({
+    id: 'eq-lead', kind: 'block', relation: 'paragraph-fallback',
+    fallbackReason: 'sentence-boundary-ambiguous',
+  })]);
 });
 ```
 
@@ -77,7 +102,10 @@ export interface AlignmentRectSet {
 export interface AlignmentUnit {
   id: string;
   parentId?: string;
-  kind: 'sentence' | 'block' | 'asset' | 'reference';
+  kind: 'semantic-group' | 'block' | 'asset' | 'reference';
+  relation: '1:1' | '1:n' | 'n:1' | 'n:m' | 'paragraph-fallback' | 'block' | 'asset' | 'reference';
+  sourceUnitIds: string[];
+  targetUnitIds: string[];
   sourceText?: string;
   targetText?: string;
   source: AlignmentRectSet[];
@@ -90,9 +118,9 @@ export interface AlignmentUnit {
 
 Keep a migration adapter from legacy `enBlockIds`/`zhBlockIds` for existing tests until Task 6 replaces all reader callers.
 
-- [ ] **Step 4: Implement deterministic hybrid units**
+- [ ] **Step 4: Implement deterministic semantic groups**
 
-Reuse `splitSentences()` from the existing align core, but require that rejoining normalized sentences covers at least 98% of normalized source text. Otherwise emit one block-level fallback. Caption and list text use the same sentence rule; headings stay block-level; references split only at entry boundaries supplied by the parser.
+Consume the candidate result persisted by the translation workflow; do not split either language again here. `buildSemanticGroups()` accepts only validated continuous mappings, assigns deterministic group and target IDs from their local order, classifies cardinality, and never guesses a one-to-one relation from punctuation alone. A source candidate result with `mode: 'paragraph-fallback'` emits one block-level unit with `relation: 'paragraph-fallback'`. Headings stay block-level; references split only at entry boundaries supplied by the parser; figures, tables, and formulas remain asset units.
 
 - [ ] **Step 5: Run alignment regression**
 
@@ -109,7 +137,7 @@ git commit -m "feat: define stable hybrid alignment units"
 
 ---
 
-### Task 2: Resolve English sentence and asset geometry
+### Task 2: Resolve English sentence-group and asset geometry
 
 **Files:**
 - Create: `src/core/align/sourceGeometry.ts`
@@ -118,12 +146,12 @@ git commit -m "feat: define stable hybrid alignment units"
 
 **Interfaces:**
 - Consumes: source semantic units, block text, `charRects`, block fragments, and immutable asset rectangles.
-- Produces: `resolveSourceGeometry(units, doc, assets): AlignmentUnit[]`.
+- Produces: `resolveSourceGeometry(units, doc, assets): AlignmentUnit[]`, with each semantic group's source rectangles equal to the ordered union of its `sourceUnitIds`.
 
 - [ ] **Step 1: Write geometry-fragment tests**
 
 ```ts
-it('groups sentence character boxes into line rectangles', () => {
+it('groups sentence-group character boxes into line rectangles', () => {
   const resolved = resolveTextRangeRects({
     page: 0,
     start: 0,
@@ -174,7 +202,7 @@ Expected: PASS.
 
 ```bash
 git add src/core/align/sourceGeometry.ts src/core/parser/charRects.ts tests/unit/sourceGeometry.spec.ts
-git commit -m "feat: resolve source sentence and asset geometry"
+git commit -m "feat: resolve source semantic-group and asset geometry"
 ```
 
 ---
@@ -188,8 +216,8 @@ git commit -m "feat: resolve source sentence and asset geometry"
 - Test: `tests/unit/textFallback.spec.ts`
 
 **Interfaces:**
-- Consumes: compiled Chinese PDF.js document, stable unit IDs, and translated text.
-- Produces: `readTargetMarkers(pdf)`, `matchTranslatedText(pdf, units)`, and target `AlignmentRectSet[]`.
+- Consumes: compiled Chinese PDF.js document, stable target-segment IDs, translated segment text, and semantic groups.
+- Produces: `readTargetMarkers(pdf)`, `matchTranslatedText(pdf, segments)`, and target `AlignmentRectSet[]` merged by each group's `targetUnitIds`.
 
 - [ ] **Step 1: Write marker URL and rectangle tests**
 
@@ -239,7 +267,7 @@ Call `page.getAnnotations({ intent: 'display' })`, accept only exact prefix `htt
 
 - [ ] **Step 5: Implement sequential text fallback**
 
-Build one normalized text stream in reading order with a source range for every PDF.js text item. Normalize Unicode NFKC, standard spaces, and line-end hyphenation only. Preserve digits, signs, citations, symbols, and punctuation. Match units in semantic order starting after the previous match so repeated sentences cannot map backward.
+Build one normalized text stream in reading order with a source range for every PDF.js text item. Normalize Unicode NFKC, standard spaces, and line-end hyphenation only. Preserve digits, signs, citations, symbols, and punctuation. Match target segments in semantic order starting after the previous match so repeated text cannot map backward, then union segment rectangles into their semantic groups.
 
 - [ ] **Step 6: Run target geometry tests**
 
@@ -265,7 +293,7 @@ git commit -m "feat: resolve target PDF alignment geometry"
 - Test: `tests/unit/alignmentManifest.spec.ts`
 
 **Interfaces:**
-- Consumes: hybrid units with source geometry, target markers, fallback matches, and project ID.
+- Consumes: semantic groups with source geometry, target-segment markers, fallback matches, and project ID.
 - Produces: `buildAlignmentManifest(input)`, `AlignmentManifest`, and `runAlignmentGate(manifest)`.
 
 - [ ] **Step 1: Write manifest merge and quality tests**
@@ -274,11 +302,11 @@ git commit -m "feat: resolve target PDF alignment geometry"
 it('prefers marker geometry and records fallback confidence', () => {
   const manifest = buildAlignmentManifest({
     projectId: 'p1',
-    units: [sourceSentence, sourceAsset],
-    markers: new Map([['s1', markerGeometry]]),
+    units: [sourceGroup, sourceAsset],
+    markers: new Map([['p1-g-1-t-1', markerGeometry]]),
     fallback: new Map([['asset-1', { ...fallbackGeometry, confidence: 0.82 }]]),
   });
-  expect(manifest.units[0]).toMatchObject({ id: 's1', confidence: 1, status: 'aligned' });
+  expect(manifest.units[0]).toMatchObject({ id: 'p1-g-1', relation: 'n:1', confidence: 1, status: 'aligned' });
   expect(manifest.units[1]).toMatchObject({ id: 'asset-1', confidence: 0.82, status: 'low-confidence' });
 });
 
@@ -286,6 +314,18 @@ it('reports every unmatched unit instead of dropping it', () => {
   const gate = runAlignmentGate(unmatchedManifest);
   expect(gate.pass).toBe(false);
   expect(gate.issues).toEqual([expect.objectContaining({ code: 'unit-unmatched', unitId: 's2' })]);
+});
+
+it('collapses unreliable child groups to a verified paragraph fallback', () => {
+  const manifest = buildAlignmentManifest({
+    ...lowConfidenceGroupFixture,
+    paragraphFallback: new Map([['p1', { source: paragraphSourceGeometry, target: paragraphTargetGeometry, confidence: 0.98 }]]),
+  });
+  expect(manifest.units).toContainEqual(expect.objectContaining({
+    id: 'p1', kind: 'block', relation: 'paragraph-fallback', status: 'aligned',
+    fallbackReason: 'group-geometry-low-confidence',
+  }));
+  expect(manifest.units.some((unit) => unit.id === 'p1-g-1')).toBe(false);
 });
 ```
 
@@ -315,11 +355,11 @@ export interface AlignmentManifest {
 
 - [ ] **Step 4: Implement deterministic merging**
 
-Marker geometry has confidence `1`. Text fallback confidence is its exact normalized-character coverage multiplied by an order-consistency factor. Confidence below `0.9` becomes `low-confidence`; missing target or source geometry becomes `unmatched`. Preserve all units in source order.
+When every target ID in a semantic group has marker geometry, their ordered union has confidence `1`. Text fallback confidence is its exact normalized-character coverage multiplied by an order-consistency factor. If one or more child groups fall below `0.9`, attempt one full-parent source/target text match; coverage of at least `0.98` replaces those child groups with one `paragraph-fallback` unit and records `group-geometry-low-confidence`. If that parent match also fails, keep the child groups as `low-confidence` or `unmatched`. Preserve groups in source order and expose their relation type in the manifest and quality report.
 
 - [ ] **Step 5: Persist the manifest and run the gate**
 
-Save JSON as `alignment-manifest` artifact. The gate fails automatic completion when any required unit is unmatched. Low-confidence units produce warnings and remain visible; the user can still read the generated PDFs after acknowledging the report, but the automatic “all checks passed” label is withheld.
+Save JSON as `alignment-manifest` artifact. The gate fails automatic completion when any required unit remains unmatched after paragraph fallback. Verified paragraph fallbacks pass with a visible granularity warning. Remaining low-confidence units produce warnings and remain visible; the user can still read the generated PDFs after acknowledging the report, but the automatic “all checks passed” label is withheld.
 
 - [ ] **Step 6: Run alignment tests**
 
@@ -641,7 +681,7 @@ await expect(page.locator('[data-pdf-side="zh"] canvas')).toHaveCount(1);
 
 - [ ] **Step 2: Write bidirectional synchronization tests**
 
-Scroll the English pane to a known sentence on source page 4 and assert the Chinese pane active page becomes 6 and the same unit ID is highlighted. Repeat from Chinese to English. Disable `同步滚动`, scroll again, and assert the other pane does not move. Verify no oscillation by counting scroll events for 500 ms after settling.
+Scroll the English pane to a known source sentence inside a semantic group on page 4 and assert the Chinese pane active page becomes 6 and the whole corresponding target group is highlighted. Repeat from any target segment to English. Disable `同步滚动`, scroll again, and assert the other pane does not move. Verify no oscillation by counting scroll events for 500 ms after settling.
 
 - [ ] **Step 3: Add stop/resume and cache-clear browser cases**
 

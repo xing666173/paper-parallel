@@ -19,7 +19,7 @@
 - Figures, diagrams, table bodies, formulas, code, and their internal labels are copied as immutable visual assets and never regenerated or translated.
 - Figure captions and table titles are separate translatable text units; numbering is unchanged.
 - Headers, footers, conference marks, arXiv side text, and watermarks preserve source content and style.
-- Every rendered semantic unit and asset keeps its stable ID for the alignment plan.
+- Every rendered block/asset and every locally identified Chinese target segment keeps its stable ID for the alignment plan.
 - Typst compilation runs in a terminable Web Worker and reports real stage events.
 
 ---
@@ -196,7 +196,7 @@ Sort blocks by global `order`. Start a new region when the page changes or the n
 
 - [ ] **Step 5: Populate regions in the document builder**
 
-Extend `Doc` with `layoutRegions: LayoutRegion[]` and `semanticUnits: SemanticUnit[]`. Keep legacy `blocks` for probe compatibility. Convert every existing block to a semantic unit with the same stable ID; sentence child IDs are added in the alignment plan, not here.
+Extend `Doc` with `layoutRegions: LayoutRegion[]` and `semanticUnits: SemanticUnit[]`. Keep legacy `blocks` for probe compatibility. Convert every existing block to a semantic unit with the same stable ID, and carry the source sentence-candidate IDs produced by the translation workflow without regenerating or renumbering them.
 
 - [ ] **Step 6: Run parser/layout regression**
 
@@ -305,7 +305,7 @@ git commit -m "feat: extract immutable paper visual assets"
 - Test: `tests/unit/typstProject.spec.ts`
 
 **Interfaces:**
-- Consumes: paper metadata, layout regions, translated semantic units, immutable assets, and page-furniture assets.
+- Consumes: paper metadata, layout regions, accepted translations with locally generated target-segment IDs, immutable assets, and page-furniture assets.
 - Produces: `TypstProject { mainContent, files, markerIds }` via `buildTypstProject(input)`.
 
 - [ ] **Step 1: Write a source-generation test for mixed layout**
@@ -315,7 +315,7 @@ it('emits ordered full-width, double-column, and asset regions', () => {
   const project = buildTypstProject(mixedFixture);
   expect(project.mainContent).toContain('#pp-full-width[论文标题]');
   expect(project.mainContent).toContain('#pp-double[');
-  expect(project.mainContent).toContain('#pp-unit("sec-1-p-1")');
+  expect(project.mainContent).toContain('#pp-unit("sec-1-p-1-g-1-t-1")');
   expect(project.mainContent).toContain('#pp-asset("fig-1", "/assets/fig-1.png", span: true)');
   expect(project.mainContent.indexOf('pp-full-width')).toBeLessThan(project.mainContent.indexOf('pp-double'));
   expect(project.files.get('/assets/fig-1.png')).toEqual(fig1Bytes);
@@ -334,7 +334,7 @@ Expected: FAIL.
 
 - [ ] **Step 3: Implement escaping and stable marker wrappers**
 
-`pp-unit(id)[body]` must wrap content in an unstyled link annotation whose destination is `https://paper-parallel.invalid/unit/<encoded-id>`. The visible body receives no underline, color, or spacing change. `pp-asset` wraps the original image in the same marker and emits its separate translated caption unit below or above according to source order.
+`pp-unit(id)[body]` must wrap content in an unstyled link annotation whose destination is `https://paper-parallel.invalid/unit/<encoded-id>`. The visible body receives no underline, color, or spacing change. For paragraphs, lists, and captions, emit one wrapper per local target segment from the translation alignment groups; do not wrap the whole paragraph in a nested link. Block-level content uses its block ID. `pp-asset` wraps the original image in the same marker and emits its separately translated caption segments below or above according to source order.
 
 - [ ] **Step 4: Implement the academic page template**
 
@@ -478,7 +478,7 @@ it('preserves source region order and persists the compiled PDF', async () => {
   const persisted: CompiledArtifactRecord[] = [];
   const result = await composeChinesePdf(compositionFixture, {
     compile: async (project) => {
-      expect(project.markerIds).toEqual(['title', 'sec-1-p-1', 'fig-1', 'fig-1-caption']);
+      expect(project.markerIds).toEqual(['title', 'sec-1-p-1-g-1-t-1', 'fig-1', 'fig-1-caption-g-1-t-1']);
       return { pdf: minimalPdfBytes, svg: '<svg></svg>' };
     },
     saveArtifact: async (record) => persisted.push(record),
@@ -495,7 +495,7 @@ Keep the Dexie `artifacts` table introduced in the workflow plan and widen `Proj
 
 - [ ] **Step 3: Implement the orchestration function**
 
-Validate that every translated unit exists, every asset hash matches, and every layout-region ID resolves before building Typst. Emit `composing`, `compiling-pdf`, and `persisting-pdf` events. Persist the PDF Blob, main Typst source, and preview SVG only after the compiler returns successfully.
+Validate that every translated block and alignment group exists, every local target-segment ID is unique and source-ordered, every asset hash matches, and every layout-region ID resolves before building Typst. Emit `composing`, `compiling-pdf`, and `persisting-pdf` events. Persist the PDF Blob, main Typst source, and preview SVG only after the compiler returns successfully.
 
 - [ ] **Step 4: Connect task stages**
 
