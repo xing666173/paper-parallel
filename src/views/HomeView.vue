@@ -19,7 +19,7 @@ const cards = [
       </router-link>
     </div>
     <p class="tip">
-      端到端浏览器运行器(无需构建):<a href="../probes/P19-e2e-runner.html" target="_blank">打开 P19</a>
+      端到端浏览器运行器(无需构建):<a href="./probes/P19-e2e-runner.html" target="_blank">打开 P19</a>
     </p>
   </main>
 </template>

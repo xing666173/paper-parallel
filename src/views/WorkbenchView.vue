@@ -63,7 +63,7 @@ async function runSelfCheck() {
     <button :disabled="running" @click="runSelfCheck">{{ running ? '运行中…' : '运行合成自检' }}</button>
     <p class="result">{{ result }}</p>
     <p class="note">
-      <a href="../probes/P19-e2e-runner.html" target="_blank">打开 P19 端到端运行器(真实 PDF)</a>
+      <a href="./probes/P19-e2e-runner.html" target="_blank">打开 P19 端到端运行器(真实 PDF)</a>
     </p>
   </main>
 </template>
