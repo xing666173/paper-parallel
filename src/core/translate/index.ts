@@ -127,6 +127,9 @@ const session = (globalThis as any).PaperParallelTranslateSession as SessionCore
 export const buildSystemPrompt = session.buildSystemPrompt.bind(session) as SessionCore['buildSystemPrompt'];
 export const buildUserPrompt = session.buildUserPrompt.bind(session) as SessionCore['buildUserPrompt'];
 export const buildSessionStorageKey = session.buildSessionStorageKey.bind(session) as SessionCore['buildSessionStorageKey'];
+/** @deprecated Probe-only compatibility path; application routes use runTranslationTask. */
 export const runResumableTranslation = session.runResumableTranslation.bind(session) as SessionCore['runResumableTranslation'];
 
 export * from './client';
+export * from './events';
+export * from './coordinator';
