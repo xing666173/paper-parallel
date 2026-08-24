@@ -8,16 +8,15 @@ Paper Parallel 是一个面向学术论文的浏览器端翻译、排版与双�
 
 1. 上传与设置：选择英文 PDF、测试 DeepSeek 连接并创建本地任务。
 2. 翻译与排版：显示八阶段进度、预计剩余时间、AI 任务日志、论文预览与安全停止。
-3. 对照阅读：目前是受完成门禁保护的占位页。
+3. 对照阅读：加载真实英文/中文 PDF，支持独立页码与缩放、同步滚动、语义组高亮、结果与项目包下载。
 
-阶段一已经完成任务状态、IndexedDB 缓存、DeepSeek V4 客户端、通用翻译协议、连续语义组对齐数据、术语表、批处理、重试、停止与恢复基础。
+当前生产流程已接通 PDF.js 解析、DeepSeek 批量翻译与校验、不可变图形/公式裁切、浏览器本地 Typst WASM 编译、连续语义组对齐、质量门和 IndexedDB 恢复。
 
-以下能力仍在后续实施阶段，当前网页不会假装已经完成：
+当前仍需持续扩充的边界能力：
 
-- 原 PDF 的单栏、双栏和混合区域识别与不可变资产提取；
-- 浏览器 Typst WASM 中文排版与真实中文 PDF 编译；
-- 英文/中文真实 PDF 的句子候选、连续语义组对齐与同步阅读；
-- 使用真实论文完成端到端回归并替换 GitHub Pages 线上版本。
+- 扫描件/OCR（当前要求 PDF 具有可用文字层）；
+- 复杂跨页表格、嵌套浮动体和非常规页眉页脚；
+- 更多公开论文版式的回归夹具。
 
 只有翻译块、受保护内容、中文 PDF、不可变资产、对齐映射与本地持久化全部通过检查后，应用才允许显示“处理完成”并进入阅读器。
 
@@ -44,6 +43,7 @@ npm run dev
 npm run typecheck
 npm test
 npm run build
+npm run test:browser
 ```
 
 也可以使用仓库内脚本：
@@ -69,4 +69,4 @@ powershell -ExecutionPolicy Bypass -File .\scripts\check.ps1
 - [版式、资产与浏览器 Typst 计划](docs/superpowers/plans/2026-08-24-layout-assets-and-browser-typst.md)
 - [对齐、阅读器与部署计划](docs/superpowers/plans/2026-08-24-alignment-reader-and-deployment.md)
 
-旧 `probes/` 文件仍作为历史回归夹具保留，但不再作为产品页面或生产路由。
+旧 `probes/` 文件仅作为仓库内历史回归夹具保留，不会复制到生产构建或 GitHub Pages。

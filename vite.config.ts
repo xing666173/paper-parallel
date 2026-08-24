@@ -1,14 +1,15 @@
 import { defineConfig } from 'vite';
 import vue from '@vitejs/plugin-vue';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { copyFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 // base:'./' 适配 GitHub Pages 任意子路径部署
 export default defineConfig({
+  worker: { format: 'es' },
   plugins: [
     vue(),
     {
-      name: 'copy-probes-to-dist',
+      name: 'serve-and-copy-local-typst-runtime',
       configureServer(server) {
         const vendorFiles = new Map([
           ['/vendor/typst/typst_ts_web_compiler_bg.wasm', {
@@ -32,10 +33,6 @@ export default defineConfig({
         });
       },
       closeBundle() {
-        // 把无需构建的探针与共享核心一起带进 dist,让 GitHub Pages 上的
-        // /probes/P19-e2e-runner.html 等页面直接可用
-        copyDir('probes', join('dist', 'probes'), new Set(['assets']));
-        copyDir('src/core', join('dist', 'src', 'core'), new Set());
         const typstVendor = join('dist', 'vendor', 'typst');
         mkdirSync(typstVendor, { recursive: true });
         copyFileSync(
@@ -55,15 +52,3 @@ export default defineConfig({
   ],
   base: './',
 });
-
-function copyDir(src: string, dest: string, skip: Set<string>) {
-  if (!existsSync(src)) return;
-  mkdirSync(dest, { recursive: true });
-  for (const name of readdirSync(src)) {
-    if (skip.has(name)) continue;
-    const s = join(src, name);
-    const d = join(dest, name);
-    if (statSync(s).isDirectory()) copyDir(s, d, skip);
-    else copyFileSync(s, d);
-  }
-}
