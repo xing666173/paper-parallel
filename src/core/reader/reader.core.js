@@ -54,6 +54,111 @@ function clampScrollTop(targetScrollTop, scrollHeight, clientHeight) {
 }
 
 /**
+ * 把对齐清单中的 PDF 矩形展开为独立页高/缩放下的绝对语义锚点。
+ * @param {Array<{id:string,source?:Array,target?:Array}>} units
+ * @param {'en'|'zh'} side
+ * @param {number[]} pageOffsets
+ * @param {number|number[]} pageScales
+ */
+function buildPdfPositionIndex(units, side, pageOffsets, pageScales) {
+  const geometryKey = side === 'en' ? 'source' : 'target';
+  const scaleFor = (page) => Array.isArray(pageScales)
+    ? (Number(pageScales[page]) || 1)
+    : (Number(pageScales) || 1);
+  const sorted = [];
+  for (const unit of Array.isArray(units) ? units : []) {
+    const fragments = [];
+    for (const set of Array.isArray(unit?.[geometryKey]) ? unit[geometryKey] : []) {
+      const pageIndex = Number(set?.page);
+      if (!Number.isFinite(pageIndex) || pageIndex < 0) continue;
+      const scale = scaleFor(pageIndex);
+      const pageTop = Number(pageOffsets?.[pageIndex]) || 0;
+      for (const rect of Array.isArray(set?.rects) ? set.rects : []) {
+        const top = pageTop + (Number(rect?.y) || 0) * scale;
+        const height = Math.max(0, (Number(rect?.h) || 0) * scale);
+        fragments.push({
+          pageIndex,
+          absTop: top,
+          absBottom: top + height,
+          rect,
+        });
+      }
+    }
+    fragments.sort((a, b) => a.pageIndex - b.pageIndex || a.absTop - b.absTop);
+    if (!fragments.length) continue;
+    const first = fragments[0];
+    sorted.push({
+      id: String(unit.id),
+      anchor: first.absTop + (first.absBottom - first.absTop) / 2,
+      pageIndex: first.pageIndex,
+      fragments,
+    });
+  }
+  sorted.sort((a, b) => a.anchor - b.anchor || a.id.localeCompare(b.id));
+  return { sorted, byId: new Map(sorted.map((entry) => [entry.id, entry])) };
+}
+
+function mappedUnitId(id, unitMap) {
+  if (unitMap instanceof Map) return unitMap.get(id) || id;
+  if (unitMap && typeof unitMap === 'object') return unitMap[id] || id;
+  return id;
+}
+
+/**
+ * 以前后语义锚点插值的方式同步独立分页的两份 PDF。
+ */
+function resolvePdfSyncCommand(input) {
+  const source = input?.sourceIndex?.sorted || [];
+  const targetIndex = input?.targetIndex;
+  if (!source.length || !targetIndex?.byId) return null;
+  const center = Number(input.viewportCenter) || 0;
+  const mapped = source
+    .map((entry) => ({
+      source: entry,
+      target: targetIndex.byId.get(mappedUnitId(entry.id, input.unitMap)),
+    }))
+    .filter((pair) => pair.target);
+  if (!mapped.length) return null;
+
+  let previous = null;
+  let next = null;
+  for (const pair of mapped) {
+    if (pair.source.anchor <= center) previous = pair;
+    if (!next && pair.source.anchor >= center) next = pair;
+  }
+  previous ||= mapped[0];
+  next ||= mapped[mapped.length - 1];
+
+  let targetAnchor;
+  if (previous !== next && next.source.anchor > previous.source.anchor) {
+    const ratio = Math.min(1, Math.max(0,
+      (center - previous.source.anchor) / (next.source.anchor - previous.source.anchor),
+    ));
+    targetAnchor = previous.target.anchor + ratio * (next.target.anchor - previous.target.anchor);
+  } else {
+    targetAnchor = previous.target.anchor;
+  }
+
+  const chosen = Math.abs(center - previous.source.anchor) <= Math.abs(next.source.anchor - center)
+    ? previous
+    : next;
+  const viewportHeight = Math.max(0, Number(input.targetViewportHeight) || 0);
+  const rawScrollTop = targetAnchor - viewportHeight / 2;
+  const targetScrollTop = Number.isFinite(input.targetScrollHeight)
+    ? clampScrollTop(rawScrollTop, input.targetScrollHeight, viewportHeight)
+    : Math.max(0, rawScrollTop);
+  return {
+    side: input.side,
+    targetSide: input.side === 'en' ? 'zh' : 'en',
+    unitId: chosen.source.id,
+    targetUnitId: chosen.target.id,
+    targetPage: chosen.target.pageIndex,
+    targetAnchor,
+    targetScrollTop,
+  };
+}
+
+/**
  * 定位某侧视口中心所在的块:二分最近块。
  * @param {{sorted:Array,byId:Map}} idx
  * @param {number} scrollTop
@@ -253,6 +358,8 @@ __rootReader.PaperParallelReader = {
   buildMeasuredPositionIndex,
   shouldSuppressScrollEcho,
   clampScrollTop,
+  buildPdfPositionIndex,
+  resolvePdfSyncCommand,
   locateBlockAtViewport,
   buildUnitIndex,
   resolveSyncCommand,

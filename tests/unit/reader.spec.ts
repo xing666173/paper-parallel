@@ -9,6 +9,8 @@ import {
   buildMeasuredPositionIndex,
   shouldSuppressScrollEcho,
   clampScrollTop,
+  buildPdfPositionIndex,
+  resolvePdfSyncCommand,
 } from '../../src/core/reader/index';
 
 const pageH = 1000;
@@ -54,6 +56,65 @@ describe('reader: 锚点反查同步', () => {
     expect(lock.shouldSync('zh', 50)).toBe(false);
     expect(lock.shouldSync('en', 80)).toBe(true);
     expect(lock.shouldSync('zh', 200)).toBe(true);
+  });
+});
+
+describe('reader: 独立 PDF 语义矩形同步', () => {
+  const manifestUnits = [
+    {
+      id: 'sec-3-p-2-s-1',
+      source: [{ page: 3, rects: [{ x: 40, y: 100, w: 200, h: 40 }] }],
+      target: [{ page: 5, rects: [{ x: 40, y: 220, w: 200, h: 60 }] }],
+    },
+    {
+      id: 'sec-3-p-3-s-1',
+      source: [{ page: 4, rects: [{ x: 40, y: 300, w: 200, h: 40 }] }],
+      target: [{ page: 6, rects: [{ x: 40, y: 500, w: 200, h: 60 }] }],
+    },
+  ];
+  const enIndex = buildPdfPositionIndex(manifestUnits, 'en', [0, 1000, 2000, 3000, 4000], 1);
+  const zhIndex = buildPdfPositionIndex(manifestUnits, 'zh', [0, 1100, 2200, 3300, 4400, 5500, 6600], 1);
+
+  it('按语义锚点把英文第 4 页映射到中文第 6 页', () => {
+    const command = resolvePdfSyncCommand({
+      side: 'en', viewportCenter: 3120,
+      sourceIndex: enIndex, targetIndex: zhIndex,
+      targetViewportHeight: 700,
+    });
+    expect(command).toMatchObject({
+      targetSide: 'zh', unitId: 'sec-3-p-2-s-1', targetPage: 5,
+    });
+  });
+
+  it('在长段落的前后语义单元之间线性插值', () => {
+    const sourceIndex = buildPdfPositionIndex([
+      { id: 'a', source: [{ page: 0, rects: [{ x: 0, y: 80, w: 10, h: 40 }] }], target: [] },
+      { id: 'b', source: [{ page: 0, rects: [{ x: 0, y: 280, w: 10, h: 40 }] }], target: [] },
+    ], 'en', [0], 1);
+    const targetIndex = buildPdfPositionIndex([
+      { id: 'a', source: [], target: [{ page: 0, rects: [{ x: 0, y: 180, w: 10, h: 40 }] }] },
+      { id: 'b', source: [], target: [{ page: 0, rects: [{ x: 0, y: 580, w: 10, h: 40 }] }] },
+    ], 'zh', [0], 1);
+    const command = resolvePdfSyncCommand({
+      side: 'en', viewportCenter: 200,
+      sourceIndex, targetIndex, targetViewportHeight: 100,
+    })!;
+    expect(command.targetScrollTop).toBeGreaterThan(150);
+    expect(command.targetScrollTop).toBeLessThan(550);
+    expect(command.targetScrollTop).toBeCloseTo(350);
+  });
+
+  it('保留一个单元的全部矩形片段用于高亮', () => {
+    const index = buildPdfPositionIndex([{
+      id: 'multi',
+      source: [{ page: 0, rects: [
+        { x: 10, y: 20, w: 30, h: 10 },
+        { x: 10, y: 34, w: 40, h: 10 },
+      ] }],
+      target: [],
+    }], 'en', [100], 2);
+    expect(index.byId.get('multi')?.fragments).toHaveLength(2);
+    expect(index.byId.get('multi')?.anchor).toBe(150);
   });
 });
 

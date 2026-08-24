@@ -64,6 +64,35 @@ export interface ReaderPositionIndex {
   byId: Map<string, ReaderPosition>;
 }
 
+export interface PdfPositionFragment {
+  pageIndex: number;
+  absTop: number;
+  absBottom: number;
+  rect: { x: number; y: number; w: number; h: number };
+}
+
+export interface PdfPosition {
+  id: string;
+  anchor: number;
+  pageIndex: number;
+  fragments: PdfPositionFragment[];
+}
+
+export interface PdfPositionIndex {
+  sorted: PdfPosition[];
+  byId: Map<string, PdfPosition>;
+}
+
+export interface PdfSyncCommand {
+  side: 'en' | 'zh';
+  targetSide: 'en' | 'zh';
+  unitId: string;
+  targetUnitId: string;
+  targetPage: number;
+  targetAnchor: number;
+  targetScrollTop: number;
+}
+
 interface ReaderCore {
   buildPositionIndex(blocks: PositionedBlock[], pageH: number): any;
   buildMeasuredPositionIndex(
@@ -72,6 +101,21 @@ interface ReaderCore {
   ): ReaderPositionIndex;
   shouldSuppressScrollEcho(currentScrollTop: number, targetScrollTop: number, epsilon?: number): boolean;
   clampScrollTop(targetScrollTop: number, scrollHeight: number, clientHeight: number): number;
+  buildPdfPositionIndex(
+    units: Array<{ id: string; source?: Array<{ page: number; rects: Array<{ x: number; y: number; w: number; h: number }> }>; target?: Array<{ page: number; rects: Array<{ x: number; y: number; w: number; h: number }> }> }>,
+    side: 'en' | 'zh',
+    pageOffsets: number[],
+    pageScales: number | number[],
+  ): PdfPositionIndex;
+  resolvePdfSyncCommand(input: {
+    side: 'en' | 'zh';
+    viewportCenter: number;
+    sourceIndex: PdfPositionIndex;
+    targetIndex: PdfPositionIndex;
+    targetViewportHeight: number;
+    targetScrollHeight?: number;
+    unitMap?: Map<string, string> | Record<string, string>;
+  }): PdfSyncCommand | null;
   locateBlockAtViewport(idx: any, scrollTop: number, viewportH: number): any;
   buildUnitIndex(units: { enBlockIds: string[]; zhBlockIds: string[] }[]): Map<string, number>;
   resolveSyncCommand(
@@ -94,6 +138,8 @@ export const buildPositionIndex = core.buildPositionIndex.bind(core) as ReaderCo
 export const buildMeasuredPositionIndex = core.buildMeasuredPositionIndex.bind(core) as ReaderCore['buildMeasuredPositionIndex'];
 export const shouldSuppressScrollEcho = core.shouldSuppressScrollEcho.bind(core) as ReaderCore['shouldSuppressScrollEcho'];
 export const clampScrollTop = core.clampScrollTop.bind(core) as ReaderCore['clampScrollTop'];
+export const buildPdfPositionIndex = core.buildPdfPositionIndex.bind(core) as ReaderCore['buildPdfPositionIndex'];
+export const resolvePdfSyncCommand = core.resolvePdfSyncCommand.bind(core) as ReaderCore['resolvePdfSyncCommand'];
 export const locateBlockAtViewport = core.locateBlockAtViewport.bind(core) as ReaderCore['locateBlockAtViewport'];
 export const buildUnitIndex = core.buildUnitIndex.bind(core) as ReaderCore['buildUnitIndex'];
 export const resolveSyncCommand = core.resolveSyncCommand.bind(core) as ReaderCore['resolveSyncCommand'];
