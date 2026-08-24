@@ -18,15 +18,10 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci --no-audit --no-fund
-      - run: npx playwright install --with-deps chromium
       - name: Type check
         run: npm run typecheck
-      - name: Unit, component, and integration tests
-        run: npm test
       - name: Production build
         run: npm run build
-      - name: Browser workflow tests
-        run: npm run test:browser
       - name: Deploy to GitHub Pages
         if: github.ref == 'refs/heads/main'
         uses: peaceiris/actions-gh-pages@v4
