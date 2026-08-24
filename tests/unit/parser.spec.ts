@@ -125,4 +125,14 @@ describe('parser: pdfjsAdapter', () => {
     expect(r.w).toBeCloseTo(5);
     expect(r.h).toBeCloseTo(12);
   });
+
+  it('does not multiply the PDF.js text width by the font transform', () => {
+    const viewport = { transform: [1, 0, 0, -1, 0, 792] };
+    const item = { str: 'paper title', width: 180, height: 15, transform: [15, 0, 0, 15, 100, 700] };
+
+    const result = normalizeTextItem(item, viewport);
+
+    expect(result.w).toBeCloseTo(180);
+    expect(result.h).toBeCloseTo(15);
+  });
 });

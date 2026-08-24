@@ -1,5 +1,6 @@
 import 'fake-indexeddb/auto';
 import { describe, expect, it } from 'vitest';
+import { reactive } from 'vue';
 import { createTaskSnapshot } from '../../src/core/task/stateMachine';
 import { createProjectRepository } from '../../src/core/project/repository';
 
@@ -19,6 +20,27 @@ describe('project repository', () => {
 
     expect(await repo.loadTask('a')).toEqual(task);
     expect(await repo.loadTask('missing')).toBeUndefined();
+  });
+
+  it('persists task settings received through a Vue reactive proxy', async () => {
+    const repo = createTestRepository();
+    const task = reactive({
+      ...createTaskSnapshot('reactive-task', 1000),
+      settings: {
+        modelId: 'deepseek-v4-flash',
+        thinkingMode: 'disabled' as const,
+        sourceFileName: 'paper.pdf',
+        sourceFileHash: 'abc123',
+      },
+    });
+
+    await expect(repo.saveTask(task)).resolves.toBeUndefined();
+    expect((await repo.loadTask('reactive-task'))?.settings).toEqual({
+      modelId: 'deepseek-v4-flash',
+      thinkingMode: 'disabled',
+      sourceFileName: 'paper.pdf',
+      sourceFileHash: 'abc123',
+    });
   });
 
   it('clears only the selected project translation cache', async () => {

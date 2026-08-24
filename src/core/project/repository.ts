@@ -27,8 +27,15 @@ export function createProjectRepository(name = 'paper-parallel'): ProjectReposit
   return {
     async saveTask(task) {
       await db.tasks.put({
-        ...task,
+        projectId: task.projectId,
+        stage: task.stage,
+        status: task.status,
         progress: { ...task.progress },
+        createdAt: task.createdAt,
+        startedAt: task.startedAt,
+        updatedAt: task.updatedAt,
+        error: task.error,
+        settings: task.settings ? { ...task.settings } : undefined,
       });
     },
 

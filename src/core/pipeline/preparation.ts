@@ -123,7 +123,13 @@ export function prepareImmutableStructure(doc: Doc): PreparedImmutableStructure 
       .reverse().map((id) => blocks.get(id)).find((block) => block?.pageIndex === captionBlock.pageIndex);
     const top = previousBlock ? previousBlock.rect.y + previousBlock.rect.h + 6 : region.bounds.y;
     const bottom = captionBlock.rect.y - 6;
-    if (bottom - top < 24) throw new Error(`无法可靠确定图 ${caption.id} 的不可变区域`);
+    if (bottom - top < 24) {
+      const previousId = previousBlock?.id ?? 'none';
+      const previousText = previousBlock?.text?.replace(/\s+/g, ' ').slice(0, 48) ?? 'none';
+      throw new Error(
+        `无法可靠确定图 ${caption.id} 的不可变区域（前块 ${previousId}“${previousText}”，可用高度 ${Math.round(bottom - top)}pt）`,
+      );
+    }
     const id = `${caption.id}-asset`;
     const widthMode = captionBlock.widthMode;
     assetRegions.push({
