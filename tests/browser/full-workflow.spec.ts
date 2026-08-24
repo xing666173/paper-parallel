@@ -95,6 +95,10 @@ test('uploads a mixed-layout PDF and reaches the synchronized dual-PDF reader', 
   await expect(page.getByLabel('中文 PDF 控制')).toContainText('100%');
   await expect(page.getByLabel('英文 PDF 控制').getByRole('button', { name: '上一页' })).toBeDisabled();
 
+  await page.getByRole('button', { name: '返回翻译任务' }).click();
+  await expect(page.getByRole('heading', { name: '总体进度' })).toBeVisible();
+  await expect(page.locator('.progress-number-row')).toContainText(/([1-9]\d*) \/ \1 个文本块/);
+
   expect(deepSeek.translatedBatches()).toBeGreaterThan(0);
   expect(pageErrors).toEqual([]);
   expect(await page.evaluate(() => localStorage.getItem('paper-parallel.deepseek-key'))).toBeNull();

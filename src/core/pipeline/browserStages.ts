@@ -166,14 +166,18 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
 
     async buildGlossary(input) {
       const current = value(input);
-      return { ...current, glossary: current.glossary ?? [] };
+      const doc = requireValue(current.doc, '解析文档缺失');
+      const prepared = requireValue(current.prepared, '版式结构缺失');
+      const glossary = current.glossary ?? [];
+      const requests = buildTranslationRequestsFromDoc({ ...doc, semanticUnits: prepared.units });
+      return { ...current, glossary, requests, requiredBlocks: requests.length };
     },
 
     async translate(input, signal) {
       const current = value(input);
       const doc = requireValue(current.doc, '解析文档缺失');
       const glossary = current.glossary ?? [];
-      const requests = buildTranslationRequestsFromDoc(doc);
+      const requests = requireValue(current.requests, '翻译请求缺失');
       const batches = buildTranslationBatches(requests, {
         maxInputTokens: 12_000,
         documentContext: { title: doc.meta.title, layoutMode: doc.layoutMode },

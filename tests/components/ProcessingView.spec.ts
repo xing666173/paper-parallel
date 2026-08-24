@@ -80,7 +80,7 @@ describe('processing dashboard', () => {
     expect(wrapper.text()).toContain('2 个受保护标记不一致');
   });
 
-  it('enters the reader only after the full completion summary passes', async () => {
+  it('does not bounce a manual return when the prior completion summary is already present', async () => {
     const store = useTaskStore();
     store.current = {
       ...runningTask(), stage: 'completed', status: 'completed',
@@ -93,6 +93,24 @@ describe('processing dashboard', () => {
     };
 
     const { router } = await mountView();
+    await flushPromises();
+
+    expect(router.currentRoute.value.name).toBe('process');
+  });
+
+  it('enters the reader when the current processing run produces a passing summary', async () => {
+    const store = useTaskStore();
+    store.current = {
+      ...runningTask(), stage: 'completed', status: 'completed',
+      progress: { completed: 20, total: 20, retries: 0, failed: 0 },
+    };
+    const { router } = await mountView();
+
+    store.completionSummary = {
+      requiredBlocks: 20, validatedBlocks: 20, failedBlocks: 0,
+      protectedContentPass: true, pdfCompiled: true, assetsPass: true,
+      alignmentBuilt: true, persisted: true,
+    };
     await flushPromises();
 
     expect(router.currentRoute.value.name).toBe('reader');

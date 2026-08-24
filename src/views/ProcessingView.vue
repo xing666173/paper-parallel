@@ -43,7 +43,7 @@ watch(() => store.completionSummary, async (summary) => {
   if (enteredReader || !summary || !canEnterReader(summary)) return;
   enteredReader = true;
   await router.replace({ name: 'reader', params: { projectId: projectId.value }, query: { auto: '1' } });
-}, { deep: true, immediate: true });
+}, { deep: true });
 
 function pipelineRunner(initial: TaskSnapshot) {
   return async (signal: AbortSignal) => {
