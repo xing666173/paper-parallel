@@ -1,56 +1,84 @@
 // @vitest-environment jsdom
 import 'fake-indexeddb/auto';
-import { mount } from '@vue/test-utils';
-import { createPinia, setActivePinia } from 'pinia';
-import { defineComponent } from 'vue';
+import { mount, flushPromises } from '@vue/test-utils';
+import { createPinia } from 'pinia';
 import { createMemoryHistory, createRouter } from 'vue-router';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import ReaderTaskView from '../../src/views/ReaderTaskView.vue';
-import { createProjectRepository } from '../../src/core/project/repository';
-import { createTaskSnapshot } from '../../src/core/task/stateMachine';
-import { useTaskStore } from '../../src/stores/task';
+import type { ProjectRepository } from '../../src/core/project/repository';
 
-async function waitUntil(predicate: () => Promise<boolean>): Promise<void> {
-  const deadline = Date.now() + 2_000;
-  while (!(await predicate())) {
-    if (Date.now() > deadline) throw new Error('Timed out waiting for cache clear');
-    await new Promise((resolve) => window.setTimeout(resolve, 10));
-  }
-}
+describe('completed dual-PDF reader route', () => {
+  it('shows independent counts and every task action', async () => {
+    const repository = readerRepository();
+    const { wrapper } = await mountReader(repository);
 
-describe('phase-one reader route', () => {
-  beforeEach(() => setActivePinia(createPinia()));
-
-  it('is honest about the gate and keeps recovery actions available', async () => {
-    const store = useTaskStore();
-    store.current = createTaskSnapshot('reader-p1', 1);
-    const repository = createProjectRepository();
-    await repository.putTranslation({
-      key: 'reader-p1:b1', projectId: 'reader-p1', blockId: 'b1',
-      translation: '缓存译文', alignmentGroups: [], validatedAt: 1,
-    });
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
-    const router = createRouter({
-      history: createMemoryHistory(),
-      routes: [
-        { path: '/', name: 'upload', component: { template: '<div />' } },
-        { path: '/task/:projectId/process', name: 'process', component: { template: '<div />' } },
-        { path: '/task/:projectId/read', name: 'reader', component: ReaderTaskView },
-      ],
-    });
-    await router.push('/task/reader-p1/read');
-    await router.isReady();
-    const wrapper = mount(defineComponent({ template: '<RouterView />' }), {
-      global: { plugins: [router] },
-    });
-
+    expect(wrapper.text()).toContain('英文 1 / 8');
+    expect(wrapper.text()).toContain('中文 1 / 11');
     expect(wrapper.text()).toContain('返回翻译任务');
     expect(wrapper.text()).toContain('重新选择文件');
     expect(wrapper.text()).toContain('清除翻译缓存');
-    expect(wrapper.text()).toContain('排版与阅读器将在下一实施阶段接入');
+    expect(wrapper.text()).toContain('下载中文 PDF');
+    expect(wrapper.text()).toContain('下载项目包');
+    expect(wrapper.find('.blk').exists()).toBe(false);
+  });
+
+  it('requires confirmation before clearing only the current project cache', async () => {
+    const repository = readerRepository();
+    vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const { wrapper } = await mountReader(repository);
 
     await wrapper.get('[data-action="clear-cache"]').trigger('click');
-    await waitUntil(async () => (await repository.findTranslation('reader-p1:b1')) === undefined);
-    expect(confirm).toHaveBeenCalledOnce();
+    expect(repository.clearProjectDerivedData).not.toHaveBeenCalled();
+  });
+
+  it('shows the automatic navigation notice once and removes auto query state', async () => {
+    const repository = readerRepository();
+    const { wrapper, router } = await mountReader(repository, true);
+    expect(wrapper.text()).toContain('翻译排版完成，已自动进入对照阅读');
+    expect(router.currentRoute.value.query.auto).toBeUndefined();
   });
 });
+
+async function mountReader(repository: ProjectRepository, auto = false) {
+  const router = createRouter({
+    history: createMemoryHistory(),
+    routes: [
+      { path: '/', name: 'upload', component: { template: '<div />' } },
+      { path: '/task/:projectId/process', name: 'process', component: { template: '<div />' } },
+      { path: '/task/:projectId/read', name: 'reader', component: ReaderTaskView },
+    ],
+  });
+  await router.push(`/task/p1/read${auto ? '?auto=1' : ''}`);
+  await router.isReady();
+  const wrapper = mount(ReaderTaskView, {
+    props: { repository, projectIdOverride: 'p1', initialPageCounts: { en: 8, zh: 11 } },
+    global: {
+      plugins: [router, createPinia()],
+      stubs: { PdfPane: { template: '<div class="pdf-pane-stub" />' } },
+    },
+  });
+  await flushPromises();
+  return { wrapper, router };
+}
+
+function readerRepository(): ProjectRepository {
+  const artifacts = new Map([
+    ['p1:english-pdf', { key: 'p1:english-pdf', projectId: 'p1', kind: 'english-pdf', blob: new Blob(['%PDF-en']), updatedAt: 1 }],
+    ['p1:chinese-pdf', { key: 'p1:chinese-pdf', projectId: 'p1', kind: 'chinese-pdf', blob: new Blob(['%PDF-zh']), updatedAt: 1 }],
+  ]);
+  return {
+    saveTask: vi.fn(),
+    loadTask: vi.fn(async () => undefined),
+    putTranslation: vi.fn(),
+    findTranslation: vi.fn(),
+    clearProjectTranslation: vi.fn(),
+    putArtifact: vi.fn(),
+    findArtifact: vi.fn(async (key: string) => artifacts.get(key)),
+    saveAlignmentManifest: vi.fn(),
+    loadAlignmentManifest: vi.fn(async () => ({
+      schemaVersion: 1, projectId: 'p1', createdAt: 1, units: [],
+      stats: { total: 0, aligned: 0, lowConfidence: 0, unmatched: 0, coverage: 1 },
+    })),
+    clearProjectDerivedData: vi.fn(),
+  } as ProjectRepository;
+}

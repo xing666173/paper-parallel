@@ -16,6 +16,7 @@ export interface ProjectRepository {
   findArtifact(key: string): Promise<ProjectArtifactRecord | undefined>;
   saveAlignmentManifest(manifest: AlignmentManifest): Promise<void>;
   loadAlignmentManifest(projectId: string): Promise<AlignmentManifest | undefined>;
+  clearProjectDerivedData(projectId: string): Promise<void>;
 }
 
 export function createProjectRepository(name = 'paper-parallel'): ProjectRepository {
@@ -67,6 +68,17 @@ export function createProjectRepository(name = 'paper-parallel'): ProjectReposit
       const record = await db.artifacts.get(`${projectId}:alignment-manifest`);
       if (!record) return undefined;
       return JSON.parse(await record.blob.text()) as AlignmentManifest;
+    },
+
+    async clearProjectDerivedData(projectId) {
+      await db.transaction('rw', db.translations, db.artifacts, async () => {
+        await db.translations.where('projectId').equals(projectId).delete();
+        const artifacts = await db.artifacts.where('projectId').equals(projectId).toArray();
+        const derivedKeys = artifacts
+          .filter((artifact) => artifact.kind !== 'english-pdf')
+          .map((artifact) => artifact.key);
+        if (derivedKeys.length) await db.artifacts.bulkDelete(derivedKeys);
+      });
     },
   };
 }

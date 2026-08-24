@@ -50,4 +50,28 @@ describe('project repository', () => {
     expect(await stored?.blob.text()).toBe('%PDF-source');
     expect(await repo.findArtifact('missing')).toBeUndefined();
   });
+
+  it('清除当前项目派生数据时保留英文 PDF 并隔离其他项目', async () => {
+    const repo = createTestRepository();
+    for (const [projectId, kind] of [
+      ['a', 'english-pdf'], ['a', 'chinese-pdf'], ['a', 'alignment-manifest'],
+      ['b', 'chinese-pdf'],
+    ] as const) {
+      await repo.putArtifact({
+        key: `${projectId}:${kind}`, projectId, kind,
+        blob: new Blob([`${projectId}:${kind}`]), updatedAt: 1,
+      });
+    }
+    await repo.putTranslation({
+      key: 'a:1', projectId: 'a', blockId: '1', translation: '甲', alignmentGroups: [], validatedAt: 1,
+    });
+
+    await repo.clearProjectDerivedData('a');
+
+    expect(await repo.findArtifact('a:english-pdf')).toBeDefined();
+    expect(await repo.findArtifact('a:chinese-pdf')).toBeUndefined();
+    expect(await repo.findArtifact('a:alignment-manifest')).toBeUndefined();
+    expect(await repo.findArtifact('b:chinese-pdf')).toBeDefined();
+    expect(await repo.findTranslation('a:1')).toBeUndefined();
+  });
 });

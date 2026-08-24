@@ -1,271 +1,141 @@
 <script setup lang="ts">
-// ============================================================================
-// ReaderView.vue —— 双栏对照阅读器(Vue 组件)
-// 交互逻辑与 P15 探针一致(已通过浏览器自动演示):锚点反查同步 + 回声抑制 +
-// 同步锁 + 句级高亮 + 词级联动。渲染数据由调用方预解析后传入。
-// ============================================================================
-import { computed, onBeforeUnmount, reactive, ref } from 'vue';
-import {
-  buildPositionIndex,
-  buildUnitIndex,
-  resolveSyncCommand,
-  createSyncController,
-  locateSubstringRange,
-  type ReaderBlock,
-  type ReaderSpan,
-} from '../../core/reader/index';
+import { computed, onBeforeUnmount, ref } from 'vue';
+import PdfPane, { type PdfPageMetric } from './PdfPane.vue';
+import ReaderToolbar from './ReaderToolbar.vue';
+import { buildPdfPositionIndex, createSyncController, resolvePdfSyncCommand, shouldSuppressScrollEcho } from '../../core/reader';
+import type { AlignmentManifest } from '../../core/align/manifest';
 
-const props = defineProps<{
-  enBlocks: ReaderBlock[];
-  zhBlocks: ReaderBlock[];
-  units: { enBlockIds: string[]; zhBlockIds: string[] }[];
-  spans?: ReaderSpan[];
-  pageH?: number;
-  viewportH?: number;
-  lockMs?: number;
-}>();
+type PaneHandle = { scrollToPosition(top: number): void; scrollToPage(pageIndex: number): void; getScroller(): HTMLElement | null };
+const props = withDefaults(defineProps<{
+  englishPdf: Blob; chinesePdf: Blob; manifest: AlignmentManifest;
+  initialPageCounts?: { en: number; zh: number }; chineseFilename?: string;
+}>(), { initialPageCounts: () => ({ en: 0, zh: 0 }), chineseFilename: '中文论文.pdf' });
+const emit = defineEmits<{ return: []; choose: []; clear: []; 'download-package': []; error: [message: string] }>();
 
-const pageH = computed(() => props.pageH ?? 1000);
-const viewportH = computed(() => props.viewportH ?? 600);
-const enScroller = ref<HTMLElement | null>(null);
-const zhScroller = ref<HTMLElement | null>(null);
-
-const enIdx = computed(() => buildPositionIndex(props.enBlocks, pageH.value));
-const zhIdx = computed(() => buildPositionIndex(props.zhBlocks, pageH.value));
-const unitIdx = computed(() => buildUnitIndex(props.units));
-const lock = createSyncController(props.lockMs ?? 150);
-
-const activeUnit = ref<number | null>(null);
-const activeUnitEls = computed(() => {
-  if (activeUnit.value === null) return new Set<string>();
-  const u = props.units[activeUnit.value];
-  if (!u) return new Set<string>();
-  return new Set<string>([...u.enBlockIds.map((id) => 'en:' + id), ...u.zhBlockIds.map((id) => 'zh:' + id)]);
-});
-
+const enPane = ref<PaneHandle>();
+const zhPane = ref<PaneHandle>();
+const pageCounts = ref({ ...props.initialPageCounts });
+const pageMetrics = ref<{ en: PdfPageMetric[]; zh: PdfPageMetric[] }>({ en: [], zh: [] });
+const pages = ref({ en: 0, zh: 0 });
+const zoom = ref({ en: 1, zh: 1 });
+const syncEnabled = ref(true);
+const highlightsEnabled = ref(true);
+const activeUnitId = ref(props.manifest.units.find((unit) => unit.status !== 'unmatched')?.id ?? '');
+const lock = createSyncController(120);
 let suppressNext: 'en' | 'zh' | '' = '';
+let animationFrame = 0;
+let pendingScroll: { side: 'en' | 'zh'; scrollTop: number; viewportHeight: number } | undefined;
 
-function onScroll(side: 'en' | 'zh') {
-  if (suppressNext === side) {
-    suppressNext = '';
-    return;
+const activeUnit = computed(() => props.manifest.units.find((unit) => unit.id === activeUnitId.value));
+const enActiveRects = computed(() => highlightsEnabled.value ? activeUnit.value?.source ?? [] : []);
+const zhActiveRects = computed(() => highlightsEnabled.value ? activeUnit.value?.target ?? [] : []);
+const enGeometry = computed(() => props.manifest.units.map((unit) => ({ id: unit.id, rects: unit.source })));
+const zhGeometry = computed(() => props.manifest.units.map((unit) => ({ id: unit.id, rects: unit.target })));
+
+function offsetsFor(side: 'en' | 'zh'): number[] {
+  const offsets: number[] = [];
+  let offset = 18;
+  for (let index = 0; index < pageCounts.value[side]; index += 1) {
+    offsets.push(offset);
+    offset += (pageMetrics.value[side][index]?.height ?? 792) * zoom.value[side] + 18;
   }
-  const scroller = side === 'en' ? enScroller.value : zhScroller.value;
-  if (!scroller) return;
-  if (!lock.shouldSync(side, performance.now())) return;
-  const cmd = resolveSyncCommand(
-    enIdx.value,
-    zhIdx.value,
-    props.units,
-    unitIdx.value,
-    side,
-    scroller.scrollTop,
-    viewportH.value,
-  );
-  if (!cmd) return;
-  activeUnit.value = cmd.unitIndex;
-  const other = cmd.targetSide === 'en' ? enScroller.value : zhScroller.value;
-  if (other) {
-    suppressNext = cmd.targetSide;
-    other.scrollTop = cmd.targetScrollTop;
-  }
+  return offsets;
 }
-
-interface CharBox {
-  key: string;
-  x: number;
-  y: number;
-  w: number;
-  h: number;
+function indexFor(side: 'en' | 'zh') {
+  return buildPdfPositionIndex(props.manifest.units, side, offsetsFor(side), zoom.value[side]);
 }
+function paneFor(side: 'en' | 'zh') { return side === 'en' ? enPane.value : zhPane.value; }
 
-const charBoxes = reactive<CharBox[]>([]);
-
-function clickWord(span: ReaderSpan) {
-  charBoxes.length = 0;
-  const el = document.getElementById('en-' + span.enBlockId);
-  if (!el) return;
-  const range = locateSubstringRange(el.textContent || '', span.en);
-  if (!range) return;
-  const rect = el.getBoundingClientRect();
-  const style = getComputedStyle(el);
-  const pad = parseFloat(style.paddingLeft || '0');
-  const innerW = Math.max(1, rect.width - pad * 2);
-  const chars = Math.max(1, [...(el.textContent || '')].length);
-  const per = innerW / chars;
-  for (let i = range.start; i < range.end; i++) {
-    charBoxes.push({
-      key: `${span.enBlockId}:${i}`,
-      x: rect.left + pad + i * per,
-      y: rect.top + 2,
-      w: per,
-      h: Math.max(4, rect.height - 4),
-    });
+function runSync(payload: typeof pendingScroll) {
+  if (!payload || !syncEnabled.value) return;
+  if (suppressNext === payload.side) { suppressNext = ''; return; }
+  if (!lock.shouldSync(payload.side, performance.now())) return;
+  const targetSide = payload.side === 'en' ? 'zh' : 'en';
+  const targetPane = paneFor(targetSide);
+  const targetScroller = targetPane?.getScroller();
+  if (!targetPane || !targetScroller) return;
+  const command = resolvePdfSyncCommand({
+    side: payload.side, viewportCenter: payload.scrollTop + payload.viewportHeight / 2,
+    sourceIndex: indexFor(payload.side), targetIndex: indexFor(targetSide),
+    targetViewportHeight: targetScroller.clientHeight, targetScrollHeight: targetScroller.scrollHeight,
+  });
+  if (!command) return;
+  activeUnitId.value = command.unitId;
+  if (shouldSuppressScrollEcho(targetScroller.scrollTop, command.targetScrollTop)) {
+    suppressNext = targetSide;
+    targetPane.scrollToPosition(command.targetScrollTop);
   }
 }
-
-function zhTextParts(block: ReaderBlock): Array<{ text: string; word?: ReaderSpan }> {
-  const spans = (props.spans ?? []).filter((s) => s.zhBlockId === block.id);
-  if (!spans.length) return [{ text: block.text }];
-  const parts: Array<{ text: string; word?: ReaderSpan }> = [];
-  let cursor = 0;
-  for (const sp of spans) {
-    const idx = block.text.indexOf(sp.zh, cursor);
-    if (idx < 0) continue;
-    if (idx > cursor) parts.push({ text: block.text.slice(cursor, idx) });
-    parts.push({ text: sp.zh, word: sp });
-    cursor = idx + sp.zh.length;
-  }
-  if (cursor < block.text.length) parts.push({ text: block.text.slice(cursor) });
-  return parts;
+function onPaneScroll(payload: NonNullable<typeof pendingScroll>) {
+  pendingScroll = payload;
+  if (animationFrame) return;
+  animationFrame = requestAnimationFrame(() => {
+    animationFrame = 0;
+    const next = pendingScroll;
+    pendingScroll = undefined;
+    runSync(next);
+  });
 }
-
-const pageCount = computed(() =>
-  Math.max(1, ...props.enBlocks.map((b) => b.pageIndex + 1), ...props.zhBlocks.map((b) => b.pageIndex + 1)),
-);
-
-onBeforeUnmount(() => {
-  charBoxes.length = 0;
-  lock.reset();
-});
+function onUnitClick(unitId: string, sourceSide: 'en' | 'zh') {
+  activeUnitId.value = unitId;
+  if (!syncEnabled.value) return;
+  const targetSide = sourceSide === 'en' ? 'zh' : 'en';
+  const target = indexFor(targetSide).byId.get(unitId);
+  const targetPane = paneFor(targetSide);
+  const scroller = targetPane?.getScroller();
+  if (target && targetPane && scroller) targetPane.scrollToPosition(Math.max(0, target.anchor - scroller.clientHeight / 2));
+}
+function onLoaded(side: 'en' | 'zh', payload: { pageCount: number; pageMetrics: PdfPageMetric[] }) {
+  pageCounts.value = { ...pageCounts.value, [side]: payload.pageCount };
+  pageMetrics.value = { ...pageMetrics.value, [side]: payload.pageMetrics };
+}
+function stepPage(side: 'en' | 'zh', delta: number) {
+  const next = Math.max(0, Math.min(pageCounts.value[side] - 1, pages.value[side] + delta));
+  pages.value = { ...pages.value, [side]: next };
+  paneFor(side)?.scrollToPage(next);
+}
+function stepZoom(side: 'en' | 'zh', delta: number) {
+  zoom.value = { ...zoom.value, [side]: Math.max(.5, Math.min(2.5, Number((zoom.value[side] + delta).toFixed(2)))) };
+}
+function fitWidth(side: 'en' | 'zh') {
+  const scroller = paneFor(side)?.getScroller();
+  const width = pageMetrics.value[side][pages.value[side]]?.width ?? 612;
+  if (scroller) zoom.value = { ...zoom.value, [side]: Math.max(.5, Math.min(2.5, (scroller.clientWidth - 40) / width)) };
+}
+function downloadChinese() {
+  const url = URL.createObjectURL(props.chinesePdf);
+  const anchor = document.createElement('a');
+  anchor.href = url; anchor.download = props.chineseFilename; anchor.click();
+  URL.revokeObjectURL(url);
+}
+onBeforeUnmount(() => { if (animationFrame) cancelAnimationFrame(animationFrame); lock.reset(); });
 </script>
 
 <template>
-  <div class="reader-view">
-    <div class="pane">
-      <h2>左 · 英文原文</h2>
-      <div ref="enScroller" class="scroller" @scroll.passive="onScroll('en')">
-        <div class="content" :style="{ height: pageCount * pageH + 'px' }">
-          <div v-for="p in pageCount" :key="'enp' + p" class="pagesep" :style="{ top: (p - 1) * pageH + 'px' }">
-            第 {{ p }} 页
-          </div>
-          <div
-            v-for="b in enBlocks"
-            :id="'en-' + b.id"
-            :key="b.id"
-            class="blk"
-            :class="[b.type, { 'hl-unit': activeUnitEls.has('en:' + b.id) }]"
-            :style="{ left: '40px', top: b.pageIndex * pageH + b.rect.y + 'px', width: 'calc(100% - 80px)', height: b.rect.h + 'px' }"
-          >
-            {{ b.text }}
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div class="pane">
-      <h2>右 · 中文译文</h2>
-      <div ref="zhScroller" class="scroller" @scroll.passive="onScroll('zh')">
-        <div class="content" :style="{ height: pageCount * pageH + 'px' }">
-          <div v-for="p in pageCount" :key="'zhp' + p" class="pagesep" :style="{ top: (p - 1) * pageH + 'px' }">
-            第 {{ p }} 页
-          </div>
-          <div
-            v-for="b in zhBlocks"
-            :id="'zh-' + b.id"
-            :key="b.id"
-            class="blk"
-            :class="[b.type, { 'hl-unit': activeUnitEls.has('zh:' + b.id) }]"
-            :style="{ left: '40px', top: b.pageIndex * pageH + b.rect.y + 'px', width: 'calc(100% - 80px)', height: b.rect.h + 'px' }"
-          >
-            <template v-for="part in zhTextParts(b)">
-              <span :class="{ word: part.word }" @click="part.word ? clickWord(part.word) : undefined">
-                {{ part.word ? part.word.zh : part.text }}
-              </span>
-            </template>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div
-      v-for="c in charBoxes"
-      :key="c.key"
-      class="char"
-      :style="{ left: c.x + 'px', top: c.y + 'px', width: c.w + 'px', height: c.h + 'px' }"
+  <section class="reader-view">
+    <ReaderToolbar
+      :en-page="pages.en" :en-page-count="pageCounts.en" :zh-page="pages.zh" :zh-page-count="pageCounts.zh"
+      :en-zoom="zoom.en" :zh-zoom="zoom.zh" :sync-enabled="syncEnabled" :highlights-enabled="highlightsEnabled"
+      @return="emit('return')" @choose="emit('choose')" @clear="emit('clear')"
+      @download-chinese="downloadChinese" @download-package="emit('download-package')"
+      @page-step="stepPage" @zoom-step="stepZoom" @fit-width="fitWidth"
+      @update:sync-enabled="syncEnabled = $event" @update:highlights-enabled="highlightsEnabled = $event"
     />
-  </div>
+    <div class="pdf-workspace">
+      <PdfPane ref="enPane" side="en" title="英文原文" :pdf-blob="englishPdf" :page-count="pageCounts.en"
+        :page-metrics="pageMetrics.en" :active-rects="enActiveRects" :unit-geometry="enGeometry" :zoom="zoom.en"
+        @loaded="onLoaded('en', $event)" @scroll="onPaneScroll" @page-change="pages.en = $event"
+        @unit-click="onUnitClick" @error="emit('error', $event)" />
+      <PdfPane ref="zhPane" side="zh" title="中文译文" :pdf-blob="chinesePdf" :page-count="pageCounts.zh"
+        :page-metrics="pageMetrics.zh" :active-rects="zhActiveRects" :unit-geometry="zhGeometry" :zoom="zoom.zh"
+        @loaded="onLoaded('zh', $event)" @scroll="onPaneScroll" @page-change="pages.zh = $event"
+        @unit-click="onUnitClick" @error="emit('error', $event)" />
+    </div>
+  </section>
 </template>
 
 <style scoped>
-.reader-view {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
-  position: relative;
-  height: 100%;
-}
-.pane {
-  background: #fff;
-  border: 1px solid #d8dee6;
-  border-radius: 6px;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-}
-.pane h2 {
-  margin: 0;
-  padding: 8px 10px;
-  font-size: 13px;
-  border-bottom: 1px solid #d8dee6;
-  background: #f8fafc;
-}
-.scroller {
-  position: relative;
-  height: 600px;
-  overflow: auto;
-}
-.content {
-  position: relative;
-}
-.pagesep {
-  position: absolute;
-  left: 0;
-  right: 0;
-  border-top: 1px dashed #cbd5e1;
-  color: #9aa7b5;
-  font-size: 9px;
-  text-align: center;
-}
-.blk {
-  position: absolute;
-  border: 1px solid #b6c2d0;
-  background: #fbfdff;
-  padding: 6px 8px;
-  font-size: 11px;
-  line-height: 1.5;
-  overflow: hidden;
-  text-align: justify;
-}
-.blk.section {
-  background: #f3e8ff;
-  border-color: #a855f7;
-  font-weight: 700;
-}
-.blk.title {
-  background: #dbeafe;
-  border-color: #3b82f6;
-  font-weight: 700;
-}
-.hl-unit {
-  outline: 3px solid #f59e0b;
-  outline-offset: -1px;
-  background: #fffbeb !important;
-}
-.word {
-  cursor: pointer;
-  background: #fef9c3;
-  border-bottom: 1px dashed #d97706;
-  padding: 0 1px;
-}
-.word:hover {
-  background: #fde68a;
-}
-.char {
-  position: fixed;
-  background: rgba(14, 165, 233, 0.35);
-  border: 1px solid #0284c7;
-  pointer-events: none;
-  z-index: 4;
-}
+.reader-view { height: calc(100vh - 70px); display: flex; flex-direction: column; background: #eef2f6; }
+.pdf-workspace { min-height: 0; flex: 1; display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 12px; padding: 12px; }
+@media (max-width: 900px) { .reader-view { height: auto; min-height: calc(100vh - 70px); }.pdf-workspace { grid-template-columns: 1fr; grid-template-rows: 70vh 70vh; } }
 </style>

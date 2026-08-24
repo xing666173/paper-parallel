@@ -42,7 +42,7 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   scroll: [payload: { side: 'en' | 'zh'; scrollTop: number; viewportHeight: number }];
   'page-change': [pageIndex: number];
-  'unit-click': [unitId: string];
+  'unit-click': [unitId: string, side: 'en' | 'zh'];
   loaded: [payload: { pageCount: number; pageMetrics: PdfPageMetric[] }];
   error: [message: string];
 }>();
@@ -228,7 +228,7 @@ function onPageClick(pageIndex: number, event: MouseEvent) {
   const target = event.currentTarget as HTMLElement;
   const bounds = target.getBoundingClientRect();
   const unitId = nearestUnit(pageIndex, (event.clientX - bounds.left) / props.zoom, (event.clientY - bounds.top) / props.zoom);
-  if (unitId) emit('unit-click', unitId);
+  if (unitId) emit('unit-click', unitId, props.side);
 }
 
 function scrollToPosition(scrollTop: number) {
