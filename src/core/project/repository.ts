@@ -1,4 +1,5 @@
 import type { TaskSnapshot } from '../../types/models';
+import type { AlignmentManifest } from '../align/manifest';
 import {
   PaperParallelDb,
   type ProjectArtifactRecord,
@@ -13,6 +14,8 @@ export interface ProjectRepository {
   clearProjectTranslation(projectId: string): Promise<void>;
   putArtifact(record: ProjectArtifactRecord): Promise<void>;
   findArtifact(key: string): Promise<ProjectArtifactRecord | undefined>;
+  saveAlignmentManifest(manifest: AlignmentManifest): Promise<void>;
+  loadAlignmentManifest(projectId: string): Promise<AlignmentManifest | undefined>;
 }
 
 export function createProjectRepository(name = 'paper-parallel'): ProjectRepository {
@@ -48,6 +51,22 @@ export function createProjectRepository(name = 'paper-parallel'): ProjectReposit
 
     async findArtifact(key) {
       return db.artifacts.get(key);
+    },
+
+    async saveAlignmentManifest(manifest) {
+      await db.artifacts.put({
+        key: `${manifest.projectId}:alignment-manifest`,
+        projectId: manifest.projectId,
+        kind: 'alignment-manifest',
+        blob: new Blob([JSON.stringify(manifest, null, 2)], { type: 'application/json' }),
+        updatedAt: manifest.createdAt,
+      });
+    },
+
+    async loadAlignmentManifest(projectId) {
+      const record = await db.artifacts.get(`${projectId}:alignment-manifest`);
+      if (!record) return undefined;
+      return JSON.parse(await record.blob.text()) as AlignmentManifest;
     },
   };
 }

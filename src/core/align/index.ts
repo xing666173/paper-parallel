@@ -156,3 +156,5 @@ export { resolveSourceGeometry, resolveTextRangeRects } from './sourceGeometry';
 export { readTargetMarkers } from './targetMarkers';
 export { matchTranslatedText } from './textFallback';
 export type { TargetTextMatch, TargetTextSegment } from './textFallback';
+export { buildAlignmentManifest } from './manifest';
+export type { AlignmentManifest, AlignmentManifestInput } from './manifest';
