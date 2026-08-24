@@ -41,6 +41,13 @@ export interface ChatCompletionResult {
   usage: ChatUsage;
 }
 
+export class DeepSeekOutputLimitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'DeepSeekOutputLimitError';
+  }
+}
+
 export const CURRENT_DEEPSEEK_MODELS: readonly DeepSeekModel[] = [
   { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash' },
   { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
@@ -136,11 +143,29 @@ export async function chatCompletion(opts: ChatCompletionOptions): Promise<ChatC
   }
 
   const data = (await response.json()) as {
-    choices?: { message?: { content?: string } }[];
+    choices?: {
+      finish_reason?: string | null;
+      message?: { content?: string | null; reasoning_content?: string | null };
+    }[];
     usage?: { prompt_tokens?: number; completion_tokens?: number };
   };
-  const content = data.choices?.[0]?.message?.content;
-  if (!content) throw new Error('DeepSeek 响应缺少 choices[0].message.content');
+  const choice = data.choices?.[0];
+  const content = choice?.message?.content;
+  const finishReason = choice?.finish_reason ?? 'missing';
+  const completionTokens = data.usage?.completion_tokens ?? 0;
+  const promptTokens = data.usage?.prompt_tokens ?? 0;
+  const reasoningState = choice?.message?.reasoning_content ? 'present' : 'absent';
+  const outputDiagnostic = `finish_reason=${finishReason}, completion_tokens=${completionTokens}, prompt_tokens=${promptTokens}, reasoning_content=${reasoningState}`;
+  if (finishReason === 'length') {
+    throw new DeepSeekOutputLimitError(`DeepSeek 输出额度耗尽（${outputDiagnostic}）`);
+  }
+  if (!content?.trim()) {
+    const message = `DeepSeek 未返回最终内容（${outputDiagnostic}）`;
+    if (reasoningState === 'present') {
+      throw new DeepSeekOutputLimitError(message);
+    }
+    throw new Error(message);
+  }
 
   return {
     content,

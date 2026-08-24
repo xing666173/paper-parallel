@@ -9,9 +9,26 @@ export interface TranslationBatch {
 
 export interface TranslationBatchOptions {
   maxInputTokens: number;
+  maxBlocks?: number;
   estimateTokens?: (text: string) => number;
   documentContext?: unknown;
   glossary?: unknown;
+}
+
+export interface TranslationLimits {
+  maxInputTokens: number;
+  maxOutputTokens: number;
+  maxBlocks: number;
+}
+
+export function translationLimitsFor(
+  thinkingMode: 'enabled' | 'disabled',
+): TranslationLimits {
+  return {
+    maxInputTokens: 4_000,
+    maxOutputTokens: thinkingMode === 'enabled' ? 32_768 : 16_384,
+    maxBlocks: 8,
+  };
 }
 
 export function estimateConservativeTokens(text: string): number {
@@ -25,6 +42,7 @@ export function buildTranslationBatches(
   if (blocks.length === 0) return [];
 
   const estimate = options.estimateTokens ?? estimateConservativeTokens;
+  const maxBlocks = options.maxBlocks ?? Number.POSITIVE_INFINITY;
   const sharedTokens = estimate(JSON.stringify({
     documentContext: options.documentContext ?? null,
     glossary: options.glossary ?? [],
@@ -46,6 +64,7 @@ export function buildTranslationBatches(
   };
 
   for (const block of blocks) {
+    if (currentBlocks.length >= maxBlocks) flush();
     const blockTokens = estimate(JSON.stringify(block));
     const singleBlockTokens = sharedTokens + blockTokens;
 

@@ -53,6 +53,24 @@ function safeErrorMessage(error: unknown): string {
   return raw.replace(/sk-[A-Za-z0-9_-]+/g, '[redacted]').slice(0, 180);
 }
 
+function isOutputLimitError(error: unknown): error is Error {
+  return error instanceof Error && error.name === 'DeepSeekOutputLimitError';
+}
+
+function splitBatch(batch: TranslationBatch): [TranslationBatch, TranslationBatch] {
+  const midpoint = Math.ceil(batch.blocks.length / 2);
+  const child = (suffix: 'a' | 'b', blocks: TranslationBlockRequest[]): TranslationBatch => ({
+    ...batch,
+    id: `${batch.id}${suffix}`,
+    blocks,
+    estimatedTokens: Math.ceil(batch.estimatedTokens * blocks.length / batch.blocks.length),
+  });
+  return [
+    child('a', batch.blocks.slice(0, midpoint)),
+    child('b', batch.blocks.slice(midpoint)),
+  ];
+}
+
 export async function runTranslationTask(
   options: TranslationTaskOptions,
 ): Promise<TranslationTaskResult> {
@@ -131,6 +149,20 @@ export async function runTranslationTask(
       } catch (error) {
         if (isAbortError(error, options.signal)) throw abortError();
         const reason = safeErrorMessage(error);
+        if (isOutputLimitError(error)) {
+          if (pendingBatch.blocks.length > 1) {
+            const children = splitBatch(pendingBatch);
+            options.onEvent({
+              type: 'batch-split', at: now(), batchId: batch.id,
+              childBatchIds: [children[0].id, children[1].id], reason,
+            });
+            await processBatch(children[0]);
+            await processBatch(children[1]);
+            return;
+          }
+          options.onEvent({ type: 'error', at: now(), batchId: batch.id, message: reason });
+          throw error;
+        }
         if (attempt < options.maxRetries) {
           options.onEvent({
             type: 'retry', at: now(), batchId: batch.id, attempt: attempt + 1, reason,

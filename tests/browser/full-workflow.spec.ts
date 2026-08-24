@@ -12,8 +12,12 @@ interface PromptBlock {
 async function mockDeepSeek(
   page: Page,
   options: { firstTranslationDelayMs?: number } = {},
-): Promise<{ translatedBatches: () => number }> {
+): Promise<{
+  translatedBatches: () => number;
+  translationRequests: () => Array<{ maxTokens: number; thinking: string; blockCount: number }>;
+}> {
   let translatedBatches = 0;
+  const translationRequests: Array<{ maxTokens: number; thinking: string; blockCount: number }> = [];
 
   await page.route('https://api.deepseek.com/models', async (route) => {
     expect(route.request().headers().authorization).toBe(`Bearer ${FAKE_KEY}`);
@@ -30,6 +34,8 @@ async function mockDeepSeek(
     expect(route.request().headers().authorization).toBe(`Bearer ${FAKE_KEY}`);
     const request = route.request().postDataJSON() as {
       messages: Array<{ role: string; content: string }>;
+      max_tokens: number;
+      thinking?: { type?: string };
     };
     const userMessage = [...request.messages].reverse().find((message) => message.role === 'user')?.content ?? '';
     let content = 'pong';
@@ -37,6 +43,11 @@ async function mockDeepSeek(
     if (userMessage !== 'Reply with pong.') {
       const prompt = JSON.parse(userMessage) as { blocks: PromptBlock[] };
       translatedBatches += 1;
+      translationRequests.push({
+        maxTokens: request.max_tokens,
+        thinking: request.thinking?.type ?? 'missing',
+        blockCount: prompt.blocks.length,
+      });
       if (translatedBatches === 1 && options.firstTranslationDelayMs) {
         await new Promise((resolve) => setTimeout(resolve, options.firstTranslationDelayMs));
       }
@@ -67,7 +78,10 @@ async function mockDeepSeek(
     });
   });
 
-  return { translatedBatches: () => translatedBatches };
+  return {
+    translatedBatches: () => translatedBatches,
+    translationRequests: () => translationRequests,
+  };
 }
 
 test('uploads a mixed-layout PDF and reaches the synchronized dual-PDF reader', async ({ page }) => {
@@ -78,6 +92,7 @@ test('uploads a mixed-layout PDF and reaches the synchronized dual-PDF reader', 
   await page.goto('/');
   await page.locator('[data-field="pdf"]').setInputFiles(FIXTURE);
   await page.locator('[data-field="api-key"]').fill(FAKE_KEY);
+  await page.getByLabel('思考模式').selectOption('enabled');
   await page.locator('[data-action="test-connection"]').click();
   await expect(page.getByText('连接成功')).toBeVisible();
 
@@ -106,6 +121,11 @@ test('uploads a mixed-layout PDF and reaches the synchronized dual-PDF reader', 
   await expect(page.locator('.progress-number-row')).toContainText(/([1-9]\d*) \/ \1 个文本块/);
 
   expect(deepSeek.translatedBatches()).toBeGreaterThan(0);
+  expect(deepSeek.translationRequests().every((request) => (
+    request.maxTokens === 32_768
+    && request.thinking === 'enabled'
+    && request.blockCount <= 8
+  ))).toBe(true);
   expect(pageErrors).toEqual([]);
   expect(await page.evaluate(() => localStorage.getItem('paper-parallel.deepseek-key'))).toBeNull();
 });
@@ -120,7 +140,7 @@ test('safely stops an active translation request and resumes the recoverable tas
   await expect(page.getByText('连接成功')).toBeVisible();
   await page.locator('[data-action="start"]').click();
 
-  await expect(page.getByText(/开始批次 batch-/)).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText(/开始批次 batch-/).first()).toBeVisible({ timeout: 30_000 });
   await page.getByRole('button', { name: '安全停止' }).click();
   await expect(page.getByRole('button', { name: '继续处理' })).toBeVisible({ timeout: 15_000 });
   await expect(page.getByText('已安全停止')).toBeVisible();

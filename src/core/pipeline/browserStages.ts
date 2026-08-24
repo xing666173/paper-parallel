@@ -9,7 +9,7 @@ import { buildDoc, type ParsedPage } from '../parser/docBuilder';
 import { prepareImmutableStructure, buildTranslationRequestsFromDoc, normalizeDeepSeekTranslationResponse } from './preparation';
 import { extractImmutableAssets } from '../assets/extract';
 import { cropPageRegionLossless } from '../assets/crop';
-import { buildTranslationBatches } from '../translate/batcher';
+import { buildTranslationBatches, translationLimitsFor } from '../translate/batcher';
 import { runTranslationTask } from '../translate/coordinator';
 import { chatCompletion } from '../translate/client';
 import { buildBatchPrompt, buildSystemPrompt, SYSTEM_PROMPT_VERSION } from '../translate/prompts';
@@ -178,8 +178,10 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
       const doc = requireValue(current.doc, '解析文档缺失');
       const glossary = current.glossary ?? [];
       const requests = requireValue(current.requests, '翻译请求缺失');
+      const limits = translationLimitsFor(settings.thinkingMode);
       const batches = buildTranslationBatches(requests, {
-        maxInputTokens: 12_000,
+        maxInputTokens: limits.maxInputTokens,
+        maxBlocks: limits.maxBlocks,
         documentContext: { title: doc.meta.title, layoutMode: doc.layoutMode },
         glossary,
       });
@@ -218,6 +220,7 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
             baseUrl: options.baseUrl ?? 'https://api.deepseek.com',
             apiKey, model: settings.modelId, thinkingMode: settings.thinkingMode,
             responseFormat: 'json_object', signal: batchSignal, timeoutMs: 120_000,
+            maxTokens: limits.maxOutputTokens,
             messages: [
               { role: 'system', content: buildSystemPrompt() },
               { role: 'user', content: buildBatchPrompt(requestBody) },

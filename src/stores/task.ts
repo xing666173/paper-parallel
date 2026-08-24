@@ -20,6 +20,9 @@ export interface AiLogEntry {
 export type TaskRunner = (signal: AbortSignal) => Promise<void>;
 
 function projectAiMessage(event: AiLogEvent): string {
+  const safeReason = (reason: string) => reason
+    .replace(/sk-[A-Za-z0-9_-]+/g, '[redacted]')
+    .slice(0, 180);
   switch (event.type) {
     case 'batch-started':
       return `开始批次 ${event.batchId}，共 ${event.blockIds.length} 个文本块`;
@@ -31,8 +34,10 @@ function projectAiMessage(event: AiLogEvent): string {
       return `缓存命中：${event.blockId}`;
     case 'cache-written':
       return `已保存：${event.blockId}`;
+    case 'batch-split':
+      return `批次 ${event.batchId} 输出过长，已拆分为 ${event.childBatchIds.join('、')}：${safeReason(event.reason)}`;
     case 'retry':
-      return `批次 ${event.batchId} 正在进行第 ${event.attempt} 次重试`;
+      return `批次 ${event.batchId} 正在进行第 ${event.attempt} 次重试：${safeReason(event.reason)}`;
     case 'error':
       return `批次 ${event.batchId} 失败`;
   }
@@ -56,9 +61,9 @@ export function createTaskStore(dependencies: TaskStoreDependencies, id = 'task'
     function recordAiEvent(event: AiLogEvent): void {
       aiLog.value.push({ at: event.at, type: event.type, message: projectAiMessage(event) });
       if (aiLog.value.length > 200) aiLog.value.splice(0, aiLog.value.length - 200);
-      if (event.type === 'batch-received') {
+      if (event.type === 'batch-received' || event.type === 'batch-split') {
         lastResponseAt.value = event.at;
-        if (event.completionTokens > 0 && event.elapsedMs > 0) {
+        if (event.type === 'batch-received' && event.completionTokens > 0 && event.elapsedMs > 0) {
           throughputSamples.value.push({ tokens: event.completionTokens, elapsedMs: event.elapsedMs });
           if (throughputSamples.value.length > 8) throughputSamples.value.splice(0, throughputSamples.value.length - 8);
         }

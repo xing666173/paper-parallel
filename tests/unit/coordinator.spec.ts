@@ -184,4 +184,39 @@ describe('cancellable translation coordinator', () => {
 
     expect(messages).toEqual(['request failed for [redacted]']);
   });
+
+  it('splits an output-exhausted batch instead of retrying the same paid request', async () => {
+    const requested: string[][] = [];
+    const events: string[] = [];
+    const blocks = ['b1', 'b2', 'b3', 'b4'].map((id) => block(id, `${id} source.`));
+
+    const result = await runTranslationTask({
+      projectId: 'p1', modelId: 'deepseek-v4-pro', batches: [batch('batch-1', blocks)],
+      concurrency: 1, maxRetries: 2,
+      request: async (pending) => {
+        requested.push(pending.blocks.map((item) => item.blockId));
+        if (pending.blocks.length > 2) {
+          const error = new Error('finish_reason=length');
+          error.name = 'DeepSeekOutputLimitError';
+          throw error;
+        }
+        return {
+          blocks: pending.blocks.map((item) => translated(item.blockId, `${item.source}译`)),
+          usage: { promptTokens: 10, completionTokens: 5 },
+        };
+      },
+      findCached: async () => undefined,
+      saveValidated: async () => undefined,
+      onEvent: (event) => { events.push(event.type); },
+    });
+
+    expect(requested).toEqual([
+      ['b1', 'b2', 'b3', 'b4'],
+      ['b1', 'b2'],
+      ['b3', 'b4'],
+    ]);
+    expect(events).toContain('batch-split');
+    expect(events).not.toContain('retry');
+    expect(result.completedBlockIds).toEqual(['b1', 'b2', 'b3', 'b4']);
+  });
 });

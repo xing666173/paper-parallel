@@ -120,4 +120,38 @@ describe('translate: DeepSeek client', () => {
       messages: [], fetchFn,
     })).rejects.toThrow('DeepSeek HTTP 401');
   });
+
+  it('reports output exhaustion without exposing reasoning content', async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({
+      choices: [{
+        finish_reason: 'length',
+        message: { content: '', reasoning_content: 'private chain of thought' },
+      }],
+      usage: { prompt_tokens: 12_000, completion_tokens: 4_096 },
+    }), { status: 200 })) as unknown as typeof fetch;
+
+    const request = chatCompletion({
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test', model: 'deepseek-v4-pro',
+      thinkingMode: 'enabled', messages: [{ role: 'user', content: 'JSON translation' }], fetchFn,
+    });
+
+    await expect(request).rejects.toMatchObject({ name: 'DeepSeekOutputLimitError' });
+    await expect(request).rejects.toThrow(/finish_reason=length.*completion_tokens=4096.*prompt_tokens=12000.*reasoning_content=present/);
+    await expect(request).rejects.not.toThrow(/private chain of thought/);
+  });
+
+  it('treats a non-empty but truncated JSON response as output exhaustion', async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({
+      choices: [{
+        finish_reason: 'length',
+        message: { content: '{"blocks":[', reasoning_content: null },
+      }],
+      usage: { prompt_tokens: 4_000, completion_tokens: 16_384 },
+    }), { status: 200 })) as unknown as typeof fetch;
+
+    await expect(chatCompletion({
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test', model: 'deepseek-v4-flash',
+      thinkingMode: 'disabled', messages: [{ role: 'user', content: 'JSON translation' }], fetchFn,
+    })).rejects.toMatchObject({ name: 'DeepSeekOutputLimitError' });
+  });
 });

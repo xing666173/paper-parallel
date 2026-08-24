@@ -41,6 +41,23 @@ describe('project task store', () => {
     expect(JSON.stringify(store.aiLog)).not.toContain('server echoed');
   });
 
+  it('shows safe retry and adaptive-split reasons without exposing reasoning text', () => {
+    const { store } = setupStore();
+    store.recordAiEvent({
+      type: 'batch-split', at: 1, batchId: 'batch-1', childBatchIds: ['batch-1a', 'batch-1b'],
+      reason: '输出额度耗尽（reasoning_content=present）',
+    });
+    store.recordAiEvent({
+      type: 'retry', at: 2, batchId: 'batch-1a', attempt: 1, reason: 'DeepSeek HTTP 503',
+    });
+
+    expect(store.aiLog.map((entry) => entry.message)).toEqual([
+      '批次 batch-1 输出过长，已拆分为 batch-1a、batch-1b：输出额度耗尽（reasoning_content=present）',
+      '批次 batch-1a 正在进行第 1 次重试：DeepSeek HTTP 503',
+    ]);
+    expect(store.lastResponseAt).toBe(1);
+  });
+
   it('safely stops active work, preserves validated progress, and persists stopped state', async () => {
     const { store, repository } = setupStore();
     const task = reduceTaskEvent(runningTranslationTask(), {

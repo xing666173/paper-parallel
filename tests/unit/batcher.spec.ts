@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { buildTranslationBatches, estimateConservativeTokens } from '../../src/core/translate/batcher';
+import {
+  buildTranslationBatches,
+  estimateConservativeTokens,
+  translationLimitsFor,
+} from '../../src/core/translate/batcher';
 import type { TranslationBlockRequest } from '../../src/core/translate/protocol';
 
 function block(id: string, source: string): TranslationBlockRequest {
@@ -56,5 +60,23 @@ describe('translation batching', () => {
 
   it('uses the conservative mixed-language estimator by default', () => {
     expect(estimateConservativeTokens('中文abc')).toBe(2);
+  });
+
+  it('caps batch block count even when token estimates would permit a larger request', () => {
+    const batches = buildTranslationBatches(
+      Array.from({ length: 17 }, (_, index) => block(`b${index}`, 'short')),
+      { maxInputTokens: 10_000, maxBlocks: 8 },
+    );
+
+    expect(batches.map((item) => item.blocks.length)).toEqual([8, 8, 1]);
+  });
+
+  it('reserves more output tokens for thinking without growing translation batches', () => {
+    expect(translationLimitsFor('disabled')).toEqual({
+      maxInputTokens: 4_000, maxOutputTokens: 16_384, maxBlocks: 8,
+    });
+    expect(translationLimitsFor('enabled')).toEqual({
+      maxInputTokens: 4_000, maxOutputTokens: 32_768, maxBlocks: 8,
+    });
   });
 });

@@ -7,5 +7,9 @@ export type AiLogEvent =
   | { type: 'batch-validated'; at: number; batchId: string; blockIds: string[] }
   | { type: 'cache-hit'; at: number; blockId: string }
   | { type: 'cache-written'; at: number; blockId: string }
+  | {
+      type: 'batch-split'; at: number; batchId: string;
+      childBatchIds: [string, string]; reason: string;
+    }
   | { type: 'retry'; at: number; batchId: string; attempt: number; reason: string }
   | { type: 'error'; at: number; batchId: string; message: string };
