@@ -108,6 +108,26 @@ describe('processing dashboard', () => {
     expect(wrapper.text()).not.toContain('实时更新');
   });
 
+  it('recovers an orphaned stopping task after a page reload', async () => {
+    const store = useTaskStore();
+    store.current = {
+      ...runningTask(),
+      status: 'stopping',
+      updatedAt: 4_000,
+    };
+
+    const { wrapper } = await mountView();
+    await flushPromises();
+
+    expect(store.current).toMatchObject({
+      status: 'stopped',
+      progress: { completed: 7, total: 20 },
+    });
+    expect(wrapper.get('button').text()).toBe('继续处理');
+    expect(wrapper.text()).toContain('已安全停止');
+    expect(wrapper.text()).not.toContain('正在停止…');
+  });
+
   it('does not bounce a manual return when the prior completion summary is already present', async () => {
     const store = useTaskStore();
     store.current = {

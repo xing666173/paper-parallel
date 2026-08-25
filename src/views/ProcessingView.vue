@@ -83,6 +83,7 @@ onMounted(async () => {
   loading.value = !task.value;
   try {
     if (!task.value) store.current = await repository.loadTask(projectId.value) ?? null;
+    if (store.current?.status === 'stopping') await store.recoverInterruptedStop();
     const artifact = await repository.findArtifact(`${projectId.value}:english-pdf`);
     if (artifact?.blob instanceof Blob && typeof URL.createObjectURL === 'function') {
       sourceUrl.value = URL.createObjectURL(artifact.blob);

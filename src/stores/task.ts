@@ -144,6 +144,17 @@ export function createTaskStore(dependencies: TaskStoreDependencies, id = 'task'
       await launch(runner);
     }
 
+    async function recoverInterruptedStop(at = Date.now()): Promise<void> {
+      if (
+        !current.value
+        || current.value.status !== 'stopping'
+        || abortController.value
+        || runningPromise
+      ) return;
+      current.value = reduceTaskEvent(current.value, { type: 'STOPPED', at });
+      await dependencies.repository.saveTask(current.value);
+    }
+
     async function clearTranslationCache(): Promise<void> {
       if (!current.value) return;
       await dependencies.repository.clearProjectTranslation(current.value.projectId);
@@ -159,6 +170,7 @@ export function createTaskStore(dependencies: TaskStoreDependencies, id = 'task'
       start,
       safeStop,
       resume,
+      recoverInterruptedStop,
       clearTranslationCache,
       recordAiEvent,
     };
