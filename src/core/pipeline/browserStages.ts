@@ -33,6 +33,8 @@ import type { ImmutableAsset } from '../assets/types';
 import { analyzePdfLayoutWithVision } from '../vision/analyze';
 import { reconcileVisionLayout } from '../vision/reconcile';
 import { serializeVisionPageAnalysis } from '../vision/protocol';
+import { inspectCompiledPdf, runPdfContentGate } from '../quality/pdfContentGate';
+import { persistValidatedOutputs } from '../quality/finalPersistence';
 
 const SESSION_KEY_STORAGE = 'paper-parallel.deepseek-key-session';
 const LOCAL_KEY_STORAGE = 'paper-parallel.deepseek-key';
@@ -350,14 +352,6 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
         runtimePaths: getTypstRuntimePaths(import.meta.env.BASE_URL, document.baseURI), signal,
         onProgress: (phase) => options.onCompileProgress?.(phase),
       });
-      const records = [
-        { key: `${options.projectId}:chinese-pdf`, kind: 'chinese-pdf' as const, blob: new Blob([compiled.pdf], { type: 'application/pdf' }) },
-        { key: `${options.projectId}:typst-source`, kind: 'typst-source' as const, blob: new Blob([project.mainContent], { type: 'text/plain' }) },
-        { key: `${options.projectId}:typst-preview`, kind: 'typst-preview' as const, blob: new Blob([compiled.svg], { type: 'image/svg+xml' }) },
-      ];
-      for (const record of records) await options.repository.putArtifact({
-        ...record, projectId: options.projectId, updatedAt: Date.now(),
-      });
       return { ...current, compiled };
     },
 
@@ -386,17 +380,49 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
       const manifest = buildAlignmentManifest({
         projectId: options.projectId, units, markers, fallback,
       });
-      await options.repository.saveAlignmentManifest(manifest);
       await targetPdf.destroy();
       return { ...current, manifest };
     },
 
     async validate(input) {
       const current = value(input);
+      const doc = requireValue(current.doc, '解析文档缺失');
       const compiled = requireValue(current.compiled, '中文 PDF 缺失');
       const manifest = requireValue(current.manifest, '对齐清单缺失');
+      const translations = requireValue(current.translations, '翻译结果缺失');
+      const project = requireValue(current.typstProject, 'Typst 项目缺失');
       const alignment = runAlignmentGate(manifest);
       const pdfCompiled = new TextDecoder().decode(compiled.pdf.slice(0, 5)).startsWith('%PDF-');
+      const inspection = await inspectCompiledPdf(compiled.pdf);
+      const contentGate = runPdfContentGate({
+        ...inspection,
+        expectedTranslations: translations.map((translation) => translation.translation),
+        maximumPages: Math.max(doc.pageCount + 2, Math.ceil(doc.pageCount * 3)),
+      });
+      const updatedAt = Date.now();
+      const artifacts = [
+        {
+          key: `${options.projectId}:chinese-pdf`, projectId: options.projectId,
+          kind: 'chinese-pdf' as const, blob: new Blob([compiled.pdf], { type: 'application/pdf' }), updatedAt,
+        },
+        {
+          key: `${options.projectId}:typst-source`, projectId: options.projectId,
+          kind: 'typst-source' as const, blob: new Blob([project.mainContent], { type: 'text/plain' }), updatedAt,
+        },
+        {
+          key: `${options.projectId}:typst-preview`, projectId: options.projectId,
+          kind: 'typst-preview' as const, blob: new Blob([compiled.svg], { type: 'image/svg+xml' }), updatedAt,
+        },
+      ];
+      await persistValidatedOutputs({
+        contentGate,
+        alignmentPass: alignment.pass,
+        alignmentError: alignment.issues.map((issue) => issue.message).join('；'),
+        artifacts,
+        manifest,
+        putArtifact: (artifact) => options.repository.putArtifact(artifact),
+        saveAlignmentManifest: (value) => options.repository.saveAlignmentManifest(value),
+      });
       const persisted = Boolean(
         await options.repository.findArtifact(`${options.projectId}:chinese-pdf`)
         && await options.repository.loadAlignmentManifest(options.projectId),
@@ -407,7 +433,7 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
         failedBlocks: 0,
         protectedContentPass: true,
         pdfCompiled,
-        assetsPass: true,
+        assetsPass: contentGate.pass,
         alignmentBuilt: alignment.pass,
         persisted,
       };
