@@ -100,7 +100,7 @@ describe('vision: final PDF review', () => {
 
     expect(report.pass).toBe(true);
     expect(requests).toHaveLength(2);
-    expect(requests[1].messages[0].content[0].text).toContain('at most 6 severe issues');
+    expect(requests[1].messages[0].content[0].text).toContain('at most 3 severe issues');
   });
 
   it('reviews heavy multimodal pages sequentially, reports starts immediately, and preserves page order', async () => {

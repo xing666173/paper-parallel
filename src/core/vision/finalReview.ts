@@ -173,7 +173,7 @@ async function withPageDeadline<T>(
 export async function runVisionFinalReview(options: RunVisionFinalReviewOptions): Promise<VisionFinalReport> {
   if (!options.apiKey.trim()) throw new Error('Vision Exp 成品质检需要 DeepSeek API Key');
   const complete = options.complete ?? chatCompletion;
-  const renderPage = options.renderPage ?? ((page) => renderPdfPageAsPng(page, { scale: 1.5 }));
+  const renderPage = options.renderPage ?? ((page) => renderPdfPageAsPng(page, { scale: 1 }));
   const pageIssues: VisionFinalIssue[][] = Array.from({ length: options.targetPdf.numPages }, () => []);
   const runController = new AbortController();
   const onOuterAbort = () => runController.abort();
@@ -197,7 +197,7 @@ export async function runVisionFinalReview(options: RunVisionFinalReviewOptions)
       model: VISION_LAYOUT_MODEL,
       thinkingMode: 'disabled',
       responseFormat: 'json_object',
-      maxTokens: compact ? 1_024 : 2_048,
+      maxTokens: compact ? 384 : 768,
       timeoutMs: 90_000,
       signal: pageSignal,
       messages: [{ role: 'user', content: [

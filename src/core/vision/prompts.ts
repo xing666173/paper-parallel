@@ -31,7 +31,7 @@ export function buildVisionFinalReviewPrompt(
     'Natural repagination and different Chinese line breaks are allowed. Single-column, double-column, and mixed regions should preserve the source layout mode.',
     'Figures, table bodies, display formulas, code, variables, symbols, and internal figure labels must be visibly intact. Captions may be translated.',
     'Report only visible production defects: missing/clipped/overlapping text, unreadable glyphs, untranslated body prose, collapsed columns, or changed/missing immutable assets.',
-    'Return at most 12 issues. Merge repeated instances of the same visible defect and keep evidence under 20 words. Never transcribe page text.',
+    'Return at most 6 representative issues. Merge repeated instances of the same visible defect and keep evidence under 12 words. Never transcribe page text.',
     'Do not judge translation style or wording. Do not report harmless spacing or natural page extension as severe.',
     ...(sourcePageNumbers.length ? [] : ['Do not infer source-to-target changes without a source image; report only defects visibly present on the target page.']),
     'Every box must be an object {"x":number,"y":number,"width":number,"height":number} in normalized 0..1000 target-page coordinates. Never return pixel coordinates or x1/y1/x2/y2.',
@@ -39,6 +39,6 @@ export function buildVisionFinalReviewPrompt(
     '{"target_page":1,"issues":[{"type":"missing_text|clipped_text|overlap|unreadable_glyphs|untranslated_body|layout_collapse|layout_drift|asset_changed|asset_missing|formula_changed|table_changed","severity":"severe|warning","bbox":{"x":0,"y":0,"width":1,"height":1},"confidence":0.0,"evidence":"short visible evidence"}]}',
     'Use the actual target page number above. Return no prose or Markdown.',
   ];
-  if (compact) prompt.splice(-1, 0, 'The previous report was too long. Return only the at most 6 severe issues with highest confidence; omit all warnings.');
+  if (compact) prompt.splice(-1, 0, 'The previous report was too long. Return only the at most 3 severe issues with highest confidence; omit all warnings.');
   return prompt.join('\n');
 }
