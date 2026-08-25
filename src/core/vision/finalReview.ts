@@ -115,11 +115,12 @@ export interface RunVisionFinalReviewOptions {
   complete?: (options: ChatCompletionOptions) => Promise<ChatCompletionResult>;
   renderPage?: (page: PdfPageForVision, role: 'source' | 'target', pageIndex: number) => Promise<string>;
   onPageStart?(event: { targetPageIndex: number; totalPages: number }): void;
+  onPageTimeout?(event: { targetPageIndex: number; totalPages: number; timeoutMs: number }): void;
   onPage?(event: { targetPageIndex: number; totalPages: number; issueCount: number }): void;
 }
 
 export const VISION_FINAL_REVIEW_CONCURRENCY = 2;
-export const VISION_FINAL_REVIEW_PAGE_TIMEOUT_MS = 120_000;
+export const VISION_FINAL_REVIEW_PAGE_TIMEOUT_MS = 90_000;
 
 async function withPageDeadline<T>(
   operation: (signal: AbortSignal) => Promise<T>,
@@ -127,6 +128,7 @@ async function withPageDeadline<T>(
   pageIndex: number,
   totalPages: number,
   timeoutMs: number,
+  onTimeout?: () => void,
 ): Promise<T> {
   const controller = new AbortController();
   let timedOut = false;
@@ -136,13 +138,17 @@ async function withPageDeadline<T>(
   const onOuterAbort = () => controller.abort();
   if (outerSignal.aborted) controller.abort();
   else outerSignal.addEventListener('abort', onOuterAbort, { once: true });
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  const clock = () => globalThis.performance?.now?.() ?? Date.now();
+  const startedAt = clock();
+  let timer: ReturnType<typeof setInterval> | undefined;
   const deadline = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => {
+    timer = setInterval(() => {
+      if (clock() - startedAt < timeoutMs) return;
       timedOut = true;
+      onTimeout?.();
       controller.abort();
       reject(timeoutError());
-    }, timeoutMs);
+    }, Math.min(1_000, Math.max(10, timeoutMs)));
   });
   try {
     return await Promise.race([operation(controller.signal), deadline]);
@@ -150,7 +156,7 @@ async function withPageDeadline<T>(
     if (timedOut) throw timeoutError();
     throw error;
   } finally {
-    if (timer) clearTimeout(timer);
+    if (timer) clearInterval(timer);
     outerSignal.removeEventListener('abort', onOuterAbort);
   }
 }
@@ -229,6 +235,11 @@ export async function runVisionFinalReview(options: RunVisionFinalReviewOptions)
     targetPageIndex,
     options.targetPdf.numPages,
     options.pageTimeoutMs ?? VISION_FINAL_REVIEW_PAGE_TIMEOUT_MS,
+    () => options.onPageTimeout?.({
+      targetPageIndex,
+      totalPages: options.targetPdf.numPages,
+      timeoutMs: options.pageTimeoutMs ?? VISION_FINAL_REVIEW_PAGE_TIMEOUT_MS,
+    }),
   );
 
   let nextTargetPageIndex = 0;

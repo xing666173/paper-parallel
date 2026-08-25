@@ -88,6 +88,14 @@ describe('project task store', () => {
     expect(store.lastResponseAt).toBe(11);
   });
 
+  it('reports the exact final-review page when its hard deadline expires', () => {
+    const { store } = setupStore();
+    store.recordAiEvent({ type: 'vision-review-page-timeout', at: 12, page: 3, totalPages: 11, timeoutMs: 90_000 });
+
+    expect(store.aiLog.at(-1)?.message).toBe('Vision Exp 成品质检：第 3/11 页超过 90 秒，已取消');
+    expect(store.lastResponseAt).toBe(12);
+  });
+
   it('coalesces streaming heartbeats while keeping the latest phase visible', () => {
     const { store } = setupStore();
     store.recordAiEvent({

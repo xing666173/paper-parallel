@@ -7,6 +7,7 @@ export type AiLogEvent =
         | 'page-coverage-excessive' | 'caption-overlap' | 'body-prose-density';
     }
   | { type: 'vision-review-page-started'; at: number; page: number; totalPages: number }
+  | { type: 'vision-review-page-timeout'; at: number; page: number; totalPages: number; timeoutMs: number }
   | { type: 'vision-review-page'; at: number; page: number; totalPages: number; issueCount: number }
   | { type: 'batch-started'; at: number; batchId: string; blockIds: string[]; modelId: string }
   | {
