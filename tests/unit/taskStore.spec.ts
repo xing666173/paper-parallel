@@ -104,6 +104,14 @@ describe('project task store', () => {
     expect(store.lastResponseAt).toBe(13);
   });
 
+  it('reports when all final-review pages have returned', () => {
+    const { store } = setupStore();
+    store.recordAiEvent({ type: 'vision-review-completed', at: 14, reviewedPages: 11, issueCount: 3 });
+
+    expect(store.aiLog.at(-1)?.message).toBe('Vision Exp 成品质检：11 页全部返回，共发现 3 个可见问题');
+    expect(store.lastResponseAt).toBe(14);
+  });
+
   it('coalesces streaming heartbeats while keeping the latest phase visible', () => {
     const { store } = setupStore();
     store.recordAiEvent({

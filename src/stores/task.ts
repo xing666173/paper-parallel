@@ -37,6 +37,8 @@ function projectAiMessage(event: AiLogEvent): string {
       return `Vision Exp 成品质检：第 ${event.page}/${event.totalPages} 页超过 ${Math.ceil(event.timeoutMs / 1_000)} 秒，已取消`;
     case 'vision-review-page':
       return `Vision Exp 成品质检：第 ${event.page}/${event.totalPages} 页已完成，发现 ${event.issueCount} 个可见问题`;
+    case 'vision-review-completed':
+      return `Vision Exp 成品质检：${event.reviewedPages} 页全部返回，共发现 ${event.issueCount} 个可见问题`;
     case 'batch-started':
       return `开始批次 ${event.batchId}，共 ${event.blockIds.length} 个文本块`;
     case 'batch-received':
@@ -108,6 +110,7 @@ export function createTaskStore(dependencies: TaskStoreDependencies, id = 'task'
         || event.type === 'vision-review-page-waiting'
         || event.type === 'vision-review-page-timeout'
         || event.type === 'vision-review-page'
+        || event.type === 'vision-review-completed'
       ) {
         lastResponseAt.value = event.at;
         if (event.type === 'batch-received' && event.completionTokens > 0 && event.elapsedMs > 0) {

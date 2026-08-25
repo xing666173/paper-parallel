@@ -36,6 +36,7 @@ import { serializeVisionPageAnalysis } from '../vision/protocol';
 import { inspectCompiledPdf, runPdfContentGate } from '../quality/pdfContentGate';
 import { persistValidatedOutputs } from '../quality/finalPersistence';
 import { runVisionFinalReview, type VisionFinalReport } from '../vision/finalReview';
+import { releasePdfDocument } from '../vision/cleanup';
 
 const SESSION_KEY_STORAGE = 'paper-parallel.deepseek-key-session';
 const LOCAL_KEY_STORAGE = 'paper-parallel.deepseek-key';
@@ -441,8 +442,12 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
             totalPages: event.totalPages, issueCount: event.issueCount,
           }),
         });
+        options.onAiEvent?.({
+          type: 'vision-review-completed', at: Date.now(), reviewedPages: visualReport.reviewedPages,
+          issueCount: visualReport.issues.length,
+        });
       } finally {
-        await targetPdf.destroy();
+        releasePdfDocument(targetPdf);
       }
       const severeVisualIssues = visualReport.issues.filter((issue) => (
         issue.severity === 'severe' && issue.confidence >= 0.8
