@@ -59,7 +59,7 @@ onMounted(async () => {
       assets,
     }, {
       compile: (project, signal) => compileTypstProject(project, {
-        runtimePaths: getTypstRuntimePaths(import.meta.env.BASE_URL), signal,
+        runtimePaths: getTypstRuntimePaths(import.meta.env.BASE_URL, document.baseURI), signal,
       }),
       saveArtifact: (record) => createProjectRepository().putArtifact(record),
       onProgress: (event) => { stage.value = event.phase; },

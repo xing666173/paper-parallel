@@ -18,6 +18,17 @@ describe('Typst runtime paths', () => {
     });
   });
 
+  it('anchors a relative Vite base to the deployed document before sending paths to a worker', () => {
+    expect(getTypstRuntimePaths(
+      './',
+      'https://xing666173.github.io/paper-parallel/index.html',
+    )).toEqual({
+      compilerWasm: 'https://xing666173.github.io/paper-parallel/vendor/typst/typst_ts_web_compiler_bg.wasm',
+      rendererWasm: 'https://xing666173.github.io/paper-parallel/vendor/typst/typst_ts_renderer_bg.wasm',
+      fontFiles: ['https://xing666173.github.io/paper-parallel/vendor/typst/noto-serif-sc-400.woff'],
+    });
+  });
+
   it('does not create a protocol-relative URL at the site root', () => {
     expect(getTypstRuntimePaths('/').compilerWasm).toBe('/vendor/typst/typst_ts_web_compiler_bg.wasm');
   });

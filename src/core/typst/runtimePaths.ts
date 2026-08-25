@@ -4,12 +4,15 @@ export interface TypstRuntimePaths {
   fontFiles: string[];
 }
 
-export function getTypstRuntimePaths(baseUrl: string): TypstRuntimePaths {
+export function getTypstRuntimePaths(baseUrl: string, documentBaseUrl?: string): TypstRuntimePaths {
   const trimmed = baseUrl.replace(/^\/+|\/+$/g, '');
   const base = baseUrl === './' ? './' : trimmed ? `/${trimmed}/` : '/';
+  const resolve = (path: string): string => documentBaseUrl
+    ? new URL(path, new URL(base, documentBaseUrl)).href
+    : `${base}${path}`;
   return {
-    compilerWasm: `${base}vendor/typst/typst_ts_web_compiler_bg.wasm`,
-    rendererWasm: `${base}vendor/typst/typst_ts_renderer_bg.wasm`,
-    fontFiles: [`${base}vendor/typst/noto-serif-sc-400.woff`],
+    compilerWasm: resolve('vendor/typst/typst_ts_web_compiler_bg.wasm'),
+    rendererWasm: resolve('vendor/typst/typst_ts_renderer_bg.wasm'),
+    fontFiles: [resolve('vendor/typst/noto-serif-sc-400.woff')],
   };
 }

@@ -318,7 +318,7 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
       const current = value(input);
       const project = requireValue(current.typstProject, 'Typst 项目缺失');
       const compiled = await compileTypstProject(project, {
-        runtimePaths: getTypstRuntimePaths(import.meta.env.BASE_URL), signal,
+        runtimePaths: getTypstRuntimePaths(import.meta.env.BASE_URL, document.baseURI), signal,
         onProgress: (phase) => options.onCompileProgress?.(phase),
       });
       const records = [
