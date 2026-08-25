@@ -20,7 +20,8 @@ export function buildSourceSentenceCandidates(
   text: string,
 ): SourceSentenceCandidateResult {
   const source = text.trim();
-  const parts = splitSentences(source);
+  const sentenceInput = source.replace(/\s*\n+\s*/g, ' ');
+  const parts = splitSentences(sentenceInput);
   const sourceNormalized = normalizeCoverageText(source);
   const reconstructed = normalizeCoverageText(parts.join(''));
   const coverage = sourceNormalized.length === 0

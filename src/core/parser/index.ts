@@ -13,7 +13,7 @@ export interface ParsePageResult {
 }
 
 export function parsePageItems(items: SimpleTextItem[], pageW: number, pageH: number): ParsePageResult {
-  const lines = classifyLines(itemsToLines(items), pageW);
+  const lines = classifyLines(itemsToLines(items, pageW), pageW);
   const blocks = groupLinesToBlocks(lines, pageW, pageH);
   return { lines, blocks, layoutMode: detectLayoutMode(lines) };
 }

@@ -9,6 +9,7 @@ describe('translation cache identity', () => {
     thinkingMode: 'disabled' as const,
     glossaryHash: 'sha256:terms',
     blockId: 'sec-1-p-1',
+    sourceText: 'Original source paragraph.',
   };
 
   it('is stable for equal inputs', () => {
@@ -22,6 +23,7 @@ describe('translation cache identity', () => {
     ['thinking mode', { ...base, thinkingMode: 'enabled' as const }],
     ['glossary', { ...base, glossaryHash: 'sha256:other-terms' }],
     ['block', { ...base, blockId: 'sec-1-p-2' }],
+    ['source text', { ...base, sourceText: 'Changed source paragraph.' }],
   ])('changes when %s changes', (_label, changed) => {
     expect(buildTranslationCacheKey(base)).not.toBe(buildTranslationCacheKey(changed));
   });

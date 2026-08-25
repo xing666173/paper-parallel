@@ -72,6 +72,7 @@ describe('translate: DeepSeek client', () => {
     const fetchSpy = vi.fn(async () => new Response(JSON.stringify({
       data: [
         { id: 'deepseek-v4-flash', object: 'model', owned_by: 'deepseek' },
+        { id: 'deepseek-v4-flash-vision-exp', object: 'model', owned_by: 'deepseek' },
         { id: 'deepseek-v4-pro', object: 'model', owned_by: 'deepseek' },
         { id: 'deepseek-chat', object: 'model', owned_by: 'deepseek' },
       ],
@@ -85,6 +86,7 @@ describe('translate: DeepSeek client', () => {
 
     expect(models).toEqual([
       { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash' },
+      { id: 'deepseek-v4-flash-vision-exp', label: 'DeepSeek V4 Flash Vision（实验）' },
       { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
     ]);
     const calls = fetchSpy.mock.calls as unknown as Array<[RequestInfo | URL, RequestInit?]>;
@@ -103,6 +105,7 @@ describe('translate: DeepSeek client', () => {
       baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test', fetchFn, offlineFallback: true,
     })).resolves.toEqual([
       { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash' },
+      { id: 'deepseek-v4-flash-vision-exp', label: 'DeepSeek V4 Flash Vision（实验）' },
       { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
     ]);
   });

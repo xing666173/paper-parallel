@@ -3,14 +3,17 @@
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
-  content: string;
+  content: string | Array<
+    | { type: 'text'; text: string }
+    | { type: 'image_url'; image_url: { url: string } }
+  >;
 }
 
-export type DeepSeekModelId = 'deepseek-v4-flash' | 'deepseek-v4-pro';
+export type DeepSeekModelId = 'deepseek-v4-flash' | 'deepseek-v4-flash-vision-exp' | 'deepseek-v4-pro';
 
 export interface DeepSeekModel {
   id: DeepSeekModelId;
-  label: 'DeepSeek V4 Flash' | 'DeepSeek V4 Pro';
+  label: 'DeepSeek V4 Flash' | 'DeepSeek V4 Flash Vision（实验）' | 'DeepSeek V4 Pro';
 }
 
 export interface DeepSeekConnectionOptions {
@@ -71,6 +74,7 @@ export class DeepSeekTimeoutError extends Error {
 
 export const CURRENT_DEEPSEEK_MODELS: readonly DeepSeekModel[] = [
   { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash' },
+  { id: 'deepseek-v4-flash-vision-exp', label: 'DeepSeek V4 Flash Vision（实验）' },
   { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
 ];
 

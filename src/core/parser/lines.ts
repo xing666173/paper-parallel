@@ -24,12 +24,20 @@ export interface ParsedLine {
 
 const Y_TOLERANCE = 4;   // 同一行 y 容差(px)
 const X_GAP = 24;        // 同一基线内 x 间隙阈值:超过即视为另一栏的另一行
+const CENTER_GUTTER_MIN = 16;
+
+function crossesPageCenter(prev: SimpleTextItem, next: SimpleTextItem, pageW?: number): boolean {
+  if (!pageW) return false;
+  const center = pageW / 2;
+  const gap = next.x - (prev.x + prev.w);
+  return gap > CENTER_GUTTER_MIN && prev.x + prev.w < center && next.x > center;
+}
 
 /**
  * items -> lines。
  * 1) y 容差内聚组;2) 组内按 x 排序,间隙 > X_GAP 拆行(防止左右两栏同行合并)。
  */
-export function itemsToLines(items: SimpleTextItem[]): ParsedLine[] {
+export function itemsToLines(items: SimpleTextItem[], pageW?: number): ParsedLine[] {
   const groups: { y: number; items: SimpleTextItem[] }[] = [];
 
   for (const it of items) {
@@ -60,7 +68,7 @@ export function itemsToLines(items: SimpleTextItem[]): ParsedLine[] {
     for (const it of g.items) {
       if (seg.length) {
         const prev = seg[seg.length - 1];
-        if (it.x - (prev.x + prev.w) > X_GAP) {
+        if (it.x - (prev.x + prev.w) > X_GAP || crossesPageCenter(prev, it, pageW)) {
           flush();
           seg = [];
         }

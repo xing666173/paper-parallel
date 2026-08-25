@@ -8,6 +8,8 @@ import type {
 
 const PROTECTED_TOKEN_PATTERN = /⟦[^⟧]+⟧|\[(?:\d+(?:\s*[-,]\s*\d+)*)\]|[-+]?(?:\d+\.\d+|\d+)(?:%|‰)?/g;
 const CITATION_TOKEN_PATTERN = /^\[(?:\d+(?:\s*[-,]\s*\d+)*)\]$/;
+const FLATTENED_UNIT_EXPONENT_PATTERN = /(?:^|[\s(])(?:pm|nm|μm|µm|mm|cm|dm|m|dam|hm|km|in|ft|yd|mi)\s+([23])(?=$|[\s,.;:)])/gu;
+const SUPERSCRIPT_EXPONENT: Record<string, string> = { '2': '²', '3': '³' };
 
 export function extractProtectedTokens(text: string): string[] {
   return Array.from(text.matchAll(PROTECTED_TOKEN_PATTERN), (match) => match[0]);
@@ -42,6 +44,18 @@ function protectedOccurrenceCount(text: string, token: string): number {
     .filter((candidate) => CITATION_TOKEN_PATTERN.test(candidate))
     .filter((candidate) => candidate.replace(/\s+/g, '') === canonical)
     .length;
+}
+
+function sourceUsesFlattenedUnitExponent(source: string, token: string): boolean {
+  if (!(token in SUPERSCRIPT_EXPONENT)) return false;
+  return Array.from(source.matchAll(FLATTENED_UNIT_EXPONENT_PATTERN))
+    .some((match) => match[1] === token);
+}
+
+function translatedProtectedOccurrenceCount(source: string, translation: string, token: string): number {
+  const count = protectedOccurrenceCount(translation, token);
+  if (!sourceUsesFlattenedUnitExponent(source, token)) return count;
+  return count + occurrenceCount(translation, SUPERSCRIPT_EXPONENT[token]);
 }
 
 function normalizeTargetText(text: string): string {
@@ -110,7 +124,7 @@ export function validateBatchResponse(
             : value === token
         )).length,
       );
-      const received = protectedOccurrenceCount(translated.translation, token);
+      const received = translatedProtectedOccurrenceCount(source.source, translated.translation, token);
       if (received !== required) {
         addIssue(
           issues,

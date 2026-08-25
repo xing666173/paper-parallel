@@ -191,6 +191,7 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
         thinkingMode: settings.thinkingMode,
         glossaryHash: JSON.stringify(glossary),
         blockId: block.blockId,
+        sourceText: block.source,
       });
       const streamHeartbeat = new Map<string, { at: number; phase: 'connected' | 'reasoning' | 'content' }>();
       const result = await runTranslationTask({

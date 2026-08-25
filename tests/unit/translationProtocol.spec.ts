@@ -111,6 +111,22 @@ describe('generic academic translation protocol', () => {
     ]);
   });
 
+  it('treats PDF line wrapping as whitespace instead of sentence boundaries', () => {
+    expect(buildSourceSentenceCandidates(
+      'wrapped',
+      'Executing the Instruc-\ntion Set Architecture via software\ninterpretation is slow. The next sentence\ncontinues here.',
+    )).toEqual({
+      mode: 'sentence-candidates',
+      sentences: [
+        {
+          id: 'wrapped-s-1',
+          text: 'Executing the Instruc- tion Set Architecture via software interpretation is slow.',
+        },
+        { id: 'wrapped-s-2', text: 'The next sentence continues here.' },
+      ],
+    });
+  });
+
   it('accepts citation lists whose only difference is internal whitespace', () => {
     const source: TranslationBlockRequest = {
       blockId: 'p1', kind: 'paragraph', source: 'Prior work [1, 3, 8] established this result.',
@@ -129,6 +145,53 @@ describe('generic academic translation protocol', () => {
       accepted: response.blocks,
       issues: [],
     });
+  });
+
+  it('accepts a superscript unit exponent when PDF text extraction flattened it', () => {
+    const source: TranslationBlockRequest = {
+      blockId: 'area', kind: 'paragraph',
+      source: 'The area is 0.21 mm 2 , and the power consumption is 51.167 mW.',
+      alignmentMode: 'sentence-candidates',
+      sourceSentences: [{
+        id: 'area-s-1',
+        text: 'The area is 0.21 mm 2 , and the power consumption is 51.167 mW.',
+      }],
+      protectedTokens: ['0.21', '2', '51.167'],
+    };
+    const response: TranslationResponse = { blocks: [{
+      blockId: 'area',
+      translation: '面积为 0.21 mm²，功耗为 51.167 mW。',
+      alignmentGroups: [{
+        sourceSentenceIds: ['area-s-1'],
+        targetSegments: ['面积为 0.21 mm²，功耗为 51.167 mW。'],
+      }],
+      newTerms: [], warnings: [],
+    }] };
+
+    expect(validateBatchResponse([source], response)).toEqual({
+      ok: true,
+      accepted: response.blocks,
+      issues: [],
+    });
+  });
+
+  it('still rejects a missing unit exponent after PDF text extraction flattened it', () => {
+    const source: TranslationBlockRequest = {
+      blockId: 'area', kind: 'paragraph', source: 'The area is 0.21 mm 2 .',
+      alignmentMode: 'sentence-candidates',
+      sourceSentences: [{ id: 'area-s-1', text: 'The area is 0.21 mm 2 .' }],
+      protectedTokens: ['0.21', '2'],
+    };
+    const response: TranslationResponse = { blocks: [{
+      blockId: 'area', translation: '面积为 0.21 mm。',
+      alignmentGroups: [{ sourceSentenceIds: ['area-s-1'], targetSegments: ['面积为 0.21 mm。'] }],
+      newTerms: [], warnings: [],
+    }] };
+
+    const result = validateBatchResponse([source], response);
+
+    expect(result.ok).toBe(false);
+    expect(result.issues.map((issue) => issue.code)).toContain('protected-token-changed');
   });
 
   it('accepts continuous merge and split groups without forcing equal sentence counts', () => {

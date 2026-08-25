@@ -49,6 +49,27 @@ describe('parser: items -> lines', () => {
     expect(y180[0].x1).toBeLessThan(200);
     expect(y180[1].x1).toBeGreaterThan(300);
   });
+
+  it('splits same-baseline columns when the real gutter is narrower than 24 points', () => {
+    const lines = itemsToLines([
+      { str: 'the permutation and accumulator columns', x: 53.798, y: 235.193, w: 240.245, h: 8.966 },
+      { str: '3 Design and Philosophy', x: 317.955, y: 235.193, w: 111.4, h: 8.966 },
+    ], 612);
+
+    expect(lines.map((line) => line.text)).toEqual([
+      'the permutation and accumulator columns',
+      '3 Design and Philosophy',
+    ]);
+  });
+
+  it('does not split ordinary same-line fragments near the page center', () => {
+    const lines = itemsToLines([
+      { str: 'a full-width sentence ending', x: 120, y: 90, w: 180, h: 10 },
+      { str: 'near the center', x: 309, y: 90, w: 90, h: 10 },
+    ], 612);
+
+    expect(lines).toHaveLength(1);
+  });
 });
 
 describe('parser: columns', () => {

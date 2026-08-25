@@ -5,6 +5,7 @@ export interface TranslationCacheIdentity {
   thinkingMode: 'enabled' | 'disabled';
   glossaryHash: string;
   blockId: string;
+  sourceText: string;
 }
 
 export function buildTranslationCacheKey(value: TranslationCacheIdentity): string {
@@ -15,6 +16,7 @@ export function buildTranslationCacheKey(value: TranslationCacheIdentity): strin
     value.thinkingMode,
     value.glossaryHash,
     value.blockId,
+    value.sourceText,
   ]
     .map(encodeURIComponent)
     .join(':');
