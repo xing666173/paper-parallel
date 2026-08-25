@@ -22,14 +22,18 @@ export function buildVisionFinalReviewPrompt(
   sourcePageNumbers: readonly number[],
   compact = false,
 ): string {
+  const sourceReference = sourcePageNumbers.length
+    ? `The source reference images are pages ${sourcePageNumbers.join(', ')}. The final image is translated target page ${targetPageNumber}.`
+    : `Only translated target page ${targetPageNumber} is attached. Immutable source assets were already verified byte-for-byte by deterministic gates.`;
   const prompt = [
     'You are the final visual quality inspector for a translated academic-paper PDF.',
-    `The source reference images are pages ${sourcePageNumbers.join(', ')}. The final image is translated target page ${targetPageNumber}.`,
+    sourceReference,
     'Natural repagination and different Chinese line breaks are allowed. Single-column, double-column, and mixed regions should preserve the source layout mode.',
-    'Figures, table bodies, display formulas, code, variables, symbols, and internal figure labels must remain visually unchanged. Captions may be translated.',
+    'Figures, table bodies, display formulas, code, variables, symbols, and internal figure labels must be visibly intact. Captions may be translated.',
     'Report only visible production defects: missing/clipped/overlapping text, unreadable glyphs, untranslated body prose, collapsed columns, or changed/missing immutable assets.',
     'Return at most 12 issues. Merge repeated instances of the same visible defect and keep evidence under 20 words. Never transcribe page text.',
     'Do not judge translation style or wording. Do not report harmless spacing or natural page extension as severe.',
+    ...(sourcePageNumbers.length ? [] : ['Do not infer source-to-target changes without a source image; report only defects visibly present on the target page.']),
     'Every box must be an object {"x":number,"y":number,"width":number,"height":number} in normalized 0..1000 target-page coordinates. Never return pixel coordinates or x1/y1/x2/y2.',
     'Return exactly one JSON object:',
     '{"target_page":1,"issues":[{"type":"missing_text|clipped_text|overlap|unreadable_glyphs|untranslated_body|layout_collapse|layout_drift|asset_changed|asset_missing|formula_changed|table_changed","severity":"severe|warning","bbox":{"x":0,"y":0,"width":1,"height":1},"confidence":0.0,"evidence":"short visible evidence"}]}',

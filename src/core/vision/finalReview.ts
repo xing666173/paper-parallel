@@ -174,8 +174,6 @@ export async function runVisionFinalReview(options: RunVisionFinalReviewOptions)
   if (!options.apiKey.trim()) throw new Error('Vision Exp 成品质检需要 DeepSeek API Key');
   const complete = options.complete ?? chatCompletion;
   const renderPage = options.renderPage ?? ((page) => renderPdfPageAsPng(page, { scale: 1.5 }));
-  const mapping = buildTargetSourcePageMap(options.manifest, options.targetPdf.numPages, options.sourcePdf.numPages);
-  const sourceImages = new Map<number, Promise<string>>();
   const pageIssues: VisionFinalIssue[][] = Array.from({ length: options.targetPdf.numPages }, () => []);
   const runController = new AbortController();
   const onOuterAbort = () => runController.abort();
@@ -183,27 +181,13 @@ export async function runVisionFinalReview(options: RunVisionFinalReviewOptions)
   else options.signal?.addEventListener('abort', onOuterAbort, { once: true });
   const runSignal = runController.signal;
 
-  const getSourceImage = (sourcePageIndex: number): Promise<string> => {
-    const cached = sourceImages.get(sourcePageIndex);
-    if (cached) return cached;
-    const rendered = options.sourcePdf.getPage(sourcePageIndex + 1)
-      .then((page) => renderPage(page, 'source', sourcePageIndex));
-    sourceImages.set(sourcePageIndex, rendered);
-    return rendered;
-  };
-
   const performPageReview = async (targetPageIndex: number, pageSignal: AbortSignal): Promise<void> => {
     if (pageSignal.aborted) throw new DOMException('已停止', 'AbortError');
     options.onPageStart?.({ targetPageIndex, totalPages: options.targetPdf.numPages });
-    const sourcePageIndices = mapping[targetPageIndex]!;
+    const sourcePageIndices: number[] = [];
     const content: NonNullable<ChatCompletionOptions['messages'][number]['content']> extends infer _T ? any[] : never = [
       { type: 'text', text: buildVisionFinalReviewPrompt(targetPageIndex + 1, sourcePageIndices.map((page) => page + 1)) },
     ];
-    for (const sourcePageIndex of sourcePageIndices) {
-      const image = await getSourceImage(sourcePageIndex);
-      content.push({ type: 'text', text: `SOURCE PAGE ${sourcePageIndex + 1}` });
-      content.push({ type: 'image_url', image_url: { url: image, detail: 'original' } });
-    }
     const targetImage = await renderPage(await options.targetPdf.getPage(targetPageIndex + 1), 'target', targetPageIndex);
     content.push({ type: 'text', text: `TARGET PAGE ${targetPageIndex + 1}` });
     content.push({ type: 'image_url', image_url: { url: targetImage, detail: 'original' } });

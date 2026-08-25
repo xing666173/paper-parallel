@@ -73,9 +73,9 @@ describe('vision: final PDF review', () => {
     });
     const images = requests[0].messages[0].content.filter((part: any) => part.type === 'image_url');
     expect(images).toEqual([
-      { type: 'image_url', image_url: { url: 'data:image/png;base64,source-0', detail: 'original' } },
       { type: 'image_url', image_url: { url: 'data:image/png;base64,target-0', detail: 'original' } },
     ]);
+    expect(renderPage).not.toHaveBeenCalledWith(expect.anything(), 'source', expect.anything());
   });
 
   it('retries an overlong visual report with a compact severe-only request', async () => {
