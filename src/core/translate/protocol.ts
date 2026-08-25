@@ -58,6 +58,11 @@ export interface TranslationRequest {
     productNames: 'keep';
   };
   glossary: Array<{ source: string; target: string; abbreviation?: string }>;
+  recoveryContext?: {
+    reason: 'output-limit' | 'validation';
+    validationCodes: string[];
+    validationDetails: string[];
+  };
   blocks: TranslationBlockRequest[];
 }
 

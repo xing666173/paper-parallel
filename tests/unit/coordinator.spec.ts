@@ -135,6 +135,31 @@ describe('cancellable translation coordinator', () => {
     expect(started).toEqual(['batch-1']);
   });
 
+  it('supports external cancellation when AbortSignal.any is unavailable', async () => {
+    const nativeAny = AbortSignal.any;
+    Object.defineProperty(AbortSignal, 'any', { configurable: true, value: undefined });
+    const controller = new AbortController();
+
+    try {
+      const task = runTranslationTask({
+        projectId: 'p1', modelId: 'deepseek-v4-flash',
+        batches: [batch('batch-1', [block('b1')])],
+        concurrency: 1, maxRetries: 0, signal: controller.signal,
+        request: async (_pending, signal) => new Promise((_resolve, reject) => {
+          signal?.addEventListener('abort', () => reject(new DOMException('Stopped', 'AbortError')), { once: true });
+          controller.abort();
+        }),
+        findCached: async () => undefined,
+        saveValidated: async () => undefined,
+        onEvent: () => undefined,
+      });
+
+      await expect(task).rejects.toMatchObject({ name: 'AbortError' });
+    } finally {
+      Object.defineProperty(AbortSignal, 'any', { configurable: true, value: nativeAny });
+    }
+  });
+
   it('never exceeds the configured worker concurrency', async () => {
     let active = 0;
     let maximumActive = 0;
@@ -321,6 +346,72 @@ describe('cancellable translation coordinator', () => {
     expect(result.completedBlockIds).toEqual(['b1']);
   });
 
+  it('uses every configured repair attempt before failing a validation', async () => {
+    let attempts = 0;
+    const repairDetails: Array<string[] | undefined> = [];
+
+    const result = await runTranslationTask({
+      projectId: 'p1', modelId: 'deepseek-v4-pro',
+      batches: [batch('batch-1', [block('b1')])],
+      concurrency: 1, maxRetries: 2,
+      request: async (pending) => {
+        attempts += 1;
+        if (pending.recovery) repairDetails.push(pending.recovery.validationDetails);
+        const translation = attempts < 3 ? '准确率为 69%。' : '准确率为 96%。';
+        return {
+          blocks: [translated('b1', translation)],
+          usage: { promptTokens: 10, completionTokens: 5 },
+        };
+      },
+      findCached: async () => undefined,
+      saveValidated: async () => undefined,
+      onEvent: () => undefined,
+    });
+
+    expect(attempts).toBe(3);
+    expect(repairDetails).toEqual([
+      ['Protected token count changed for 96%.'],
+      ['Protected token count changed for 96%.'],
+    ]);
+    expect(result.completedBlockIds).toEqual(['b1']);
+  });
+
+  it('finishes sibling and queued batches before reporting unresolved validation blocks', async () => {
+    const requested: string[][] = [];
+    const saved: string[] = [];
+
+    const task = runTranslationTask({
+      projectId: 'p1', modelId: 'deepseek-v4-pro',
+      batches: [
+        batch('batch-1', [block('b1'), block('b2')]),
+        batch('batch-2', [block('b3')]),
+      ],
+      concurrency: 1, maxRetries: 0,
+      request: async (pending) => {
+        requested.push(pending.blocks.map((item) => item.blockId));
+        return {
+          blocks: pending.blocks.map((item) => translated(
+            item.blockId,
+            item.blockId === 'b1' || pending.blocks.length > 1 ? '准确率为 69%。' : '准确率为 96%。',
+          )),
+          usage: { promptTokens: 10, completionTokens: 5 },
+        };
+      },
+      findCached: async () => undefined,
+      saveValidated: async (record) => { saved.push(record.blockId); },
+      onEvent: () => undefined,
+    });
+
+    await expect(task).rejects.toThrow(/b1/);
+    expect(requested).toEqual([
+      ['b1', 'b2'],
+      ['b1'],
+      ['b2'],
+      ['b3'],
+    ]);
+    expect(saved).toEqual(['b2', 'b3']);
+  });
+
   it('reports the unresolved block IDs when a final batch failure occurs', async () => {
     const errors: string[][] = [];
     await expect(runTranslationTask({
@@ -336,6 +427,40 @@ describe('cancellable translation coordinator', () => {
     })).rejects.toThrow('network down');
 
     expect(errors).toEqual([['b1']]);
+  });
+
+  it('aborts an active sibling request after a fatal network failure', async () => {
+    let releaseFailure!: () => void;
+    const siblingStarted = new Promise<void>((resolve) => { releaseFailure = resolve; });
+    let siblingAborted = false;
+
+    const task = runTranslationTask({
+      projectId: 'p1', modelId: 'deepseek-v4-pro',
+      batches: [
+        batch('batch-1', [block('b1')]),
+        batch('batch-2', [block('b2')]),
+      ],
+      concurrency: 2, maxRetries: 0,
+      request: async (pending, signal) => {
+        if (pending.id === 'batch-1') {
+          await siblingStarted;
+          throw new Error('network down');
+        }
+        releaseFailure();
+        return new Promise((_resolve, reject) => {
+          signal?.addEventListener('abort', () => {
+            siblingAborted = true;
+            reject(new DOMException('Stopped', 'AbortError'));
+          }, { once: true });
+        });
+      },
+      findCached: async () => undefined,
+      saveValidated: async () => undefined,
+      onEvent: () => undefined,
+    });
+
+    await expect(task).rejects.toThrow('network down');
+    expect(siblingAborted).toBe(true);
   });
 
   it('counts progress only after cache persistence and retries only the unsaved record', async () => {

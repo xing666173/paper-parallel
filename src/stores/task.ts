@@ -46,7 +46,7 @@ function projectAiMessage(event: AiLogEvent): string {
     case 'retry':
       return `批次 ${event.batchId} 正在进行第 ${event.attempt} 次重试：${safeErrorMessage(event.reason, 180)}`;
     case 'error':
-      return `批次 ${event.batchId} 失败`;
+      return `批次 ${event.batchId}（${event.blockIds.join('、')}）失败`;
   }
 }
 

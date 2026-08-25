@@ -111,6 +111,26 @@ describe('generic academic translation protocol', () => {
     ]);
   });
 
+  it('accepts citation lists whose only difference is internal whitespace', () => {
+    const source: TranslationBlockRequest = {
+      blockId: 'p1', kind: 'paragraph', source: 'Prior work [1, 3, 8] established this result.',
+      alignmentMode: 'sentence-candidates',
+      sourceSentences: [{ id: 'p1-s-1', text: 'Prior work [1, 3, 8] established this result.' }],
+      protectedTokens: ['[1, 3, 8]'],
+    };
+    const response: TranslationResponse = { blocks: [{
+      blockId: 'p1', translation: '已有工作 [1,3,8] 证实了这一结果。',
+      alignmentGroups: [{ sourceSentenceIds: ['p1-s-1'], targetSegments: ['已有工作 [1,3,8] 证实了这一结果。'] }],
+      newTerms: [], warnings: [],
+    }] };
+
+    expect(validateBatchResponse([source], response)).toEqual({
+      ok: true,
+      accepted: response.blocks,
+      issues: [],
+    });
+  });
+
   it('accepts continuous merge and split groups without forcing equal sentence counts', () => {
     const response: TranslationResponse = { blocks: [{
       blockId: 'p1',

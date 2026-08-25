@@ -7,6 +7,7 @@ import type {
 } from './protocol';
 
 const PROTECTED_TOKEN_PATTERN = /⟦[^⟧]+⟧|\[(?:\d+(?:\s*[-,]\s*\d+)*)\]|[-+]?(?:\d+\.\d+|\d+)(?:%|‰)?/g;
+const CITATION_TOKEN_PATTERN = /^\[(?:\d+(?:\s*[-,]\s*\d+)*)\]$/;
 
 export function extractProtectedTokens(text: string): string[] {
   return Array.from(text.matchAll(PROTECTED_TOKEN_PATTERN), (match) => match[0]);
@@ -32,6 +33,15 @@ function occurrenceCount(text: string, token: string): number {
     offset = found + token.length;
   }
   return count;
+}
+
+function protectedOccurrenceCount(text: string, token: string): number {
+  if (!CITATION_TOKEN_PATTERN.test(token)) return occurrenceCount(text, token);
+  const canonical = token.replace(/\s+/g, '');
+  return extractProtectedTokens(text)
+    .filter((candidate) => CITATION_TOKEN_PATTERN.test(candidate))
+    .filter((candidate) => candidate.replace(/\s+/g, '') === canonical)
+    .length;
 }
 
 function normalizeTargetText(text: string): string {
@@ -93,10 +103,14 @@ export function validateBatchResponse(
     ]);
     for (const token of protectedTokens) {
       const required = Math.max(
-        occurrenceCount(source.source, token),
-        source.protectedTokens.filter((value) => value === token).length,
+        protectedOccurrenceCount(source.source, token),
+        source.protectedTokens.filter((value) => (
+          CITATION_TOKEN_PATTERN.test(token)
+            ? value.replace(/\s+/g, '') === token.replace(/\s+/g, '')
+            : value === token
+        )).length,
       );
-      const received = occurrenceCount(translated.translation, token);
+      const received = protectedOccurrenceCount(translated.translation, token);
       if (received !== required) {
         addIssue(
           issues,

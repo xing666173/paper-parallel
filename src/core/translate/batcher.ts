@@ -9,6 +9,7 @@ export interface TranslationBatch {
     disableThinking: true;
     reason: 'output-limit' | 'validation';
     validationCodes?: string[];
+    validationDetails?: string[];
   };
 }
 

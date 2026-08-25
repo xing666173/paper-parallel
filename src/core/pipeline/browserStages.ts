@@ -214,6 +214,13 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
             },
             entityPolicy: { authorNames: 'keep', organizationNames: 'translate_when_clear', modelNames: 'keep', productNames: 'keep' },
             glossary,
+            ...(batch.recovery ? {
+              recoveryContext: {
+                reason: batch.recovery.reason,
+                validationCodes: batch.recovery.validationCodes ?? [],
+                validationDetails: batch.recovery.validationDetails ?? [],
+              },
+            } : {}),
             blocks: batch.blocks,
           };
           const recoveryInstruction = batch.recovery

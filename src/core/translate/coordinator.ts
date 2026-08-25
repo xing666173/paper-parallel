@@ -4,6 +4,7 @@ import type {
   TranslationBlockRequest,
   TranslationBlockResponse,
   TranslationResponse,
+  TranslationValidationIssue,
 } from './protocol';
 import { validateBatchResponse } from './protected';
 import { safeErrorMessage } from '../security/errors';
@@ -34,17 +35,53 @@ export interface TranslationTaskResult {
 }
 
 class TranslationValidationError extends Error {
+  readonly issues: TranslationValidationIssue[];
   readonly codes: string[];
+  readonly blockIds: string[];
+  readonly details: string[];
 
-  constructor(codes: string[]) {
-    super(`Translation validation failed: ${codes.join(', ')}`);
+  constructor(issues: TranslationValidationIssue[]) {
+    const codes = issues.map((issue) => issue.code);
+    const blockIds = [...new Set(issues.map((issue) => issue.blockId).filter((id) => id !== '*'))];
+    super(`Translation validation failed for ${blockIds.join(', ') || 'unknown blocks'}: ${codes.join(', ')}`);
     this.name = 'TranslationValidationError';
+    this.issues = issues;
     this.codes = codes;
+    this.blockIds = blockIds;
+    this.details = [...new Set(issues.map((issue) => issue.message))];
   }
 }
 
 function abortError(): DOMException {
   return new DOMException('Stopped', 'AbortError');
+}
+
+function combineAbortSignals(signals: readonly AbortSignal[]): {
+  signal: AbortSignal;
+  cleanup(): void;
+} {
+  const nativeAny = (AbortSignal as typeof AbortSignal & {
+    any?: (sources: AbortSignal[]) => AbortSignal;
+  }).any;
+  if (typeof nativeAny === 'function') {
+    return { signal: nativeAny.call(AbortSignal, [...signals]), cleanup: () => undefined };
+  }
+
+  const controller = new AbortController();
+  const listening: AbortSignal[] = [];
+  const forwardAbort = (): void => { controller.abort(); };
+  for (const signal of signals) {
+    if (signal.aborted) {
+      controller.abort();
+      break;
+    }
+    signal.addEventListener('abort', forwardAbort, { once: true });
+    listening.push(signal);
+  }
+  return {
+    signal: controller.signal,
+    cleanup: () => listening.forEach((signal) => signal.removeEventListener('abort', forwardAbort)),
+  };
 }
 
 function isAbortError(error: unknown, signal?: AbortSignal): boolean {
@@ -90,17 +127,25 @@ export async function runTranslationTask(
   if (options.signal?.aborted) throw abortError();
 
   const now = options.now ?? Date.now;
+  const fatalController = new AbortController();
+  const combinedSignal = combineAbortSignals(
+    options.signal ? [options.signal, fatalController.signal] : [fatalController.signal],
+  );
+  const taskSignal = combinedSignal.signal;
+  try {
   const completed = new Map<string, TranslationBlockResponse>();
   const cached = new Set<string>();
   const usage = { promptTokens: 0, completionTokens: 0 };
   let nextBatchIndex = 0;
   let fatalError: unknown;
+  const deferredValidationErrors: TranslationValidationError[] = [];
 
   const processBatch = async (batch: TranslationBatch): Promise<void> => {
     const missing: TranslationBlockRequest[] = [];
     for (const block of batch.blocks) {
-      if (options.signal?.aborted) throw abortError();
+      if (taskSignal.aborted) throw abortError();
       const cachedRecord = await options.findCached(block);
+      if (taskSignal.aborted) throw abortError();
       if (cachedRecord) {
         completed.set(block.blockId, cachedRecord);
         cached.add(block.blockId);
@@ -114,9 +159,10 @@ export async function runTranslationTask(
     let pendingBlocks = missing;
     let standardRetries = 0;
     let retryCount = 0;
+    let repairAttempts = 0;
     let recovery: TranslationBatch['recovery'];
     while (true) {
-      if (options.signal?.aborted) throw abortError();
+      if (taskSignal.aborted) throw abortError();
       const pendingBatch: TranslationBatch = { ...batch, blocks: pendingBlocks, recovery };
       const startedAt = now();
       options.onEvent({
@@ -128,7 +174,7 @@ export async function runTranslationTask(
       });
 
       try {
-        const response = await options.request(pendingBatch, options.signal);
+        const response = await options.request(pendingBatch, taskSignal);
         usage.promptTokens += response.usage.promptTokens;
         usage.completionTokens += response.usage.completionTokens;
         options.onEvent({
@@ -168,9 +214,9 @@ export async function runTranslationTask(
           publishPersisted();
         }
         if (pendingBlocks.length === 0) return;
-        throw new TranslationValidationError(validation.issues.map((issue) => issue.code));
+        throw new TranslationValidationError(validation.issues);
       } catch (error) {
-        if (isAbortError(error, options.signal)) throw abortError();
+        if (isAbortError(error, taskSignal)) throw abortError();
         const reason = safeErrorMessage(error);
         if (isAdaptiveSplitError(error) && pendingBlocks.length > 1) {
           const children = splitBatch({ ...batch, blocks: pendingBlocks, recovery: undefined });
@@ -178,19 +224,33 @@ export async function runTranslationTask(
             type: 'batch-split', at: now(), batchId: batch.id,
             childBatchIds: [children[0].id, children[1].id], reason,
           });
-          await processBatch(children[0]);
-          await processBatch(children[1]);
+          const childValidationErrors: TranslationValidationError[] = [];
+          for (const child of children) {
+            try {
+              await processBatch(child);
+            } catch (childError) {
+              if (!(childError instanceof TranslationValidationError)) throw childError;
+              childValidationErrors.push(childError);
+            }
+          }
+          if (childValidationErrors.length) {
+            throw new TranslationValidationError(childValidationErrors.flatMap((item) => item.issues));
+          }
           return;
         }
         if (
           pendingBlocks.length === 1
-          && recovery === undefined
+          && repairAttempts < options.maxRetries
           && (isOutputLimitError(error) || error instanceof TranslationValidationError)
         ) {
+          repairAttempts += 1;
           recovery = {
             disableThinking: true,
             reason: isOutputLimitError(error) ? 'output-limit' : 'validation',
-            ...(error instanceof TranslationValidationError ? { validationCodes: error.codes } : {}),
+            ...(error instanceof TranslationValidationError ? {
+              validationCodes: error.codes,
+              validationDetails: error.details,
+            } : {}),
           };
           retryCount += 1;
           options.onEvent({
@@ -234,14 +294,21 @@ export async function runTranslationTask(
 
   const worker = async (): Promise<void> => {
     while (fatalError === undefined) {
-      if (options.signal?.aborted) throw abortError();
+      if (taskSignal.aborted) throw abortError();
       const index = nextBatchIndex;
       nextBatchIndex += 1;
       if (index >= options.batches.length) return;
       try {
         await processBatch(options.batches[index]!);
       } catch (error) {
-        fatalError = error;
+        if (error instanceof TranslationValidationError) {
+          deferredValidationErrors.push(error);
+          continue;
+        }
+        if (fatalError === undefined) {
+          fatalError = error;
+          fatalController.abort();
+        }
         throw error;
       }
     }
@@ -249,8 +316,12 @@ export async function runTranslationTask(
 
   const workerCount = Math.min(options.concurrency, options.batches.length);
   const settled = await Promise.allSettled(Array.from({ length: workerCount }, () => worker()));
+  if (fatalError !== undefined) throw fatalError;
   const rejected = settled.find((result): result is PromiseRejectedResult => result.status === 'rejected');
   if (rejected) throw rejected.reason;
+  if (deferredValidationErrors.length) {
+    throw new TranslationValidationError(deferredValidationErrors.flatMap((item) => item.issues));
+  }
 
   const sourceOrder = options.batches.flatMap((batch) => batch.blocks.map((block) => block.blockId));
   const completedBlockIds = sourceOrder.filter((blockId) => completed.has(blockId));
@@ -260,4 +331,7 @@ export async function runTranslationTask(
     translations: completedBlockIds.map((blockId) => completed.get(blockId)!),
     usage,
   };
+  } finally {
+    combinedSignal.cleanup();
+  }
 }

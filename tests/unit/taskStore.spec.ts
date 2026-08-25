@@ -31,12 +31,14 @@ describe('project task store', () => {
     store.recordAiEvent({
       type: 'error', at: 2, batchId: 'b1', blockIds: ['x'], message: 'server echoed sk-super-secret',
     });
+    const projectedError = store.aiLog.at(-1)?.message;
     for (let index = 0; index < 205; index += 1) {
       store.recordAiEvent({ type: 'cache-hit', at: index + 3, blockId: `block-${index}` });
     }
 
     expect(store.aiLog).toHaveLength(200);
     expect(store.aiLog.at(-1)?.message).toContain('block-204');
+    expect(projectedError).toBe('批次 b1（x）失败');
     expect(JSON.stringify(store.aiLog)).not.toContain('sk-super-secret');
     expect(JSON.stringify(store.aiLog)).not.toContain('server echoed');
   });
