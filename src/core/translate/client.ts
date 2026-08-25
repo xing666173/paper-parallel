@@ -48,6 +48,13 @@ export class DeepSeekOutputLimitError extends Error {
   }
 }
 
+export class DeepSeekInsufficientBalanceError extends Error {
+  constructor(message = 'DeepSeek 账户余额不足（HTTP 402）') {
+    super(message);
+    this.name = 'DeepSeekInsufficientBalanceError';
+  }
+}
+
 export const CURRENT_DEEPSEEK_MODELS: readonly DeepSeekModel[] = [
   { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash' },
   { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
@@ -79,8 +86,8 @@ export async function listModels(opts: DeepSeekConnectionOptions): Promise<DeepS
       signal: opts.signal,
     });
     if (!response.ok) {
-      const body = await response.text().catch(() => '');
-      throw new Error(`DeepSeek HTTP ${response.status}: ${body.slice(0, 300)}`);
+      if (response.status === 402) throw new DeepSeekInsufficientBalanceError();
+      throw new Error(`DeepSeek HTTP ${response.status}`);
     }
 
     const data = (await response.json()) as { data?: Array<{ id?: string }> };
@@ -138,8 +145,8 @@ export async function chatCompletion(opts: ChatCompletionOptions): Promise<ChatC
   }
 
   if (!response.ok) {
-    const responseBody = await response.text().catch(() => '');
-    throw new Error(`DeepSeek HTTP ${response.status}: ${responseBody.slice(0, 300)}`);
+    if (response.status === 402) throw new DeepSeekInsufficientBalanceError();
+    throw new Error(`DeepSeek HTTP ${response.status}`);
   }
 
   const data = (await response.json()) as {
@@ -157,7 +164,7 @@ export async function chatCompletion(opts: ChatCompletionOptions): Promise<ChatC
   const reasoningState = choice?.message?.reasoning_content ? 'present' : 'absent';
   const outputDiagnostic = `finish_reason=${finishReason}, completion_tokens=${completionTokens}, prompt_tokens=${promptTokens}, reasoning_content=${reasoningState}`;
   if (finishReason === 'length') {
-    throw new DeepSeekOutputLimitError(`DeepSeek 输出额度耗尽（${outputDiagnostic}）`);
+    throw new DeepSeekOutputLimitError(`DeepSeek 本次响应达到最大生成长度（这不是账户余额不足；${outputDiagnostic}）`);
   }
   if (!content?.trim()) {
     const message = `DeepSeek 未返回最终内容（${outputDiagnostic}）`;

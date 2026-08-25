@@ -6,6 +6,7 @@ import type { CompletionSummary } from '../core/task/completion';
 import { reduceTaskEvent } from '../core/task/stateMachine';
 import type { AiLogEvent } from '../core/translate/events';
 import type { TaskSnapshot } from '../types/models';
+import { safeErrorMessage } from '../core/security/errors';
 
 export interface TaskStoreDependencies {
   repository: ProjectRepository;
@@ -20,9 +21,6 @@ export interface AiLogEntry {
 export type TaskRunner = (signal: AbortSignal) => Promise<void>;
 
 function projectAiMessage(event: AiLogEvent): string {
-  const safeReason = (reason: string) => reason
-    .replace(/sk-[A-Za-z0-9_-]+/g, '[redacted]')
-    .slice(0, 180);
   switch (event.type) {
     case 'batch-started':
       return `开始批次 ${event.batchId}，共 ${event.blockIds.length} 个文本块`;
@@ -35,9 +33,9 @@ function projectAiMessage(event: AiLogEvent): string {
     case 'cache-written':
       return `已保存：${event.blockId}`;
     case 'batch-split':
-      return `批次 ${event.batchId} 响应异常，已拆分为 ${event.childBatchIds.join('、')}：${safeReason(event.reason)}`;
+      return `批次 ${event.batchId} 响应异常，已拆分为 ${event.childBatchIds.join('、')}：${safeErrorMessage(event.reason, 180)}`;
     case 'retry':
-      return `批次 ${event.batchId} 正在进行第 ${event.attempt} 次重试：${safeReason(event.reason)}`;
+      return `批次 ${event.batchId} 正在进行第 ${event.attempt} 次重试：${safeErrorMessage(event.reason, 180)}`;
     case 'error':
       return `批次 ${event.batchId} 失败`;
   }

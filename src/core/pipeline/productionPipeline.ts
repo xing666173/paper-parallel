@@ -1,14 +1,24 @@
 import type { ProjectRepository } from '../project/repository';
 import { canEnterReader, type CompletionSummary } from '../task/completion';
 import type { TaskSnapshot, TaskStage } from '../../types/models';
+import { safeErrorMessage } from '../security/errors';
 
 export type PipelineValue = Record<string, unknown>;
+
+export interface TranslationProgressUpdate {
+  type: 'validated' | 'retry' | 'failed';
+  count: number;
+}
 
 export interface ProductionPipelineStages {
   parse(value: PipelineValue, signal: AbortSignal): Promise<PipelineValue>;
   analyzeLayout(value: PipelineValue, signal: AbortSignal): Promise<PipelineValue>;
   buildGlossary(value: PipelineValue, signal: AbortSignal): Promise<PipelineValue>;
-  translate(value: PipelineValue, signal: AbortSignal): Promise<PipelineValue>;
+  translate(
+    value: PipelineValue,
+    signal: AbortSignal,
+    reportProgress?: (event: TranslationProgressUpdate) => void,
+  ): Promise<PipelineValue>;
   compose(value: PipelineValue, signal: AbortSignal): Promise<PipelineValue>;
   compile(value: PipelineValue, signal: AbortSignal): Promise<PipelineValue>;
   align(value: PipelineValue, signal: AbortSignal): Promise<PipelineValue>;
@@ -41,6 +51,9 @@ export async function runProductionPipeline(
   options: ProductionPipelineOptions,
 ): Promise<ProductionPipelineResult> {
   let snapshot: TaskSnapshot = { ...options.snapshot, progress: { ...options.snapshot.progress }, error: undefined };
+  const resumableTranslationProgress = options.snapshot.stage === 'translating'
+    ? { ...options.snapshot.progress }
+    : undefined;
   const persist = async (notify = true): Promise<void> => {
     snapshot = { ...snapshot, progress: { ...snapshot.progress } };
     await options.repository.saveTask(snapshot);
@@ -75,13 +88,50 @@ export async function runProductionPipeline(
     value = await run('building-glossary', options.stages.buildGlossary, value);
 
     const requiredBlocks = Number(value.requiredBlocks) || 0;
-    snapshot = { ...snapshot, progress: { completed: 0, total: requiredBlocks, retries: 0, failed: 0 } };
-    value = await run('translating', options.stages.translate, value);
+    const baselineProgress = resumableTranslationProgress?.total === requiredBlocks
+      ? { ...resumableTranslationProgress, total: requiredBlocks }
+      : { completed: 0, total: requiredBlocks, retries: 0, failed: 0 };
+    snapshot = { ...snapshot, progress: { ...baselineProgress } };
+    await enter('translating');
+    let progressPersistence = Promise.resolve();
+    let observedCompleted = 0;
+    let observedRetries = 0;
+    let observedFailed = 0;
+    const reportTranslationProgress = (event: TranslationProgressUpdate): void => {
+      if (!Number.isInteger(event.count) || event.count < 1) return;
+      if (event.type === 'validated') {
+        observedCompleted += event.count;
+      } else if (event.type === 'retry') {
+        observedRetries += event.count;
+      } else {
+        observedFailed += event.count;
+      }
+      const completed = Math.min(requiredBlocks, Math.max(baselineProgress.completed, observedCompleted));
+      const progress = {
+        completed,
+        total: requiredBlocks,
+        retries: baselineProgress.retries + observedRetries,
+        failed: Math.min(
+          Math.max(0, requiredBlocks - completed),
+          Math.max(baselineProgress.failed, observedFailed),
+        ),
+      };
+      snapshot = { ...snapshot, progress, updatedAt: Date.now() };
+      const progressSnapshot = { ...snapshot, progress: { ...snapshot.progress } };
+      options.onSnapshot?.(progressSnapshot);
+      progressPersistence = progressPersistence.then(() => options.repository.saveTask(progressSnapshot));
+    };
+    try {
+      value = await options.stages.translate(value, options.signal, reportTranslationProgress);
+    } finally {
+      await progressPersistence;
+    }
     snapshot = {
       ...snapshot,
       progress: {
         ...snapshot.progress,
         completed: Math.min(requiredBlocks, Number(value.validatedBlocks) || 0),
+        failed: 0,
       },
       updatedAt: Date.now(),
     };
@@ -103,7 +153,7 @@ export async function runProductionPipeline(
     snapshot = {
       ...snapshot,
       status: 'failed',
-      error: error instanceof Error ? error.message : String(error),
+      error: safeErrorMessage(error, 500),
       updatedAt: Date.now(),
     };
     await persist();

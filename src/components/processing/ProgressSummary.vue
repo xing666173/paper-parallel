@@ -84,7 +84,7 @@ const lastResponse = computed(() => (
     </div>
     <dl class="task-metrics">
       <div><dt>已用时间</dt><dd>{{ elapsed }}</dd></div>
-      <div><dt>预计剩余</dt><dd>{{ remaining }}</dd></div>
+      <div><dt>预计剩余时间</dt><dd>{{ remaining }}</dd></div>
       <div><dt>最近响应</dt><dd>{{ lastResponse }}</dd></div>
       <div><dt>已通过</dt><dd>{{ task.progress.completed }}</dd></div>
       <div><dt>重试</dt><dd>{{ task.progress.retries }}</dd></div>
@@ -95,9 +95,9 @@ const lastResponse = computed(() => (
       class="button danger" type="button" :disabled="task.status === 'stopping'" @click="$emit('stop')"
     >{{ task.status === 'stopping' ? '正在停止…' : '安全停止' }}</button>
     <button
-      v-else-if="task.status === 'stopped'"
+      v-else-if="task.status === 'stopped' || task.status === 'failed'"
       class="button primary" type="button" @click="$emit('resume')"
-    >继续处理</button>
+    >{{ task.status === 'failed' ? '继续未完成任务' : '继续处理' }}</button>
     <p v-if="task.status === 'running' || task.status === 'stopping' || task.status === 'stopped'" class="stop-note">
       停止会取消正在进行的请求，已经校验并写入的翻译缓存会保留。
     </p>

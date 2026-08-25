@@ -29,7 +29,7 @@ describe('project task store', () => {
       type: 'batch-started', at: 1, batchId: 'b1', blockIds: ['x'], modelId: 'deepseek-v4-flash',
     });
     store.recordAiEvent({
-      type: 'error', at: 2, batchId: 'b1', message: 'server echoed sk-super-secret',
+      type: 'error', at: 2, batchId: 'b1', blockIds: ['x'], message: 'server echoed sk-super-secret',
     });
     for (let index = 0; index < 205; index += 1) {
       store.recordAiEvent({ type: 'cache-hit', at: index + 3, blockId: `block-${index}` });
@@ -91,6 +91,28 @@ describe('project task store', () => {
     expect(store.current?.status).toBe('running');
     expect(store.current?.progress.completed).toBe(7);
     expect((await repository.loadTask('p1'))?.progress.completed).toBe(7);
+  });
+
+  it('resumes a failed task from its validated cache without resetting progress', async () => {
+    const repository = createProjectRepository('task-store-resume-failed');
+    setActivePinia(createPinia());
+    const useStore = createTaskStore({ repository }, 'resume-failed-task');
+    const store = useStore();
+    const task = reduceTaskEvent(runningTranslationTask(), {
+      type: 'BLOCKS_VALIDATED', count: 7, at: 3_000,
+    });
+    store.current = {
+      ...task, status: 'failed', error: 'one block failed', updatedAt: 4_000,
+    };
+    const seen: number[] = [];
+
+    await store.resume(async () => { seen.push(store.current?.progress.completed ?? -1); }, 5_000);
+
+    expect(seen).toEqual([7]);
+    expect(store.current).toMatchObject({
+      status: 'running', error: undefined,
+      progress: { completed: 7, total: 20 },
+    });
   });
 
   it('clears only the current project translation cache', async () => {

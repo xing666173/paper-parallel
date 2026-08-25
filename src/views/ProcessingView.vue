@@ -56,18 +56,6 @@ function pipelineRunner(initial: TaskSnapshot) {
       snapshot: initial,
       repository,
       onAiEvent: store.recordAiEvent,
-      onValidated: (count) => {
-        if (!store.current || store.current.stage !== 'translating') return;
-        store.current = {
-          ...store.current,
-          progress: {
-            ...store.current.progress,
-            completed: Math.min(store.current.progress.total, store.current.progress.completed + count),
-          },
-          updatedAt: Date.now(),
-        };
-        void repository.saveTask(store.current);
-      },
     });
     const result = await runProductionPipeline({
       snapshot: initial,

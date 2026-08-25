@@ -5,6 +5,11 @@ export interface TranslationBatch {
   blocks: TranslationBlockRequest[];
   estimatedTokens: number;
   oversized: boolean;
+  recovery?: {
+    disableThinking: true;
+    reason: 'output-limit' | 'validation';
+    validationCodes?: string[];
+  };
 }
 
 export interface TranslationBatchOptions {

@@ -6,6 +6,7 @@ import type {
   TranslationResponse,
 } from './protocol';
 import { validateBatchResponse } from './protected';
+import { safeErrorMessage } from '../security/errors';
 
 export interface TranslationRequestResult extends TranslationResponse {
   usage: { promptTokens: number; completionTokens: number };
@@ -33,9 +34,12 @@ export interface TranslationTaskResult {
 }
 
 class TranslationValidationError extends Error {
+  readonly codes: string[];
+
   constructor(codes: string[]) {
     super(`Translation validation failed: ${codes.join(', ')}`);
     this.name = 'TranslationValidationError';
+    this.codes = codes;
   }
 }
 
@@ -46,11 +50,6 @@ function abortError(): DOMException {
 function isAbortError(error: unknown, signal?: AbortSignal): boolean {
   return signal?.aborted === true
     || (error instanceof Error && error.name === 'AbortError');
-}
-
-function safeErrorMessage(error: unknown): string {
-  const raw = error instanceof Error ? error.message : String(error);
-  return raw.replace(/sk-[A-Za-z0-9_-]+/g, '[redacted]').slice(0, 180);
 }
 
 function isOutputLimitError(error: unknown): error is Error {
@@ -113,9 +112,12 @@ export async function runTranslationTask(
     if (missing.length === 0) return;
 
     let pendingBlocks = missing;
-    for (let attempt = 0; attempt <= options.maxRetries; attempt += 1) {
+    let standardRetries = 0;
+    let retryCount = 0;
+    let recovery: TranslationBatch['recovery'];
+    while (true) {
       if (options.signal?.aborted) throw abortError();
-      const pendingBatch: TranslationBatch = { ...batch, blocks: pendingBlocks };
+      const pendingBatch: TranslationBatch = { ...batch, blocks: pendingBlocks, recovery };
       const startedAt = now();
       options.onEvent({
         type: 'batch-started',
@@ -140,19 +142,30 @@ export async function runTranslationTask(
 
         const validation = validateBatchResponse(pendingBlocks, response);
         if (validation.accepted.length) {
-          options.onEvent({
-            type: 'batch-validated',
-            at: now(),
-            batchId: batch.id,
-            blockIds: validation.accepted.map((record) => record.blockId),
-          });
+          const persisted: TranslationBlockResponse[] = [];
+          const publishPersisted = (): void => {
+            if (!persisted.length) return;
+            options.onEvent({
+              type: 'batch-validated', at: now(), batchId: batch.id,
+              blockIds: persisted.map((record) => record.blockId),
+            });
+            for (const record of persisted) {
+              options.onEvent({ type: 'cache-written', at: now(), blockId: record.blockId });
+            }
+            persisted.length = 0;
+          };
           for (const record of validation.accepted) {
-            await options.saveValidated(record);
+            try {
+              await options.saveValidated(record);
+            } catch (error) {
+              publishPersisted();
+              throw error;
+            }
             completed.set(record.blockId, record);
-            options.onEvent({ type: 'cache-written', at: now(), blockId: record.blockId });
+            pendingBlocks = pendingBlocks.filter((block) => block.blockId !== record.blockId);
+            persisted.push(record);
           }
-          const acceptedIds = new Set(validation.accepted.map((record) => record.blockId));
-          pendingBlocks = pendingBlocks.filter((block) => !acceptedIds.has(block.blockId));
+          publishPersisted();
         }
         if (pendingBlocks.length === 0) return;
         throw new TranslationValidationError(validation.issues.map((issue) => issue.code));
@@ -160,7 +173,7 @@ export async function runTranslationTask(
         if (isAbortError(error, options.signal)) throw abortError();
         const reason = safeErrorMessage(error);
         if (isAdaptiveSplitError(error) && pendingBlocks.length > 1) {
-          const children = splitBatch({ ...batch, blocks: pendingBlocks });
+          const children = splitBatch({ ...batch, blocks: pendingBlocks, recovery: undefined });
           options.onEvent({
             type: 'batch-split', at: now(), batchId: batch.id,
             childBatchIds: [children[0].id, children[1].id], reason,
@@ -169,17 +182,51 @@ export async function runTranslationTask(
           await processBatch(children[1]);
           return;
         }
-        if (isOutputLimitError(error)) {
-          options.onEvent({ type: 'error', at: now(), batchId: batch.id, message: reason });
-          throw error;
-        }
-        if (attempt < options.maxRetries) {
+        if (
+          pendingBlocks.length === 1
+          && recovery === undefined
+          && (isOutputLimitError(error) || error instanceof TranslationValidationError)
+        ) {
+          recovery = {
+            disableThinking: true,
+            reason: isOutputLimitError(error) ? 'output-limit' : 'validation',
+            ...(error instanceof TranslationValidationError ? { validationCodes: error.codes } : {}),
+          };
+          retryCount += 1;
           options.onEvent({
-            type: 'retry', at: now(), batchId: batch.id, attempt: attempt + 1, reason,
+            type: 'retry', at: now(), batchId: batch.id, attempt: retryCount,
+            reason: recovery.reason === 'output-limit'
+              ? '单块响应仍过长，已切换无思考修复请求'
+              : `单块未通过校验，已切换无思考修复请求（${recovery.validationCodes?.join(', ') ?? 'validation'}）`,
           });
           continue;
         }
-        options.onEvent({ type: 'error', at: now(), batchId: batch.id, message: reason });
+        if (recovery !== undefined) {
+          options.onEvent({
+            type: 'error', at: now(), batchId: batch.id,
+            blockIds: pendingBlocks.map((block) => block.blockId), message: reason,
+          });
+          throw error;
+        }
+        if (isOutputLimitError(error)) {
+          options.onEvent({
+            type: 'error', at: now(), batchId: batch.id,
+            blockIds: pendingBlocks.map((block) => block.blockId), message: reason,
+          });
+          throw error;
+        }
+        if (standardRetries < options.maxRetries) {
+          standardRetries += 1;
+          retryCount += 1;
+          options.onEvent({
+            type: 'retry', at: now(), batchId: batch.id, attempt: retryCount, reason,
+          });
+          continue;
+        }
+        options.onEvent({
+          type: 'error', at: now(), batchId: batch.id,
+          blockIds: pendingBlocks.map((block) => block.blockId), message: reason,
+        });
         throw error;
       }
     }

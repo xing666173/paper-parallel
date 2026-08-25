@@ -105,8 +105,8 @@ export function reduceTaskEvent(state: TaskSnapshot, event: TaskEvent): TaskSnap
     return { ...state, status: 'stopped', updatedAt: event.at };
   }
 
-  if (event.type === 'RESUME' && state.status === 'stopped') {
-    return { ...state, status: 'running', updatedAt: event.at };
+  if (event.type === 'RESUME' && (state.status === 'stopped' || state.status === 'failed')) {
+    return { ...state, status: 'running', error: undefined, updatedAt: event.at };
   }
 
   if (event.type === 'FAILED') {

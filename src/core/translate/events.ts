@@ -12,4 +12,4 @@ export type AiLogEvent =
       childBatchIds: [string, string]; reason: string;
     }
   | { type: 'retry'; at: number; batchId: string; attempt: number; reason: string }
-  | { type: 'error'; at: number; batchId: string; message: string };
+  | { type: 'error'; at: number; batchId: string; blockIds: string[]; message: string };

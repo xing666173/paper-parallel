@@ -61,6 +61,19 @@ describe('translate: DeepSeek client', () => {
     ]);
   });
 
+  it('reports insufficient balance during the connection check when models returns HTTP 402', async () => {
+    const fetchFn = vi.fn(async () => new Response('{"error":"billing details"}', {
+      status: 402,
+    })) as unknown as typeof fetch;
+
+    await expect(listModels({
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test', fetchFn,
+    })).rejects.toMatchObject({
+      name: 'DeepSeekInsufficientBalanceError',
+      message: 'DeepSeek 账户余额不足（HTTP 402）',
+    });
+  });
+
   it('sends thinking and JSON response options without temperature', async () => {
     const fetchSpy = vi.fn(async () => new Response(JSON.stringify({
       choices: [{ message: { content: '{"blocks":[]}' } }],
@@ -121,6 +134,35 @@ describe('translate: DeepSeek client', () => {
     })).rejects.toThrow('DeepSeek HTTP 401');
   });
 
+  it('never exposes a raw server response body through a chat error', async () => {
+    const fetchFn = vi.fn(async () => new Response(
+      '{"error":"proxy echoed sk-secret-value and private request content"}',
+      { status: 500 },
+    )) as unknown as typeof fetch;
+
+    const request = chatCompletion({
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test', model: 'deepseek-v4-pro',
+      messages: [{ role: 'user', content: 'private paper text' }], fetchFn,
+    });
+
+    await expect(request).rejects.toThrow('DeepSeek HTTP 500');
+    await expect(request).rejects.not.toThrow(/sk-secret-value|private request content/);
+  });
+
+  it('classifies only HTTP 402 as insufficient account balance', async () => {
+    const fetchFn = vi.fn(async () => new Response('{"error":"billing details"}', {
+      status: 402,
+    })) as unknown as typeof fetch;
+
+    await expect(chatCompletion({
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test', model: 'deepseek-v4-pro',
+      messages: [{ role: 'user', content: 'translate' }], fetchFn,
+    })).rejects.toMatchObject({
+      name: 'DeepSeekInsufficientBalanceError',
+      message: 'DeepSeek 账户余额不足（HTTP 402）',
+    });
+  });
+
   it('reports output exhaustion without exposing reasoning content', async () => {
     const fetchFn = vi.fn(async () => new Response(JSON.stringify({
       choices: [{
@@ -136,6 +178,8 @@ describe('translate: DeepSeek client', () => {
     });
 
     await expect(request).rejects.toMatchObject({ name: 'DeepSeekOutputLimitError' });
+    await expect(request).rejects.toThrow('本次响应达到最大生成长度');
+    await expect(request).rejects.toThrow('这不是账户余额不足');
     await expect(request).rejects.toThrow(/finish_reason=length.*completion_tokens=4096.*prompt_tokens=12000.*reasoning_content=present/);
     await expect(request).rejects.not.toThrow(/private chain of thought/);
   });

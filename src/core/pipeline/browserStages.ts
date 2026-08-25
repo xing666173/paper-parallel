@@ -61,7 +61,6 @@ export interface BrowserPipelineStageOptions {
   concurrency?: number;
   maxRetries?: number;
   onAiEvent?(event: AiLogEvent): void;
-  onValidated?(count: number): void;
   onCompileProgress?(phase: string): void;
 }
 
@@ -172,7 +171,7 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
       return { ...current, glossary, requests, requiredBlocks: requests.length };
     },
 
-    async translate(input, signal) {
+    async translate(input, signal, reportProgress) {
       const current = value(input);
       const doc = requireValue(current.doc, '解析文档缺失');
       const glossary = current.glossary ?? [];
@@ -201,6 +200,7 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
         maxRetries: options.maxRetries ?? 2,
         signal,
         request: async (batch, batchSignal) => {
+          const requestThinkingMode = batch.recovery?.disableThinking ? 'disabled' : settings.thinkingMode;
           const requestBody: TranslationRequest = {
             documentContext: {
               title: doc.meta.title ?? settings.sourceFileName,
@@ -215,13 +215,21 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
             glossary,
             blocks: batch.blocks,
           };
+          const recoveryInstruction = batch.recovery
+            ? [
+              'RECOVERY_REQUEST: Correct the previous failed block and return the complete JSON response again.',
+              `RECOVERY_REASON: ${batch.recovery.reason}`,
+              `VALIDATION_CODES: ${batch.recovery.validationCodes?.join(', ') ?? 'none'}`,
+              'Preserve every protected_tokens item exactly, satisfy every alignment requirement, and do not omit content.',
+            ].join('\n')
+            : '';
           const completion = await chatCompletion({
             baseUrl: options.baseUrl ?? 'https://api.deepseek.com',
-            apiKey, model: settings.modelId, thinkingMode: settings.thinkingMode,
+            apiKey, model: settings.modelId, thinkingMode: requestThinkingMode,
             responseFormat: 'json_object', signal: batchSignal, timeoutMs: 120_000,
-            maxTokens: limits.maxOutputTokens,
+            maxTokens: translationLimitsFor(requestThinkingMode).maxOutputTokens,
             messages: [
-              { role: 'system', content: buildSystemPrompt() },
+              { role: 'system', content: [buildSystemPrompt(), recoveryInstruction].filter(Boolean).join('\n') },
               { role: 'user', content: buildBatchPrompt(requestBody) },
             ],
           });
@@ -244,7 +252,15 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
         }),
         onEvent: (event) => {
           options.onAiEvent?.(event);
-          if (event.type === 'batch-validated') options.onValidated?.(event.blockIds.length);
+          if (event.type === 'batch-validated') {
+            reportProgress?.({ type: 'validated', count: event.blockIds.length });
+          } else if (event.type === 'cache-hit') {
+            reportProgress?.({ type: 'validated', count: 1 });
+          } else if (event.type === 'retry') {
+            reportProgress?.({ type: 'retry', count: 1 });
+          } else if (event.type === 'error') {
+            reportProgress?.({ type: 'failed', count: event.blockIds.length });
+          }
         },
       });
       return {

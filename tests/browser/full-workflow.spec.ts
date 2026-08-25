@@ -11,7 +11,7 @@ interface PromptBlock {
 
 async function mockDeepSeek(
   page: Page,
-  options: { firstTranslationDelayMs?: number; firstProtocolError?: boolean } = {},
+  options: { firstTranslationDelayMs?: number; firstProtocolError?: boolean; firstValidationError?: boolean } = {},
 ): Promise<{
   translatedBatches: () => number;
   translationRequests: () => Array<{ maxTokens: number; thinking: string; blockCount: number }>;
@@ -62,13 +62,17 @@ async function mockDeepSeek(
           }],
         })
         : JSON.stringify({
-          blocks: prompt.blocks.map((block) => {
+          blocks: prompt.blocks.map((block, blockIndex) => {
             const translation = `译文：${block.source}`;
             return {
               block_id: block.blockId,
               translation,
               alignment_groups: [{
-                source_sentence_ids: block.sourceSentences.map((sentence) => sentence.id),
+                source_sentence_ids: translatedBatches === 1
+                  && options.firstValidationError
+                  && blockIndex === prompt.blocks.length - 1
+                  ? ['wrong-source-id']
+                  : block.sourceSentences.map((sentence) => sentence.id),
                 target_segments: [translation],
               }],
               new_terms: [],
@@ -95,7 +99,7 @@ async function mockDeepSeek(
 }
 
 test('uploads a mixed-layout PDF and reaches the synchronized dual-PDF reader', async ({ page }) => {
-  const deepSeek = await mockDeepSeek(page, { firstProtocolError: true });
+  const deepSeek = await mockDeepSeek(page, { firstValidationError: true });
   const pageErrors: string[] = [];
   page.on('pageerror', (error) => pageErrors.push(error.message));
 
@@ -129,14 +133,16 @@ test('uploads a mixed-layout PDF and reaches the synchronized dual-PDF reader', 
   await page.getByRole('button', { name: '返回翻译任务' }).click();
   await expect(page.getByRole('heading', { name: '总体进度' })).toBeVisible();
   await expect(page.locator('.progress-number-row')).toContainText(/([1-9]\d*) \/ \1 个文本块/);
-  await expect(page.getByText(/响应异常，已拆分为/).first()).toBeVisible();
+  await expect(page.getByText(/单块未通过校验，已切换无思考修复请求/).first()).toBeVisible();
 
   expect(deepSeek.translatedBatches()).toBeGreaterThan(0);
-  expect(deepSeek.translationRequests().every((request) => (
+  const ordinaryRequests = deepSeek.translationRequests().filter((request) => request.thinking === 'enabled');
+  const recoveryRequests = deepSeek.translationRequests().filter((request) => request.thinking === 'disabled');
+  expect(ordinaryRequests.every((request) => (
     request.maxTokens === 32_768
-    && request.thinking === 'enabled'
     && request.blockCount <= 8
   ))).toBe(true);
+  expect(recoveryRequests).toEqual([{ maxTokens: 16_384, thinking: 'disabled', blockCount: 1 }]);
   expect(pageErrors).toEqual([]);
   expect(await page.evaluate(() => localStorage.getItem('paper-parallel.deepseek-key'))).toBeNull();
 });

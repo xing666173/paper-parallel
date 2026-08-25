@@ -284,4 +284,93 @@ describe('cancellable translation coordinator', () => {
     expect(progress).toEqual([['b1'], ['b2']]);
     expect(result.completedBlockIds).toEqual(['b1', 'b2']);
   });
+
+  it('repairs a single output-limited block once with thinking disabled', async () => {
+    const requested: Array<{ recovery?: { disableThinking?: boolean; reason?: string } }> = [];
+    const events: string[] = [];
+
+    const result = await runTranslationTask({
+      projectId: 'p1', modelId: 'deepseek-v4-pro',
+      batches: [batch('batch-1', [block('b1', 'One.')])],
+      concurrency: 1, maxRetries: 2,
+      request: async (pending) => {
+        const recovery = (pending as TranslationBatch & {
+          recovery?: { disableThinking?: boolean; reason?: string };
+        }).recovery;
+        requested.push({ recovery });
+        if (!recovery) {
+          const error = new Error('finish_reason=length');
+          error.name = 'DeepSeekOutputLimitError';
+          throw error;
+        }
+        return {
+          blocks: [translated('b1', 'One.译')],
+          usage: { promptTokens: 10, completionTokens: 5 },
+        };
+      },
+      findCached: async () => undefined,
+      saveValidated: async () => undefined,
+      onEvent: (event) => { events.push(event.type); },
+    });
+
+    expect(requested).toEqual([
+      { recovery: undefined },
+      { recovery: { disableThinking: true, reason: 'output-limit' } },
+    ]);
+    expect(events.filter((type) => type === 'retry')).toHaveLength(1);
+    expect(result.completedBlockIds).toEqual(['b1']);
+  });
+
+  it('reports the unresolved block IDs when a final batch failure occurs', async () => {
+    const errors: string[][] = [];
+    await expect(runTranslationTask({
+      projectId: 'p1', modelId: 'deepseek-v4-pro',
+      batches: [batch('batch-1', [block('b1', 'One.')])],
+      concurrency: 1, maxRetries: 0,
+      request: async () => { throw new Error('network down'); },
+      findCached: async () => undefined,
+      saveValidated: async () => undefined,
+      onEvent: (event) => {
+        if (event.type === 'error') errors.push(event.blockIds);
+      },
+    })).rejects.toThrow('network down');
+
+    expect(errors).toEqual([['b1']]);
+  });
+
+  it('counts progress only after cache persistence and retries only the unsaved record', async () => {
+    const requested: string[][] = [];
+    const progress: string[][] = [];
+    const saved: string[] = [];
+    let failSecondSave = true;
+
+    const result = await runTranslationTask({
+      projectId: 'p1', modelId: 'deepseek-v4-pro',
+      batches: [batch('batch-1', [block('b1', 'One.'), block('b2', 'Two.')])],
+      concurrency: 1, maxRetries: 1,
+      request: async (pending) => {
+        requested.push(pending.blocks.map((item) => item.blockId));
+        return {
+          blocks: pending.blocks.map((item) => translated(item.blockId, `${item.source}译`)),
+          usage: { promptTokens: 10, completionTokens: 5 },
+        };
+      },
+      findCached: async () => undefined,
+      saveValidated: async (record) => {
+        if (record.blockId === 'b2' && failSecondSave) {
+          failSecondSave = false;
+          throw new Error('IndexedDB write failed');
+        }
+        saved.push(record.blockId);
+      },
+      onEvent: (event) => {
+        if (event.type === 'batch-validated') progress.push(event.blockIds);
+      },
+    });
+
+    expect(requested).toEqual([['b1', 'b2'], ['b2']]);
+    expect(saved).toEqual(['b1', 'b2']);
+    expect(progress).toEqual([['b1'], ['b2']]);
+    expect(result.completedBlockIds).toEqual(['b1', 'b2']);
+  });
 });
