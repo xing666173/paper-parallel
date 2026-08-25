@@ -111,6 +111,7 @@ export interface RunVisionFinalReviewOptions {
   baseUrl: string;
   apiKey: string;
   signal?: AbortSignal;
+  pageTimeoutMs?: number;
   complete?: (options: ChatCompletionOptions) => Promise<ChatCompletionResult>;
   renderPage?: (page: PdfPageForVision, role: 'source' | 'target', pageIndex: number) => Promise<string>;
   onPageStart?(event: { targetPageIndex: number; totalPages: number }): void;
@@ -118,6 +119,41 @@ export interface RunVisionFinalReviewOptions {
 }
 
 export const VISION_FINAL_REVIEW_CONCURRENCY = 2;
+export const VISION_FINAL_REVIEW_PAGE_TIMEOUT_MS = 120_000;
+
+async function withPageDeadline<T>(
+  operation: (signal: AbortSignal) => Promise<T>,
+  outerSignal: AbortSignal,
+  pageIndex: number,
+  totalPages: number,
+  timeoutMs: number,
+): Promise<T> {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timeoutError = () => new Error(
+    `Vision Exp 成品质检第 ${pageIndex + 1}/${totalPages} 页超过 ${Math.ceil(timeoutMs / 1_000)} 秒，已取消该页请求`,
+  );
+  const onOuterAbort = () => controller.abort();
+  if (outerSignal.aborted) controller.abort();
+  else outerSignal.addEventListener('abort', onOuterAbort, { once: true });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+      reject(timeoutError());
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([operation(controller.signal), deadline]);
+  } catch (error) {
+    if (timedOut) throw timeoutError();
+    throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
+    outerSignal.removeEventListener('abort', onOuterAbort);
+  }
+}
 
 export async function runVisionFinalReview(options: RunVisionFinalReviewOptions): Promise<VisionFinalReport> {
   if (!options.apiKey.trim()) throw new Error('Vision Exp 成品质检需要 DeepSeek API Key');
@@ -126,6 +162,11 @@ export async function runVisionFinalReview(options: RunVisionFinalReviewOptions)
   const mapping = buildTargetSourcePageMap(options.manifest, options.targetPdf.numPages, options.sourcePdf.numPages);
   const sourceImages = new Map<number, Promise<string>>();
   const pageIssues: VisionFinalIssue[][] = Array.from({ length: options.targetPdf.numPages }, () => []);
+  const runController = new AbortController();
+  const onOuterAbort = () => runController.abort();
+  if (options.signal?.aborted) runController.abort();
+  else options.signal?.addEventListener('abort', onOuterAbort, { once: true });
+  const runSignal = runController.signal;
 
   const getSourceImage = (sourcePageIndex: number): Promise<string> => {
     const cached = sourceImages.get(sourcePageIndex);
@@ -136,8 +177,8 @@ export async function runVisionFinalReview(options: RunVisionFinalReviewOptions)
     return rendered;
   };
 
-  const reviewPage = async (targetPageIndex: number): Promise<void> => {
-    if (options.signal?.aborted) throw new DOMException('已停止', 'AbortError');
+  const performPageReview = async (targetPageIndex: number, pageSignal: AbortSignal): Promise<void> => {
+    if (pageSignal.aborted) throw new DOMException('已停止', 'AbortError');
     options.onPageStart?.({ targetPageIndex, totalPages: options.targetPdf.numPages });
     const sourcePageIndices = mapping[targetPageIndex]!;
     const content: NonNullable<ChatCompletionOptions['messages'][number]['content']> extends infer _T ? any[] : never = [
@@ -159,7 +200,7 @@ export async function runVisionFinalReview(options: RunVisionFinalReviewOptions)
       responseFormat: 'json_object',
       maxTokens: compact ? 1_024 : 2_048,
       timeoutMs: 90_000,
-      signal: options.signal,
+      signal: pageSignal,
       messages: [{ role: 'user', content: [
         { type: 'text', text: buildVisionFinalReviewPrompt(
           targetPageIndex + 1,
@@ -176,10 +217,19 @@ export async function runVisionFinalReview(options: RunVisionFinalReviewOptions)
       if (!(error instanceof Error) || error.name !== 'DeepSeekOutputLimitError') throw error;
       completion = await requestReview(true);
     }
+    if (pageSignal.aborted) throw new DOMException('已停止', 'AbortError');
     const pageReport = parseVisionFinalPageReport(completion.content, targetPageIndex);
     pageIssues[targetPageIndex] = pageReport.issues;
     options.onPage?.({ targetPageIndex, totalPages: options.targetPdf.numPages, issueCount: pageReport.issues.length });
   };
+
+  const reviewPage = (targetPageIndex: number): Promise<void> => withPageDeadline(
+    (pageSignal) => performPageReview(targetPageIndex, pageSignal),
+    runSignal,
+    targetPageIndex,
+    options.targetPdf.numPages,
+    options.pageTimeoutMs ?? VISION_FINAL_REVIEW_PAGE_TIMEOUT_MS,
+  );
 
   let nextTargetPageIndex = 0;
   const worker = async (): Promise<void> => {
@@ -189,13 +239,20 @@ export async function runVisionFinalReview(options: RunVisionFinalReviewOptions)
       await reviewPage(targetPageIndex);
     }
   };
-  await Promise.all(Array.from(
-    { length: Math.min(VISION_FINAL_REVIEW_CONCURRENCY, options.targetPdf.numPages) },
-    () => worker(),
-  ));
+  try {
+    await Promise.all(Array.from(
+      { length: Math.min(VISION_FINAL_REVIEW_CONCURRENCY, options.targetPdf.numPages) },
+      () => worker(),
+    ));
+  } catch (error) {
+    runController.abort();
+    throw error;
+  } finally {
+    options.signal?.removeEventListener('abort', onOuterAbort);
+  }
   const issues = pageIssues.flat();
 
-  if (options.signal?.aborted) {
+  if (runSignal.aborted) {
     throw new DOMException('已停止', 'AbortError');
   }
   return {

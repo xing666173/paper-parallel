@@ -149,4 +149,17 @@ describe('vision: final PDF review', () => {
     expect(maxActive).toBe(2);
     expect(report.issues.map((issue) => issue.evidence)).toEqual(['page-1', 'page-2', 'page-3']);
   });
+
+  it('enforces a hard total deadline for each reviewed page', async () => {
+    const page = { getViewport: () => ({ width: 1, height: 1 }), render: () => ({ promise: Promise.resolve() }) };
+    await expect(runVisionFinalReview({
+      sourcePdf: { numPages: 1, getPage: async () => page },
+      targetPdf: { numPages: 1, getPage: async () => page },
+      manifest: { units: [] } as any,
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test',
+      pageTimeoutMs: 20,
+      renderPage: async () => 'data:image/png;base64,page',
+      complete: async () => new Promise(() => undefined),
+    })).rejects.toThrow('第 1/1 页超过 1 秒');
+  });
 });
