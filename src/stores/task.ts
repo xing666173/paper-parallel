@@ -23,6 +23,8 @@ export type TaskRunner = (signal: AbortSignal) => Promise<void>;
 
 function projectAiMessage(event: AiLogEvent): string {
   switch (event.type) {
+    case 'vision-layout-page-started':
+      return `Vision Exp 版式识别：开始分析第 ${event.page}/${event.totalPages} 页`;
     case 'vision-layout-page':
       return `Vision Exp 版式识别：第 ${event.page}/${event.totalPages} 页${event.cached ? '（缓存命中）' : '已完成'}`;
     case 'vision-layout-fallback':
@@ -95,6 +97,7 @@ export function createTaskStore(dependencies: TaskStoreDependencies, id = 'task'
         event.type === 'batch-received'
         || event.type === 'batch-progress'
         || event.type === 'batch-split'
+        || event.type === 'vision-layout-page-started'
         || event.type === 'vision-layout-page'
         || event.type === 'vision-layout-fallback'
         || event.type === 'vision-review-page-started'

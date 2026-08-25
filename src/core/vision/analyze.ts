@@ -22,16 +22,19 @@ export interface AnalyzePdfLayoutOptions {
   renderPage?: (page: PdfPageForVision) => Promise<string>;
   loadCached?(key: string, pageIndex: number): Promise<unknown | undefined>;
   saveCached?(key: string, pageIndex: number, analysis: VisionPageAnalysis): Promise<void>;
+  onPageStart?(event: { pageIndex: number; totalPages: number }): void;
   onPage?(event: { pageIndex: number; totalPages: number; cached: boolean }): void;
 }
+
+export const VISION_LAYOUT_CONCURRENCY = 2;
 
 export async function analyzePdfLayoutWithVision(options: AnalyzePdfLayoutOptions): Promise<VisionPageAnalysis[]> {
   if (!options.apiKey.trim()) throw new Error('Vision Exp 版式识别需要 DeepSeek API Key');
   const complete = options.complete ?? chatCompletion;
   const renderPage = options.renderPage ?? ((page) => renderPdfPageAsPng(page));
-  const results: VisionPageAnalysis[] = [];
+  const results: VisionPageAnalysis[] = Array.from({ length: options.pdf.numPages });
 
-  for (let pageIndex = 0; pageIndex < options.pdf.numPages; pageIndex += 1) {
+  const analyzePage = async (pageIndex: number): Promise<void> => {
     if (options.signal?.aborted) throw new DOMException('已停止', 'AbortError');
     const cacheKey = buildVisionLayoutCacheKey({
       fileHash: options.fileHash,
@@ -43,11 +46,12 @@ export async function analyzePdfLayoutWithVision(options: AnalyzePdfLayoutOption
     const cached = await options.loadCached?.(cacheKey, pageIndex);
     if (cached !== undefined) {
       const analysis = parseVisionPageAnalysis(cached, pageIndex);
-      results.push(analysis);
+      results[pageIndex] = analysis;
       options.onPage?.({ pageIndex, totalPages: options.pdf.numPages, cached: true });
-      continue;
+      return;
     }
 
+    options.onPageStart?.({ pageIndex, totalPages: options.pdf.numPages });
     const page = await options.pdf.getPage(pageIndex + 1);
     const imageUrl = await renderPage(page);
     const completion = await complete({
@@ -56,8 +60,8 @@ export async function analyzePdfLayoutWithVision(options: AnalyzePdfLayoutOption
       model: VISION_LAYOUT_MODEL,
       thinkingMode: 'disabled',
       responseFormat: 'json_object',
-      maxTokens: 4_096,
-      timeoutMs: 120_000,
+      maxTokens: 2_048,
+      timeoutMs: 90_000,
       signal: options.signal,
       messages: [{ role: 'user', content: [
         { type: 'text', text: buildVisionLayoutPrompt(pageIndex + 1) },
@@ -66,8 +70,24 @@ export async function analyzePdfLayoutWithVision(options: AnalyzePdfLayoutOption
     });
     const analysis = parseVisionPageAnalysis(completion.content, pageIndex);
     await options.saveCached?.(cacheKey, pageIndex, analysis);
-    results.push(analysis);
+    results[pageIndex] = analysis;
     options.onPage?.({ pageIndex, totalPages: options.pdf.numPages, cached: false });
+  };
+
+  let nextPageIndex = 0;
+  const worker = async (): Promise<void> => {
+    while (nextPageIndex < options.pdf.numPages) {
+      const pageIndex = nextPageIndex;
+      nextPageIndex += 1;
+      await analyzePage(pageIndex);
+    }
+  };
+  await Promise.all(Array.from(
+    { length: Math.min(VISION_LAYOUT_CONCURRENCY, options.pdf.numPages) },
+    () => worker(),
+  ));
+  if (options.signal?.aborted) {
+    throw new DOMException('已停止', 'AbortError');
   }
   return results;
 }

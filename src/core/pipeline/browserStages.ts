@@ -179,6 +179,10 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
           blob: new Blob([JSON.stringify(serializeVisionPageAnalysis(analysis))], { type: 'application/json' }),
           updatedAt: Date.now(),
         }),
+        onPageStart: (event) => options.onAiEvent?.({
+          type: 'vision-layout-page-started', at: Date.now(), page: event.pageIndex + 1,
+          totalPages: event.totalPages,
+        }),
         onPage: (event) => options.onAiEvent?.({
           type: 'vision-layout-page', at: Date.now(), page: event.pageIndex + 1,
           totalPages: event.totalPages, cached: event.cached,

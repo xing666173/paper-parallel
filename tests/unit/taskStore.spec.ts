@@ -72,6 +72,14 @@ describe('project task store', () => {
     expect(store.lastResponseAt).toBe(9);
   });
 
+  it('shows page-level progress as soon as visual layout analysis starts', () => {
+    const { store } = setupStore();
+    store.recordAiEvent({ type: 'vision-layout-page-started', at: 10, page: 1, totalPages: 8 });
+
+    expect(store.aiLog.at(-1)?.message).toBe('Vision Exp 版式识别：开始分析第 1/8 页');
+    expect(store.lastResponseAt).toBe(10);
+  });
+
   it('shows page-level progress as soon as final visual review starts', () => {
     const { store } = setupStore();
     store.recordAiEvent({ type: 'vision-review-page-started', at: 11, page: 2, totalPages: 7 });

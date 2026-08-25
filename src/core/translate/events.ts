@@ -1,4 +1,5 @@
 export type AiLogEvent =
+  | { type: 'vision-layout-page-started'; at: number; page: number; totalPages: number }
   | { type: 'vision-layout-page'; at: number; page: number; totalPages: number; cached: boolean }
   | {
       type: 'vision-layout-fallback'; at: number; page: number; region: number;

@@ -39,4 +39,39 @@ describe('vision: pre-layout analysis', () => {
     expect(renderPage).not.toHaveBeenCalled();
     expect(complete).not.toHaveBeenCalled();
   });
+
+  it('analyzes at most two pages concurrently, reports starts, and returns page order', async () => {
+    const page = { getViewport: () => ({ width: 1, height: 1 }), render: () => ({ promise: Promise.resolve() }) };
+    const resolvers: Array<() => void> = [];
+    const started: number[] = [];
+    let active = 0;
+    let maxActive = 0;
+    const run = analyzePdfLayoutWithVision({
+      pdf: { numPages: 3, getPage: async () => page },
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test', fileHash: 'sha256:paper',
+      renderPage: async () => 'data:image/png;base64,PAGE',
+      onPageStart: ({ pageIndex }) => started.push(pageIndex),
+      complete: async (request: any) => {
+        const pageNumber = Number(request.messages[0].content[0].text.match(/source page (\d+)/)?.[1] ?? '0');
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise<void>((resolve) => resolvers.push(resolve));
+        active -= 1;
+        return {
+          content: JSON.stringify({ page: pageNumber, layout: 'single', regions: [] }),
+          usage: { promptTokens: 1, completionTokens: 1 },
+        };
+      },
+    });
+
+    await vi.waitFor(() => expect(started).toEqual([0, 1]));
+    await vi.waitFor(() => expect(resolvers).toHaveLength(2));
+    resolvers[1]!();
+    await vi.waitFor(() => expect(started).toEqual([0, 1, 2]));
+    resolvers[0]!();
+    resolvers[2]!();
+
+    expect((await run).map((analysis) => analysis.pageIndex)).toEqual([0, 1, 2]);
+    expect(maxActive).toBe(2);
+  });
 });

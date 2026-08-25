@@ -24,6 +24,24 @@ async function connectWithRetry(page: import('@playwright/test').Page): Promise<
   throw new Error(`DeepSeek connection failed after 3 attempts: ${failure}`);
 }
 
+async function waitForPipelineTerminal(page: import('@playwright/test').Page): Promise<'reader'> {
+  const deadline = Date.now() + 25 * 60_000;
+  let lastSnapshot = '尚未进入处理页';
+  while (Date.now() < deadline) {
+    if (/#\/task\/pp-[a-f0-9]{64}\/read(?:\?|$)/.test(page.url())) return 'reader';
+    if (await page.locator('.quality-error').isVisible().catch(() => false)) {
+      throw new Error(await page.locator('.quality-error').innerText());
+    }
+    const stage = await page.locator('[data-stage].is-current strong').innerText().catch(() => '页面跳转中');
+    const progress = await page.locator('.progress-number-row').innerText().catch(() => '进度不可用');
+    const lastLog = await page.locator('.log-entry').last().innerText().catch(() => '等待首条日志');
+    lastSnapshot = `stage=${stage}; progress=${progress.replace(/\s+/g, ' ')}; log=${lastLog.replace(/\s+/g, ' ')}`;
+    console.log(`[real-api heartbeat] ${lastSnapshot}`);
+    await page.waitForTimeout(15_000);
+  }
+  throw new Error(`Pipeline did not reach a terminal state within 25 minutes: ${lastSnapshot}`);
+}
+
 test('real API exact-paper PDF quality acceptance', async ({ page }) => {
   test.skip(!API_KEY, 'PP_DEEPSEEK_API_KEY is not available in this process');
   test.skip(!existsSync(SOURCE_PDF), 'The local exact-paper fixture is unavailable');
@@ -38,11 +56,7 @@ test('real API exact-paper PDF quality acceptance', async ({ page }) => {
     await connectWithRetry(page);
     await page.locator('[data-action="start"]').click();
 
-    const terminal = await Promise.race([
-      page.waitForURL(/#\/task\/pp-[a-f0-9]{64}\/read(?:\?|$)/, { timeout: 40 * 60_000 }).then(() => 'reader'),
-      page.locator('.quality-error').waitFor({ state: 'visible', timeout: 40 * 60_000 }).then(() => 'failed'),
-    ]);
-    if (terminal === 'failed') throw new Error(await page.locator('.quality-error').innerText());
+    await waitForPipelineTerminal(page);
 
     const outputDirectory = path.resolve('reports', 'real-api', TRANSLATION_MODEL);
     await mkdir(outputDirectory, { recursive: true });
