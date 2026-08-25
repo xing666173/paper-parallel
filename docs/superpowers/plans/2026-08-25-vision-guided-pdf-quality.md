@@ -27,8 +27,9 @@
 ### Task 1: Usable local Chinese font and rendered-PDF smoke gate
 
 **Files:**
-- Replace: `public/vendor/typst/noto-serif-sc-400.woff`
-- Create: `public/vendor/typst/noto-serif-sc-400.ttf`
+- Create: `assets/fonts/noto-serif-sc-400.ttf`
+- Create: `assets/fonts/OFL.txt`
+- Modify: `vite.config.ts`
 - Modify: `src/core/typst/runtimePaths.ts`
 - Modify: `tests/browser/typst-smoke.spec.ts`
 - Create: `tests/browser/helpers/pdfAssertions.ts`

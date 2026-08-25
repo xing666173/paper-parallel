@@ -20,9 +20,9 @@ export default defineConfig({
             path: join('node_modules', '@myriaddreamin', 'typst-ts-renderer', 'pkg', 'typst_ts_renderer_bg.wasm'),
             type: 'application/wasm',
           }],
-          ['/vendor/typst/noto-serif-sc-400.woff', {
-            path: join('node_modules', '@fontsource', 'noto-serif-sc', 'files', 'noto-serif-sc-chinese-simplified-400-normal.woff'),
-            type: 'font/woff',
+          ['/vendor/typst/noto-serif-sc-400.ttf', {
+            path: join('assets', 'fonts', 'noto-serif-sc-400.ttf'),
+            type: 'font/ttf',
           }],
         ]);
         server.middlewares.use((request, response, next) => {
@@ -44,8 +44,8 @@ export default defineConfig({
           join(typstVendor, 'typst_ts_renderer_bg.wasm'),
         );
         copyFileSync(
-          join('node_modules', '@fontsource', 'noto-serif-sc', 'files', 'noto-serif-sc-chinese-simplified-400-normal.woff'),
-          join(typstVendor, 'noto-serif-sc-400.woff'),
+          join('assets', 'fonts', 'noto-serif-sc-400.ttf'),
+          join(typstVendor, 'noto-serif-sc-400.ttf'),
         );
       },
     },
