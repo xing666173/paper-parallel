@@ -96,6 +96,14 @@ describe('project task store', () => {
     expect(store.lastResponseAt).toBe(12);
   });
 
+  it('reports a heartbeat while a final-review page is still waiting', () => {
+    const { store } = setupStore();
+    store.recordAiEvent({ type: 'vision-review-page-waiting', at: 13, page: 2, totalPages: 11, elapsedMs: 30_400 });
+
+    expect(store.aiLog.at(-1)?.message).toBe('Vision Exp 成品质检：第 2/11 页仍在等待（30 秒）');
+    expect(store.lastResponseAt).toBe(13);
+  });
+
   it('coalesces streaming heartbeats while keeping the latest phase visible', () => {
     const { store } = setupStore();
     store.recordAiEvent({

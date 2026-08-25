@@ -31,6 +31,8 @@ function projectAiMessage(event: AiLogEvent): string {
       return `Vision Exp 第 ${event.page} 页区域 ${event.region} 未通过本地几何门（${event.reason}），已改用 PDF 文字层回退识别`;
     case 'vision-review-page-started':
       return `Vision Exp 成品质检：开始检查第 ${event.page}/${event.totalPages} 页`;
+    case 'vision-review-page-waiting':
+      return `Vision Exp 成品质检：第 ${event.page}/${event.totalPages} 页仍在等待（${Math.floor(event.elapsedMs / 1_000)} 秒）`;
     case 'vision-review-page-timeout':
       return `Vision Exp 成品质检：第 ${event.page}/${event.totalPages} 页超过 ${Math.ceil(event.timeoutMs / 1_000)} 秒，已取消`;
     case 'vision-review-page':
@@ -103,6 +105,7 @@ export function createTaskStore(dependencies: TaskStoreDependencies, id = 'task'
         || event.type === 'vision-layout-page'
         || event.type === 'vision-layout-fallback'
         || event.type === 'vision-review-page-started'
+        || event.type === 'vision-review-page-waiting'
         || event.type === 'vision-review-page-timeout'
         || event.type === 'vision-review-page'
       ) {

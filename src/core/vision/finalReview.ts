@@ -115,6 +115,7 @@ export interface RunVisionFinalReviewOptions {
   complete?: (options: ChatCompletionOptions) => Promise<ChatCompletionResult>;
   renderPage?: (page: PdfPageForVision, role: 'source' | 'target', pageIndex: number) => Promise<string>;
   onPageStart?(event: { targetPageIndex: number; totalPages: number }): void;
+  onPageWait?(event: { targetPageIndex: number; totalPages: number; elapsedMs: number }): void;
   onPageTimeout?(event: { targetPageIndex: number; totalPages: number; timeoutMs: number }): void;
   onPage?(event: { targetPageIndex: number; totalPages: number; issueCount: number }): void;
 }
@@ -129,6 +130,7 @@ async function withPageDeadline<T>(
   totalPages: number,
   timeoutMs: number,
   onTimeout?: () => void,
+  onWait?: (elapsedMs: number) => void,
 ): Promise<T> {
   const controller = new AbortController();
   let timedOut = false;
@@ -140,10 +142,17 @@ async function withPageDeadline<T>(
   else outerSignal.addEventListener('abort', onOuterAbort, { once: true });
   const clock = () => globalThis.performance?.now?.() ?? Date.now();
   const startedAt = clock();
+  let lastReportedWait = 0;
   let timer: ReturnType<typeof setInterval> | undefined;
   const deadline = new Promise<never>((_resolve, reject) => {
     timer = setInterval(() => {
-      if (clock() - startedAt < timeoutMs) return;
+      const elapsedMs = clock() - startedAt;
+      const waitBucket = Math.floor(elapsedMs / 15_000);
+      if (waitBucket > lastReportedWait) {
+        lastReportedWait = waitBucket;
+        onWait?.(elapsedMs);
+      }
+      if (elapsedMs < timeoutMs) return;
       timedOut = true;
       onTimeout?.();
       controller.abort();
@@ -239,6 +248,11 @@ export async function runVisionFinalReview(options: RunVisionFinalReviewOptions)
       targetPageIndex,
       totalPages: options.targetPdf.numPages,
       timeoutMs: options.pageTimeoutMs ?? VISION_FINAL_REVIEW_PAGE_TIMEOUT_MS,
+    }),
+    (elapsedMs) => options.onPageWait?.({
+      targetPageIndex,
+      totalPages: options.targetPdf.numPages,
+      elapsedMs,
     }),
   );
 

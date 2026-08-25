@@ -428,6 +428,10 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
             type: 'vision-review-page-started', at: Date.now(), page: event.targetPageIndex + 1,
             totalPages: event.totalPages,
           }),
+          onPageWait: (event) => options.onAiEvent?.({
+            type: 'vision-review-page-waiting', at: Date.now(), page: event.targetPageIndex + 1,
+            totalPages: event.totalPages, elapsedMs: event.elapsedMs,
+          }),
           onPageTimeout: (event) => options.onAiEvent?.({
             type: 'vision-review-page-timeout', at: Date.now(), page: event.targetPageIndex + 1,
             totalPages: event.totalPages, timeoutMs: event.timeoutMs,
