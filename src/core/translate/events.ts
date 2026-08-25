@@ -1,4 +1,6 @@
 export type AiLogEvent =
+  | { type: 'vision-layout-page'; at: number; page: number; totalPages: number; cached: boolean }
+  | { type: 'vision-review-page'; at: number; page: number; totalPages: number; issueCount: number }
   | { type: 'batch-started'; at: number; batchId: string; blockIds: string[]; modelId: string }
   | {
       type: 'batch-received'; at: number; batchId: string; elapsedMs: number;

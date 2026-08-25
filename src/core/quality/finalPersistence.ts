@@ -4,6 +4,8 @@ export interface PersistValidatedOutputsOptions<TArtifact extends { key: string 
   contentGate: PdfContentGateResult;
   alignmentPass: boolean;
   alignmentError: string;
+  visualPass: boolean;
+  visualError: string;
   artifacts: readonly TArtifact[];
   manifest: TManifest;
   putArtifact(artifact: TArtifact): Promise<unknown>;
@@ -18,6 +20,9 @@ export async function persistValidatedOutputs<TArtifact extends { key: string },
   }
   if (!options.alignmentPass) {
     throw new Error(options.alignmentError || '对齐质量门未通过');
+  }
+  if (!options.visualPass) {
+    throw new Error(`视觉质检未通过：${options.visualError || 'Vision Exp 发现严重页面缺陷'}`);
   }
   for (const artifact of options.artifacts) await options.putArtifact(artifact);
   await options.saveAlignmentManifest(options.manifest);

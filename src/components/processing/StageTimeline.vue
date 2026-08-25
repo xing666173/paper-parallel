@@ -5,13 +5,13 @@ import type { TaskSnapshot, TaskStage } from '../../types/models';
 const props = defineProps<{ task: TaskSnapshot }>();
 const stages: { stage: TaskStage; label: string; detail: string }[] = [
   { stage: 'parsing', label: '解析论文', detail: '提取文字与页面结构' },
-  { stage: 'analyzing-layout', label: '识别版式', detail: '识别单栏、双栏与混合区域' },
+  { stage: 'analyzing-layout', label: '识别版式', detail: 'Vision Exp 识别图、表、公式与栏区' },
   { stage: 'building-glossary', label: '建立术语表', detail: '统一全文专业术语' },
   { stage: 'translating', label: '翻译正文', detail: '批次翻译并校验保护内容' },
   { stage: 'composing', label: '生成中文排版', detail: '继承原文区域与资产顺序' },
   { stage: 'compiling', label: '编译 PDF', detail: '在浏览器中生成中文 PDF' },
   { stage: 'aligning', label: '建立对齐映射', detail: '构建连续语义组锚点' },
-  { stage: 'validating', label: '质量检查', detail: '核对内容、资产与映射' },
+  { stage: 'validating', label: '质量检查', detail: '确定性门禁与 Vision Exp 逐页复核' },
 ];
 const currentIndex = computed(() => stages.findIndex((item) => item.stage === props.task.stage));
 function visualState(index: number): 'completed' | 'current' | 'pending' {

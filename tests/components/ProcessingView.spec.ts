@@ -60,6 +60,8 @@ describe('processing dashboard', () => {
     expect(wrapper.text()).toContain('AI 日志');
     expect(wrapper.text()).toContain('安全停止');
     expect(wrapper.text()).toContain('仅显示任务事件，不显示思维过程');
+    expect(wrapper.text()).toContain('版式识别和成品质检会将论文页面图片发送给 DeepSeek Vision Exp');
+    expect(wrapper.text()).toContain('Vision Exp 识别图、表、公式与栏区');
     expect(wrapper.text()).toContain('开始批次 batch-2');
     expect(wrapper.findAll('[data-stage]')).toHaveLength(8);
   });

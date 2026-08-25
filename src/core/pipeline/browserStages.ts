@@ -35,6 +35,7 @@ import { reconcileVisionLayout } from '../vision/reconcile';
 import { serializeVisionPageAnalysis } from '../vision/protocol';
 import { inspectCompiledPdf, runPdfContentGate } from '../quality/pdfContentGate';
 import { persistValidatedOutputs } from '../quality/finalPersistence';
+import { runVisionFinalReview, type VisionFinalReport } from '../vision/finalReview';
 
 const SESSION_KEY_STORAGE = 'paper-parallel.deepseek-key-session';
 const LOCAL_KEY_STORAGE = 'paper-parallel.deepseek-key';
@@ -177,6 +178,10 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
           kind: 'vision-layout',
           blob: new Blob([JSON.stringify(serializeVisionPageAnalysis(analysis))], { type: 'application/json' }),
           updatedAt: Date.now(),
+        }),
+        onPage: (event) => options.onAiEvent?.({
+          type: 'vision-layout-page', at: Date.now(), page: event.pageIndex + 1,
+          totalPages: event.totalPages, cached: event.cached,
         }),
       });
       const reconciled = reconcileVisionLayout(doc, analyses);
@@ -384,7 +389,7 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
       return { ...current, manifest };
     },
 
-    async validate(input) {
+    async validate(input, signal) {
       const current = value(input);
       const doc = requireValue(current.doc, '解析文档缺失');
       const compiled = requireValue(current.compiled, '中文 PDF 缺失');
@@ -399,6 +404,35 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
         expectedTranslations: translations.map((translation) => translation.translation),
         maximumPages: Math.max(doc.pageCount + 2, Math.ceil(doc.pageCount * 3)),
       });
+      if (!contentGate.pass) {
+        throw new Error(`PDF 内容质量门未通过：${contentGate.issues.map((issue) => issue.message).join('；')}`);
+      }
+      if (!alignment.pass) {
+        throw new Error(`对齐质量门未通过：${alignment.issues.map((issue) => issue.message).join('；')}`);
+      }
+      const sourcePdf = requireValue(current.sourcePdf, '源 PDF 缺失');
+      const targetLoading = getDocument({ data: compiled.pdf.slice() });
+      const targetPdf = await targetLoading.promise;
+      let visualReport: VisionFinalReport;
+      try {
+        visualReport = await runVisionFinalReview({
+          sourcePdf,
+          targetPdf: targetPdf as any,
+          manifest,
+          baseUrl: options.baseUrl ?? 'https://api.deepseek.com',
+          apiKey,
+          signal,
+          onPage: (event) => options.onAiEvent?.({
+            type: 'vision-review-page', at: Date.now(), page: event.targetPageIndex + 1,
+            totalPages: event.totalPages, issueCount: event.issueCount,
+          }),
+        });
+      } finally {
+        await targetPdf.destroy();
+      }
+      const severeVisualIssues = visualReport.issues.filter((issue) => (
+        issue.severity === 'severe' && issue.confidence >= 0.8
+      ));
       const updatedAt = Date.now();
       const artifacts = [
         {
@@ -418,6 +452,10 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
         contentGate,
         alignmentPass: alignment.pass,
         alignmentError: alignment.issues.map((issue) => issue.message).join('；'),
+        visualPass: visualReport.pass,
+        visualError: severeVisualIssues.map((issue) => (
+          `第 ${issue.targetPageIndex + 1} 页 ${issue.type}：${issue.evidence}`
+        )).join('；'),
         artifacts,
         manifest,
         putArtifact: (artifact) => options.repository.putArtifact(artifact),

@@ -134,6 +134,9 @@ onBeforeRouteLeave(() => {
       <p v-if="task.status === 'failed'" class="quality-error" role="alert">
         <strong>当前阶段未通过：</strong>{{ task.error }}
       </p>
+      <p class="vision-disclosure">
+        版式识别和成品质检会将论文页面图片发送给 DeepSeek Vision Exp，并产生额外 API 用量；页面与结果仍只保存在当前浏览器。
+      </p>
       <div class="processing-workspace">
         <aside class="processing-sidebar">
           <StageTimeline :task="task" />

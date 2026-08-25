@@ -12,6 +12,8 @@ describe('validated output persistence', () => {
       },
       alignmentPass: true,
       alignmentError: '',
+      visualPass: true,
+      visualError: '',
       artifacts: [{ key: 'pdf' }],
       manifest: { projectId: 'p1' },
       putArtifact,
@@ -21,12 +23,30 @@ describe('validated output persistence', () => {
     expect(saveAlignmentManifest).not.toHaveBeenCalled();
   });
 
+  it('does not persist when Vision Exp finds a severe final-page defect', async () => {
+    const putArtifact = vi.fn();
+    await expect(persistValidatedOutputs({
+      contentGate: { pass: true, coverage: 1, chineseCharacters: 20, issues: [] },
+      alignmentPass: true,
+      alignmentError: '',
+      visualPass: false,
+      visualError: '第 2 页存在大面积正文缺失',
+      artifacts: [{ key: 'pdf' }],
+      manifest: { projectId: 'p1' },
+      putArtifact,
+      saveAlignmentManifest: vi.fn(),
+    })).rejects.toThrow('视觉质检未通过');
+    expect(putArtifact).not.toHaveBeenCalled();
+  });
+
   it('persists artifacts and alignment only after both deterministic gates pass', async () => {
     const order: string[] = [];
     await persistValidatedOutputs({
       contentGate: { pass: true, coverage: 1, chineseCharacters: 20, issues: [] },
       alignmentPass: true,
       alignmentError: '',
+      visualPass: true,
+      visualError: '',
       artifacts: [{ key: 'pdf' }, { key: 'source' }],
       manifest: { projectId: 'p1' },
       putArtifact: async (artifact) => { order.push(String(artifact.key)); },

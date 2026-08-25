@@ -23,6 +23,10 @@ export type TaskRunner = (signal: AbortSignal) => Promise<void>;
 
 function projectAiMessage(event: AiLogEvent): string {
   switch (event.type) {
+    case 'vision-layout-page':
+      return `Vision Exp 版式识别：第 ${event.page}/${event.totalPages} 页${event.cached ? '（缓存命中）' : '已完成'}`;
+    case 'vision-review-page':
+      return `Vision Exp 成品质检：第 ${event.page}/${event.totalPages} 页已完成，发现 ${event.issueCount} 个可见问题`;
     case 'batch-started':
       return `开始批次 ${event.batchId}，共 ${event.blockIds.length} 个文本块`;
     case 'batch-received':
@@ -83,7 +87,13 @@ export function createTaskStore(dependencies: TaskStoreDependencies, id = 'task'
       }
       aiLog.value.push(entry);
       if (aiLog.value.length > 200) aiLog.value.splice(0, aiLog.value.length - 200);
-      if (event.type === 'batch-received' || event.type === 'batch-progress' || event.type === 'batch-split') {
+      if (
+        event.type === 'batch-received'
+        || event.type === 'batch-progress'
+        || event.type === 'batch-split'
+        || event.type === 'vision-layout-page'
+        || event.type === 'vision-review-page'
+      ) {
         lastResponseAt.value = event.at;
         if (event.type === 'batch-received' && event.completionTokens > 0 && event.elapsedMs > 0) {
           throughputSamples.value.push({ tokens: event.completionTokens, elapsedMs: event.elapsedMs });
