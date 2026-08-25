@@ -74,6 +74,34 @@ describe('production pipeline preparation', () => {
     expect(order.indexOf('fig-caption-asset')).toBe(order.indexOf('fig-caption') - 1);
   });
 
+  it('uses reconciled Vision assets instead of guessing from caption gaps and excludes visual labels from translation', () => {
+    const doc = fixtureDoc();
+    doc.blocks.push({
+      id: 'figure-label', docId: 'en', type: 'paragraph', pageIndex: 0,
+      rect: { x: 70, y: 260, w: 180, h: 20 }, order: 1.5,
+      text: 'Execution Trace Generation', splitAllowed: true, widthMode: 'column',
+    });
+    doc.semanticUnits.push({
+      id: 'figure-label', kind: 'paragraph', sourceText: 'Execution Trace Generation',
+      protectedTokens: [], layoutRegionId: 'r1', order: 1.5,
+    });
+    doc.layoutRegions[0].orderedUnitIds.splice(2, 0, 'figure-label');
+
+    const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: [{
+      id: 'vision-p1-figure-1', kind: 'figure', pageIndex: 0,
+      rect: { x: 55, y: 170, w: 220, h: 180 }, widthMode: 'column',
+      captionUnitId: 'fig-caption',
+    }] });
+
+    expect(prepared.assetRegions.filter((asset) => asset.kind === 'figure')).toEqual([
+      expect.objectContaining({ id: 'vision-p1-figure-1', rect: { x: 55, y: 170, w: 220, h: 180 } }),
+    ]);
+    expect(prepared.units.some((unit) => unit.id === 'figure-label')).toBe(false);
+    expect(prepared.regions[0].orderedUnitIds).not.toContain('figure-label');
+    expect(prepared.regions[0].orderedUnitIds.indexOf('vision-p1-figure-1'))
+      .toBe(prepared.regions[0].orderedUnitIds.indexOf('fig-caption') - 1);
+  });
+
   it('uses the repeated page header as the top boundary for side-by-side figures at the page top', () => {
     const doc = fixtureDoc();
     const runningHeader = 'ZK-Tracer: A High-Performance Heterogeneous Accelerator for Zero-Knowledge VM Trace Generation';

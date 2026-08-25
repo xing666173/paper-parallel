@@ -156,6 +156,34 @@ describe('translate: DeepSeek client', () => {
     });
   });
 
+  it('passes an original-detail page image to the Vision Exp model unchanged', async () => {
+    const requestBodies: string[] = [];
+    const fetchFn = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requestBodies.push(String(init?.body ?? ''));
+      return new Response(JSON.stringify({
+        choices: [{ finish_reason: 'stop', message: { content: '{"page":1,"layout":"single","regions":[]}' } }],
+        usage: { prompt_tokens: 20, completion_tokens: 5 },
+      }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    await chatCompletion({
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test',
+      model: 'deepseek-v4-flash-vision-exp', thinkingMode: 'disabled',
+      responseFormat: 'json_object', fetchFn,
+      messages: [{ role: 'user', content: [
+        { type: 'text', text: 'Analyze page 1.' },
+        { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA', detail: 'original' } },
+      ] }],
+    });
+
+    const body = JSON.parse(requestBodies[0]!);
+    expect(body.messages[0].content[1]).toEqual({
+      type: 'image_url',
+      image_url: { url: 'data:image/png;base64,AAAA', detail: 'original' },
+    });
+    expect(body.thinking).toEqual({ type: 'disabled' });
+  });
+
   it('normalizes an internal timeout without masking caller aborts', async () => {
     vi.useFakeTimers();
     const timedOut = chatCompletion({

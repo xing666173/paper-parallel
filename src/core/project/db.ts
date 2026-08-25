@@ -21,6 +21,7 @@ export type ProjectArtifactKind =
   | 'typst-source'
   | 'typst-preview'
   | 'alignment-manifest'
+  | 'vision-layout'
   | 'project-package';
 
 export interface ProjectArtifactRecord {

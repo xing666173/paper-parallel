@@ -137,6 +137,21 @@ export interface PreparedImmutableStructure {
   assetRegions: DetectedAssetRegion[];
 }
 
+export interface PrepareImmutableOptions {
+  /** Vision regions after protocol, confidence, coordinate and geometry reconciliation. */
+  verifiedAssetRegions?: readonly DetectedAssetRegion[];
+}
+
+function intersectionArea(left: { x: number; y: number; w: number; h: number }, right: { x: number; y: number; w: number; h: number }): number {
+  return Math.max(0, Math.min(left.x + left.w, right.x + right.w) - Math.max(left.x, right.x))
+    * Math.max(0, Math.min(left.y + left.h, right.y + right.h) - Math.max(left.y, right.y));
+}
+
+function materiallyCovered(block: Doc['blocks'][number], asset: DetectedAssetRegion): boolean {
+  if (block.pageIndex !== asset.pageIndex) return false;
+  return intersectionArea(block.rect, asset.rect) / Math.max(1, block.rect.w * block.rect.h) >= 0.5;
+}
+
 function visualColumn(block: Doc['blocks'][number], pageWidth: number): 'span' | 'left' | 'right' {
   if (block.widthMode === 'span') return 'span';
   return block.rect.x + block.rect.w / 2 < pageWidth / 2 ? 'left' : 'right';
@@ -187,11 +202,14 @@ function detectedPageFurnitureIds(doc: Doc): Set<string> {
   return ids;
 }
 
-export function prepareImmutableStructure(doc: Doc): PreparedImmutableStructure {
+export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOptions = {}): PreparedImmutableStructure {
   const regions = doc.layoutRegions.map((region) => ({ ...region, orderedUnitIds: [...region.orderedUnitIds] }));
   let units = doc.semanticUnits.map((unit) => ({ ...unit, protectedTokens: [...unit.protectedTokens] }));
   const blocks = new Map(doc.blocks.map((block) => [block.id, block]));
   const assetRegions: DetectedAssetRegion[] = [];
+  const verifiedAssetRegions = (options.verifiedAssetRegions ?? []).map((asset) => ({
+    ...asset, rect: { ...asset.rect },
+  }));
   const furnitureIds = detectedPageFurnitureIds(doc);
   if (furnitureIds.size) {
     units = units.filter((unit) => !furnitureIds.has(unit.id));
@@ -204,6 +222,7 @@ export function prepareImmutableStructure(doc: Doc): PreparedImmutableStructure 
     if (unit.kind !== 'formula' && unit.kind !== 'code' && unit.kind !== 'page-furniture') continue;
     const block = blocks.get(unit.id);
     if (!block) throw new Error(`不可变资产 ${unit.id} 缺少源坐标`);
+    if (verifiedAssetRegions.some((asset) => materiallyCovered(block, asset))) continue;
     assetRegions.push({
       id: unit.assetId ?? unit.id,
       kind: unit.kind,
@@ -213,7 +232,11 @@ export function prepareImmutableStructure(doc: Doc): PreparedImmutableStructure 
     });
   }
 
-  for (const caption of units.filter((unit) => unit.kind === 'caption' && isFigureCaptionText(unit.sourceText ?? ''))) {
+  for (const caption of units.filter((unit) => (
+    unit.kind === 'caption'
+    && isFigureCaptionText(unit.sourceText ?? '')
+    && !verifiedAssetRegions.some((asset) => asset.kind === 'figure' && asset.captionUnitId === unit.id)
+  ))) {
     const captionBlock = blocks.get(caption.id);
     const region = regions.find((candidate) => candidate.id === caption.layoutRegionId);
     if (!captionBlock || !region) throw new Error(`图注 ${caption.id} 缺少版式坐标`);
@@ -258,7 +281,11 @@ export function prepareImmutableStructure(doc: Doc): PreparedImmutableStructure 
     region.orderedUnitIds.splice(captionIndex, 0, id);
   }
 
-  for (const caption of units.filter((unit) => unit.kind === 'caption' && isTableCaptionText(unit.sourceText ?? ''))) {
+  for (const caption of units.filter((unit) => (
+    unit.kind === 'caption'
+    && isTableCaptionText(unit.sourceText ?? '')
+    && !verifiedAssetRegions.some((asset) => asset.kind === 'table' && asset.captionUnitId === unit.id)
+  ))) {
     const captionBlock = blocks.get(caption.id);
     const region = regions.find((candidate) => candidate.id === caption.layoutRegionId);
     if (!captionBlock || !region) throw new Error(`表题 ${caption.id} 缺少版式坐标`);
@@ -324,6 +351,53 @@ export function prepareImmutableStructure(doc: Doc): PreparedImmutableStructure 
     });
     const captionIndex = region.orderedUnitIds.indexOf(caption.id);
     region.orderedUnitIds.splice(captionIndex + 1, 0, id);
+  }
+
+  for (const asset of verifiedAssetRegions) {
+    const caption = asset.captionUnitId ? units.find((unit) => unit.id === asset.captionUnitId) : undefined;
+    if (asset.captionUnitId && !caption) throw new Error(`Vision 资产 ${asset.id} 缺少图表注 ${asset.captionUnitId}`);
+    const coveredBlocks = doc.blocks.filter((block) => block.id !== asset.captionUnitId && materiallyCovered(block, asset));
+    const coveredIds = new Set(coveredBlocks.map((block) => block.id));
+    const coveredUnits = units.filter((unit) => coveredIds.has(unit.id));
+    units = units.filter((unit) => !coveredIds.has(unit.id) && unit.id !== asset.id);
+    for (const candidateRegion of regions) {
+      candidateRegion.orderedUnitIds = candidateRegion.orderedUnitIds.filter((unitId) => (
+        !coveredIds.has(unitId) && unitId !== asset.id
+      ));
+    }
+
+    const page = doc.pages[asset.pageIndex];
+    if (!page) throw new Error(`Vision 资产 ${asset.id} 缺少页面尺寸`);
+    const centerX = asset.rect.x + asset.rect.w / 2;
+    const centerY = asset.rect.y + asset.rect.h / 2;
+    const region = (caption ? regions.find((candidate) => candidate.id === caption.layoutRegionId) : undefined)
+      ?? regions.find((candidate) => (
+        candidate.sourcePage === asset.pageIndex
+        && centerX >= candidate.bounds.x && centerX <= candidate.bounds.x + candidate.bounds.w
+        && centerY >= candidate.bounds.y && centerY <= candidate.bounds.y + candidate.bounds.h
+      ))
+      ?? regions.find((candidate) => candidate.sourcePage === asset.pageIndex);
+    if (!region) throw new Error(`Vision 资产 ${asset.id} 缺少版式区域`);
+
+    const coveredOrder = coveredUnits.length ? Math.min(...coveredUnits.map((unit) => unit.order)) : undefined;
+    const order = caption
+      ? caption.order + (asset.kind === 'figure' ? -0.1 : 0.1)
+      : coveredOrder ?? Math.max(0, ...units.map((unit) => unit.order)) + 0.1;
+    units.push({
+      id: asset.id, kind: asset.kind, protectedTokens: [], assetId: asset.id,
+      layoutRegionId: region.id, order,
+    });
+    const captionIndex = caption ? region.orderedUnitIds.indexOf(caption.id) : -1;
+    if (captionIndex >= 0) {
+      region.orderedUnitIds.splice(captionIndex + (asset.kind === 'figure' ? 0 : 1), 0, asset.id);
+    } else {
+      const nextIndex = region.orderedUnitIds.findIndex((unitId) => {
+        const unit = units.find((candidate) => candidate.id === unitId);
+        return unit ? unit.order > order : false;
+      });
+      region.orderedUnitIds.splice(nextIndex < 0 ? region.orderedUnitIds.length : nextIndex, 0, asset.id);
+    }
+    assetRegions.push(asset);
   }
 
   for (const asset of assetRegions) {

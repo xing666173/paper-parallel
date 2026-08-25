@@ -21,3 +21,22 @@ export function buildTranslationCacheKey(value: TranslationCacheIdentity): strin
     .map(encodeURIComponent)
     .join(':');
 }
+
+export interface VisionLayoutCacheIdentity {
+  fileHash: string;
+  pageIndex: number;
+  modelId: string;
+  promptVersion: string;
+  renderVersion: string;
+}
+
+export function buildVisionLayoutCacheKey(value: VisionLayoutCacheIdentity): string {
+  return [
+    'vision-layout',
+    value.fileHash,
+    String(value.pageIndex),
+    value.modelId,
+    value.promptVersion,
+    value.renderVersion,
+  ].map(encodeURIComponent).join(':');
+}

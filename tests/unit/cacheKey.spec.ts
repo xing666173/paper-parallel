@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildTranslationCacheKey } from '../../src/core/project/cacheKey';
+import { buildTranslationCacheKey, buildVisionLayoutCacheKey } from '../../src/core/project/cacheKey';
 
 describe('translation cache identity', () => {
   const base = {
@@ -32,5 +32,22 @@ describe('translation cache identity', () => {
     expect(buildTranslationCacheKey({ ...base, fileHash: 'sha256:a:b' })).not.toBe(
       buildTranslationCacheKey({ ...base, fileHash: 'sha256:a', promptVersion: 'b:academic-json-v2' }),
     );
+  });
+});
+
+describe('vision layout cache key', () => {
+  it('changes for the source, page, model, prompt, or renderer version', () => {
+    const base = {
+      fileHash: 'sha256:paper', pageIndex: 0,
+      modelId: 'deepseek-v4-flash-vision-exp', promptVersion: 'vision-v1', renderVersion: 'pdfjs-2x-v1',
+    };
+    const key = buildVisionLayoutCacheKey(base);
+    for (const changed of [
+      { ...base, fileHash: 'sha256:other' },
+      { ...base, pageIndex: 1 },
+      { ...base, modelId: 'other-model' },
+      { ...base, promptVersion: 'vision-v2' },
+      { ...base, renderVersion: 'pdfjs-3x-v1' },
+    ]) expect(buildVisionLayoutCacheKey(changed)).not.toBe(key);
   });
 });

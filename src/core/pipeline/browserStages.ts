@@ -30,6 +30,9 @@ import { resolveSourceGeometry } from '../align/sourceGeometry';
 import { buildAlignmentManifest, type AlignmentManifest } from '../align/manifest';
 import { runAlignmentGate } from '../quality/alignmentGate';
 import type { ImmutableAsset } from '../assets/types';
+import { analyzePdfLayoutWithVision } from '../vision/analyze';
+import { reconcileVisionLayout } from '../vision/reconcile';
+import { serializeVisionPageAnalysis } from '../vision/protocol';
 
 const SESSION_KEY_STORAGE = 'paper-parallel.deepseek-key-session';
 const LOCAL_KEY_STORAGE = 'paper-parallel.deepseek-key';
@@ -151,11 +154,37 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
       return { ...current, settings, sourcePdf: pdf, doc };
     },
 
-    async analyzeLayout(input) {
+    async analyzeLayout(input, signal) {
       const current = value(input);
       const doc = requireValue(current.doc, '解析文档缺失');
       const pdf = requireValue(current.sourcePdf, '源 PDF 缺失');
-      const prepared = prepareImmutableStructure(doc);
+      if (!apiKey.trim()) throw new Error('Vision Exp 版式识别需要 DeepSeek API Key，请返回上传页重新验证');
+      const analyses = await analyzePdfLayoutWithVision({
+        pdf,
+        baseUrl: options.baseUrl ?? 'https://api.deepseek.com',
+        apiKey,
+        fileHash: settings.sourceFileHash,
+        signal,
+        loadCached: async (key) => {
+          const artifact = await options.repository.findArtifact(key);
+          return artifact ? JSON.parse(await artifact.blob.text()) : undefined;
+        },
+        saveCached: async (key, _pageIndex, analysis) => options.repository.putArtifact({
+          key,
+          projectId: options.projectId,
+          kind: 'vision-layout',
+          blob: new Blob([JSON.stringify(serializeVisionPageAnalysis(analysis))], { type: 'application/json' }),
+          updatedAt: Date.now(),
+        }),
+      });
+      const reconciled = reconcileVisionLayout(doc, analyses);
+      if (reconciled.unresolved.length) {
+        const details = reconciled.unresolved.map((item) => (
+          `第 ${item.pageIndex + 1} 页区域 ${item.regionIndex + 1}: ${item.reason}`
+        )).join('；');
+        throw new Error(`Vision Exp 版式结果未通过本地协调：${details}`);
+      }
+      const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: reconciled.assetRegions });
       const assets = await extractImmutableAssets(prepared.assetRegions, {
         crop: async (region) => cropPageRegionLossless(await pdf.getPage(region.pageIndex + 1), region.rect, 4),
       });
