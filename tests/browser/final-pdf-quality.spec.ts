@@ -29,12 +29,12 @@ async function waitForPipelineTerminal(page: import('@playwright/test').Page): P
   let lastSnapshot = '尚未进入处理页';
   while (Date.now() < deadline) {
     if (/#\/task\/pp-[a-f0-9]{64}\/read(?:\?|$)/.test(page.url())) return 'reader';
-    if (await page.locator('.quality-error').isVisible().catch(() => false)) {
-      throw new Error(await page.locator('.quality-error').innerText());
+    if (await page.locator('.quality-error').isVisible({ timeout: 2_000 }).catch(() => false)) {
+      throw new Error(await page.locator('.quality-error').innerText({ timeout: 2_000 }));
     }
-    const stage = await page.locator('[data-stage].is-current strong').innerText().catch(() => '页面跳转中');
-    const progress = await page.locator('.progress-number-row').innerText().catch(() => '进度不可用');
-    const lastLog = await page.locator('.log-entry').last().innerText().catch(() => '等待首条日志');
+    const stage = await page.locator('[data-stage].is-current strong').innerText({ timeout: 2_000 }).catch(() => '页面跳转中');
+    const progress = await page.locator('.progress-number-row').innerText({ timeout: 2_000 }).catch(() => '进度不可用');
+    const lastLog = await page.locator('.log-entry').last().innerText({ timeout: 2_000 }).catch(() => '等待首条日志');
     lastSnapshot = `stage=${stage}; progress=${progress.replace(/\s+/g, ' ')}; log=${lastLog.replace(/\s+/g, ' ')}`;
     console.log(`[real-api heartbeat] ${lastSnapshot}`);
     await page.waitForTimeout(15_000);
@@ -49,6 +49,18 @@ test('real API exact-paper PDF quality acceptance', async ({ page }) => {
 
   try {
     await page.goto('/');
+    page.on('console', (message) => {
+      if (message.text().startsWith('[page heartbeat]')) console.log(message.text());
+    });
+    await page.evaluate(() => {
+      window.setInterval(() => {
+        const stage = document.querySelector('[data-stage].is-current strong')?.textContent?.trim() ?? '页面跳转中';
+        const progress = document.querySelector('.progress-number-row')?.textContent?.replace(/\s+/g, ' ').trim() ?? '进度不可用';
+        const logs = document.querySelectorAll('.log-entry');
+        const lastLog = logs.item(logs.length - 1)?.textContent?.replace(/\s+/g, ' ').trim() ?? '等待首条日志';
+        console.log(`[page heartbeat] stage=${stage}; progress=${progress}; log=${lastLog}`);
+      }, 5_000);
+    });
     await page.locator('[data-field="pdf"]').setInputFiles(SOURCE_PDF);
     await page.locator('[data-field="api-key"]').fill(API_KEY);
     await page.getByLabel('思考模式').selectOption('disabled');
