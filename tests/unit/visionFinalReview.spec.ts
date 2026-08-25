@@ -40,7 +40,7 @@ describe('vision: final PDF review', () => {
     }, 0).issues[0]?.bbox).toEqual([100, 200, 300, 40]);
   });
 
-  it('maps naturally repaginated target pages to the dominant aligned source pages', () => {
+  it('maps naturally repaginated target pages to the single dominant aligned source page', () => {
     const mapping = buildTargetSourcePageMap({
       units: [
         { source: [{ page: 0, rects: [{}] }], target: [{ page: 0, rects: [{}] }] },
@@ -48,7 +48,7 @@ describe('vision: final PDF review', () => {
         { source: [{ page: 2, rects: [{}] }], target: [{ page: 1, rects: [{}] }] },
       ],
     } as any, 2, 3);
-    expect(mapping).toEqual([[1, 0], [2]]);
+    expect(mapping).toEqual([[1], [2]]);
   });
 
   it('reviews source/target images with Vision Exp, thinking disabled and original detail', async () => {
@@ -162,6 +162,7 @@ describe('vision: final PDF review', () => {
       baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test',
       pageTimeoutMs: 20,
       renderPage: async () => 'data:image/png;base64,page',
+      onPageTimeout: () => { throw new Error('diagnostic callback failed'); },
       complete: async () => new Promise(() => undefined),
     })).rejects.toThrow('第 1/1 页超过 1 秒');
   });

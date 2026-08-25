@@ -97,7 +97,7 @@ export function buildTargetSourcePageMap(
     const ranked = [...scores.entries()]
       .filter(([page]) => page >= 0 && page < sourcePageCount)
       .sort((left, right) => right[1] - left[1] || left[0] - right[0])
-      .slice(0, 2)
+      .slice(0, 1)
       .map(([page]) => page);
     if (ranked.length) return ranked;
     return [Math.min(sourcePageCount - 1, Math.floor(targetPageIndex / Math.max(1, targetPageCount) * sourcePageCount))];
@@ -150,13 +150,13 @@ async function withPageDeadline<T>(
       const waitBucket = Math.floor(elapsedMs / 15_000);
       if (waitBucket > lastReportedWait) {
         lastReportedWait = waitBucket;
-        onWait?.(elapsedMs);
+        try { onWait?.(elapsedMs); } catch { /* diagnostics must never disable the watchdog */ }
       }
       if (elapsedMs < timeoutMs) return;
       timedOut = true;
-      onTimeout?.();
       controller.abort();
       reject(timeoutError());
+      try { onTimeout?.(); } catch { /* cancellation already happened */ }
     }, Math.min(1_000, Math.max(10, timeoutMs)));
   });
   try {
