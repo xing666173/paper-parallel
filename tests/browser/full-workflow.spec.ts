@@ -14,10 +14,12 @@ async function mockDeepSeek(
   options: { firstTranslationDelayMs?: number; firstProtocolError?: boolean; firstValidationError?: boolean } = {},
 ): Promise<{
   translatedBatches: () => number;
-  translationRequests: () => Array<{ maxTokens: number; thinking: string; blockCount: number }>;
+  translationRequests: () => Array<{ maxTokens: number; thinking: string; blockCount: number; stream: boolean }>;
 }> {
   let translatedBatches = 0;
-  const translationRequests: Array<{ maxTokens: number; thinking: string; blockCount: number }> = [];
+  const translationRequests: Array<{
+    maxTokens: number; thinking: string; blockCount: number; stream: boolean;
+  }> = [];
 
   await page.route('https://api.deepseek.com/models', async (route) => {
     expect(route.request().headers().authorization).toBe(`Bearer ${FAKE_KEY}`);
@@ -36,6 +38,7 @@ async function mockDeepSeek(
       messages: Array<{ role: string; content: string }>;
       max_tokens: number;
       thinking?: { type?: string };
+      stream?: boolean;
     };
     const userMessage = [...request.messages].reverse().find((message) => message.role === 'user')?.content ?? '';
     let content = 'pong';
@@ -47,6 +50,7 @@ async function mockDeepSeek(
         maxTokens: request.max_tokens,
         thinking: request.thinking?.type ?? 'missing',
         blockCount: prompt.blocks.length,
+        stream: request.stream === true,
       });
       if (translatedBatches === 1 && options.firstTranslationDelayMs) {
         await new Promise((resolve) => setTimeout(resolve, options.firstTranslationDelayMs));
@@ -82,14 +86,33 @@ async function mockDeepSeek(
         });
     }
 
-    await route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({
-        choices: [{ message: { content } }],
-        usage: { prompt_tokens: 120, completion_tokens: 80 },
-      }),
-    });
+    if (request.stream) {
+      const events = [
+        {
+          choices: [{ delta: { reasoning_content: 'mock reasoning' }, finish_reason: null }],
+          usage: null,
+        },
+        {
+          choices: [{ delta: { content }, finish_reason: 'stop' }],
+          usage: null,
+        },
+        { choices: [], usage: { prompt_tokens: 120, completion_tokens: 80 } },
+      ];
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        body: `${events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('')}data: [DONE]\n\n`,
+      });
+    } else {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          choices: [{ message: { content } }],
+          usage: { prompt_tokens: 120, completion_tokens: 80 },
+        }),
+      });
+    }
   });
 
   return {
@@ -141,8 +164,11 @@ test('uploads a mixed-layout PDF and reaches the synchronized dual-PDF reader', 
   expect(ordinaryRequests.every((request) => (
     request.maxTokens === 32_768
     && request.blockCount <= 8
+    && request.stream
   ))).toBe(true);
-  expect(recoveryRequests).toEqual([{ maxTokens: 16_384, thinking: 'disabled', blockCount: 1 }]);
+  expect(recoveryRequests).toEqual([{
+    maxTokens: 16_384, thinking: 'disabled', blockCount: 1, stream: true,
+  }]);
   expect(pageErrors).toEqual([]);
   expect(await page.evaluate(() => localStorage.getItem('paper-parallel.deepseek-key'))).toBeNull();
 });

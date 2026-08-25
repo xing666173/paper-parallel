@@ -15,6 +15,7 @@ export interface TaskStoreDependencies {
 export interface AiLogEntry {
   at: number;
   type: AiLogEvent['type'];
+  batchId?: string;
   message: string;
 }
 
@@ -26,6 +27,14 @@ function projectAiMessage(event: AiLogEvent): string {
       return `开始批次 ${event.batchId}，共 ${event.blockIds.length} 个文本块`;
     case 'batch-received':
       return `批次 ${event.batchId} 已返回，用时 ${event.elapsedMs} ms`;
+    case 'batch-progress': {
+      const phase = event.phase === 'connected'
+        ? '已建立连接'
+        : event.phase === 'reasoning'
+          ? '模型思考中'
+          : `生成译文中（已接收 ${event.receivedContentChars} 个字符）`;
+      return `批次 ${event.batchId} 正在流式接收：${phase}`;
+    }
     case 'batch-validated':
       return `批次 ${event.batchId} 校验通过`;
     case 'cache-hit':
@@ -57,9 +66,24 @@ export function createTaskStore(dependencies: TaskStoreDependencies, id = 'task'
     let activeRunToken: symbol | null = null;
 
     function recordAiEvent(event: AiLogEvent): void {
-      aiLog.value.push({ at: event.at, type: event.type, message: projectAiMessage(event) });
+      const entry: AiLogEntry = {
+        at: event.at,
+        type: event.type,
+        ...('batchId' in event ? { batchId: event.batchId } : {}),
+        message: projectAiMessage(event),
+      };
+      if (event.type === 'batch-progress') {
+        for (let index = aiLog.value.length - 1; index >= 0; index -= 1) {
+          const previous = aiLog.value[index];
+          if (previous?.type === 'batch-progress' && previous.batchId === event.batchId) {
+            aiLog.value.splice(index, 1);
+            break;
+          }
+        }
+      }
+      aiLog.value.push(entry);
       if (aiLog.value.length > 200) aiLog.value.splice(0, aiLog.value.length - 200);
-      if (event.type === 'batch-received' || event.type === 'batch-split') {
+      if (event.type === 'batch-received' || event.type === 'batch-progress' || event.type === 'batch-split') {
         lastResponseAt.value = event.at;
         if (event.type === 'batch-received' && event.completionTokens > 0 && event.elapsedMs > 0) {
           throughputSamples.value.push({ tokens: event.completionTokens, elapsedMs: event.elapsedMs });

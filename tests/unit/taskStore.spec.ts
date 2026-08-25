@@ -58,6 +58,47 @@ describe('project task store', () => {
     expect(store.lastResponseAt).toBe(1);
   });
 
+  it('coalesces streaming heartbeats while keeping the latest phase visible', () => {
+    const { store } = setupStore();
+    store.recordAiEvent({
+      type: 'batch-started', at: 1, batchId: 'batch-1', blockIds: ['b1'], modelId: 'deepseek-v4-pro',
+    });
+    store.recordAiEvent({
+      type: 'batch-progress', at: 2, batchId: 'batch-1', phase: 'reasoning', receivedContentChars: 0,
+    });
+    store.recordAiEvent({
+      type: 'batch-progress', at: 3, batchId: 'batch-1', phase: 'reasoning', receivedContentChars: 0,
+    });
+    store.recordAiEvent({
+      type: 'batch-progress', at: 4, batchId: 'batch-1', phase: 'content', receivedContentChars: 128,
+    });
+
+    expect(store.aiLog).toHaveLength(2);
+    expect(store.aiLog.at(-1)).toMatchObject({
+      at: 4,
+      type: 'batch-progress',
+      message: '批次 batch-1 正在流式接收：生成译文中（已接收 128 个字符）',
+    });
+    expect(store.lastResponseAt).toBe(4);
+  });
+
+  it('keeps concurrent batch heartbeats separate', () => {
+    const { store } = setupStore();
+    store.recordAiEvent({
+      type: 'batch-progress', at: 1, batchId: 'batch-1', phase: 'reasoning', receivedContentChars: 0,
+    });
+    store.recordAiEvent({
+      type: 'batch-progress', at: 2, batchId: 'batch-2', phase: 'reasoning', receivedContentChars: 0,
+    });
+    store.recordAiEvent({
+      type: 'batch-progress', at: 3, batchId: 'batch-1', phase: 'content', receivedContentChars: 64,
+    });
+
+    expect(store.aiLog).toHaveLength(2);
+    expect(store.aiLog.map((entry) => entry.batchId)).toEqual(['batch-2', 'batch-1']);
+    expect(store.aiLog.at(-1)?.message).toContain('已接收 64 个字符');
+  });
+
   it('safely stops active work, preserves validated progress, and persists stopped state', async () => {
     const { store, repository } = setupStore();
     const task = reduceTaskEvent(runningTranslationTask(), {

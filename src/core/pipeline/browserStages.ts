@@ -192,6 +192,7 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
         glossaryHash: JSON.stringify(glossary),
         blockId: block.blockId,
       });
+      const streamHeartbeat = new Map<string, { at: number; phase: 'connected' | 'reasoning' | 'content' }>();
       const result = await runTranslationTask({
         projectId: options.projectId,
         modelId: settings.modelId,
@@ -228,6 +229,17 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
             apiKey, model: settings.modelId, thinkingMode: requestThinkingMode,
             responseFormat: 'json_object', signal: batchSignal, timeoutMs: 120_000,
             maxTokens: translationLimitsFor(requestThinkingMode).maxOutputTokens,
+            stream: true,
+            onStreamProgress: (progress) => {
+              const at = Date.now();
+              const previous = streamHeartbeat.get(batch.id);
+              if (previous && previous.phase === progress.phase && at - previous.at < 2_000) return;
+              streamHeartbeat.set(batch.id, { at, phase: progress.phase });
+              options.onAiEvent?.({
+                type: 'batch-progress', at, batchId: batch.id,
+                phase: progress.phase, receivedContentChars: progress.receivedContentChars,
+              });
+            },
             messages: [
               { role: 'system', content: [buildSystemPrompt(), recoveryInstruction].filter(Boolean).join('\n') },
               { role: 'user', content: buildBatchPrompt(requestBody) },

@@ -29,6 +29,13 @@ export interface ChatCompletionOptions extends DeepSeekConnectionOptions {
   temperature?: number;
   maxTokens?: number;
   timeoutMs?: number;
+  stream?: boolean;
+  onStreamProgress?(progress: ChatStreamProgress): void;
+}
+
+export interface ChatStreamProgress {
+  phase: 'connected' | 'reasoning' | 'content';
+  receivedContentChars: number;
 }
 
 export interface ChatUsage {
@@ -55,6 +62,13 @@ export class DeepSeekInsufficientBalanceError extends Error {
   }
 }
 
+export class DeepSeekTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`DeepSeek 请求超时：连续 ${Math.ceil(timeoutMs / 1_000)} 秒未收到响应数据`);
+    this.name = 'DeepSeekTimeoutError';
+  }
+}
+
 export const CURRENT_DEEPSEEK_MODELS: readonly DeepSeekModel[] = [
   { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash' },
   { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
@@ -74,6 +88,135 @@ export function buildChatUrl(baseUrl: string): string {
 
 function abortError(): DOMException {
   return new DOMException('Aborted', 'AbortError');
+}
+
+interface RequestLifetime {
+  signal: AbortSignal;
+  wait<T>(operation: Promise<T>): Promise<T>;
+  heartbeat(): void;
+  close(): void;
+}
+
+function createRequestLifetime(timeoutMs: number, outerSignal?: AbortSignal): RequestLifetime {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let closed = false;
+  let rejectGate!: (error: unknown) => void;
+  const gate = new Promise<never>((_resolve, reject) => { rejectGate = reject; });
+
+  const rejectAndAbort = (error: unknown): void => {
+    if (closed) return;
+    closed = true;
+    if (timer) clearTimeout(timer);
+    rejectGate(error);
+    controller.abort();
+  };
+  const armWatchdog = (): void => {
+    if (closed) return;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => rejectAndAbort(new DeepSeekTimeoutError(timeoutMs)), timeoutMs);
+  };
+  const onOuterAbort = (): void => rejectAndAbort(abortError());
+  outerSignal?.addEventListener('abort', onOuterAbort, { once: true });
+  armWatchdog();
+
+  return {
+    signal: controller.signal,
+    wait: <T>(operation: Promise<T>) => Promise.race([operation, gate]),
+    heartbeat: armWatchdog,
+    close: () => {
+      if (!closed) {
+        closed = true;
+        if (timer) clearTimeout(timer);
+      }
+      outerSignal?.removeEventListener('abort', onOuterAbort);
+    },
+  };
+}
+
+interface StreamChunk {
+  choices?: Array<{
+    delta?: { content?: string | null; reasoning_content?: string | null };
+    finish_reason?: string | null;
+  }>;
+  usage?: { prompt_tokens?: number; completion_tokens?: number } | null;
+}
+
+async function readStreamingCompletion(
+  response: Response,
+  lifetime: RequestLifetime,
+  onProgress?: (progress: ChatStreamProgress) => void,
+): Promise<{
+  content: string;
+  finishReason: string;
+  reasoningPresent: boolean;
+  usage: ChatUsage;
+}> {
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error('DeepSeek 流式响应缺少正文');
+
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let content = '';
+  let finishReason = 'missing';
+  let reasoningPresent = false;
+  let doneReceived = false;
+  const usage: ChatUsage = { promptTokens: 0, completionTokens: 0 };
+
+  const consumeEvent = (eventText: string): void => {
+    const data = eventText.split('\n')
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).trimStart())
+      .join('\n');
+    if (!data) return;
+    if (data.trim() === '[DONE]') {
+      doneReceived = true;
+      return;
+    }
+    const chunk = JSON.parse(data) as StreamChunk;
+    const choice = chunk.choices?.[0];
+    const reasoningDelta = choice?.delta?.reasoning_content ?? '';
+    const contentDelta = choice?.delta?.content ?? '';
+    if (reasoningDelta) reasoningPresent = true;
+    if (contentDelta) content += contentDelta;
+    if (choice?.finish_reason) finishReason = choice.finish_reason;
+    if (chunk.usage) {
+      usage.promptTokens = chunk.usage.prompt_tokens ?? usage.promptTokens;
+      usage.completionTokens = chunk.usage.completion_tokens ?? usage.completionTokens;
+    }
+    if (reasoningDelta) onProgress?.({ phase: 'reasoning', receivedContentChars: content.length });
+    if (contentDelta) onProgress?.({ phase: 'content', receivedContentChars: content.length });
+  };
+
+  try {
+    while (!doneReceived) {
+      const { done, value } = await lifetime.wait(reader.read());
+      if (done) break;
+      lifetime.heartbeat();
+      buffer += decoder.decode(value, { stream: true });
+      buffer = buffer.replace(/\r\n/g, '\n');
+      let boundary = buffer.indexOf('\n\n');
+      while (boundary >= 0) {
+        consumeEvent(buffer.slice(0, boundary));
+        buffer = buffer.slice(boundary + 2);
+        boundary = buffer.indexOf('\n\n');
+      }
+    }
+    buffer += decoder.decode();
+    if (buffer.trim()) consumeEvent(buffer);
+    if (!doneReceived) throw new Error('DeepSeek 流式响应在完成前中断');
+
+    return { content, finishReason, reasoningPresent, usage };
+  } finally {
+    try {
+      const cancellation = reader.cancel();
+      void cancellation.catch(() => undefined).then(() => {
+        try { reader.releaseLock(); } catch { /* Pending transports must not block the caller. */ }
+      });
+    } catch {
+      try { reader.releaseLock(); } catch { /* Pending transports must not block the caller. */ }
+    }
+  }
 }
 
 export async function listModels(opts: DeepSeekConnectionOptions): Promise<DeepSeekModel[]> {
@@ -104,81 +247,79 @@ export async function chatCompletion(opts: ChatCompletionOptions): Promise<ChatC
   if (opts.signal?.aborted) throw abortError();
 
   const fetchImpl = opts.fetchFn ?? fetch;
-  const controller = new AbortController();
-  let timedOut = false;
   const timeoutMs = opts.timeoutMs ?? 120_000;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, timeoutMs);
-  const onOuterAbort = () => controller.abort();
-  opts.signal?.addEventListener('abort', onOuterAbort, { once: true });
+  const lifetime = createRequestLifetime(timeoutMs, opts.signal);
 
   const body: Record<string, unknown> = {
     model: opts.model,
     messages: opts.messages,
     max_tokens: opts.maxTokens ?? 4096,
-    stream: false,
+    stream: opts.stream ?? false,
   };
+  if (opts.stream) body.stream_options = { include_usage: true };
   if (opts.thinkingMode) body.thinking = { type: opts.thinkingMode };
   if (opts.responseFormat) body.response_format = { type: opts.responseFormat };
   if (opts.thinkingMode !== 'enabled') body.temperature = opts.temperature ?? 0.2;
 
-  let response: Response;
   try {
-    response = await fetchImpl(buildChatUrl(opts.baseUrl), {
+    const response = await lifetime.wait(fetchImpl(buildChatUrl(opts.baseUrl), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${opts.apiKey}`,
       },
       body: JSON.stringify(body),
-      signal: controller.signal,
-    });
+      signal: lifetime.signal,
+    }));
+    lifetime.heartbeat();
+
+    if (!response.ok) {
+      if (response.status === 402) throw new DeepSeekInsufficientBalanceError();
+      throw new Error(`DeepSeek HTTP ${response.status}`);
+    }
+
+    let content: string | null | undefined;
+    let finishReason: string;
+    let reasoningPresent: boolean;
+    let usage: ChatUsage;
+    if (opts.stream) {
+      opts.onStreamProgress?.({ phase: 'connected', receivedContentChars: 0 });
+      const streamed = await readStreamingCompletion(response, lifetime, opts.onStreamProgress);
+      ({ content, finishReason, reasoningPresent, usage } = streamed);
+    } else {
+      const data = (await lifetime.wait(response.json())) as {
+        choices?: {
+          finish_reason?: string | null;
+          message?: { content?: string | null; reasoning_content?: string | null };
+        }[];
+        usage?: { prompt_tokens?: number; completion_tokens?: number };
+      };
+      const choice = data.choices?.[0];
+      content = choice?.message?.content;
+      finishReason = choice?.finish_reason ?? 'missing';
+      reasoningPresent = Boolean(choice?.message?.reasoning_content);
+      usage = {
+        promptTokens: data.usage?.prompt_tokens ?? 0,
+        completionTokens: data.usage?.completion_tokens ?? 0,
+      };
+    }
+
+    const reasoningState = reasoningPresent ? 'present' : 'absent';
+    const outputDiagnostic = `finish_reason=${finishReason}, completion_tokens=${usage.completionTokens}, prompt_tokens=${usage.promptTokens}, reasoning_content=${reasoningState}`;
+    if (finishReason === 'length') {
+      throw new DeepSeekOutputLimitError(`DeepSeek 本次响应达到最大生成长度（这不是账户余额不足；${outputDiagnostic}）`);
+    }
+    if (!content?.trim()) {
+      const message = `DeepSeek 未返回最终内容（${outputDiagnostic}）`;
+      if (reasoningPresent) throw new DeepSeekOutputLimitError(message);
+      throw new Error(message);
+    }
+
+    return { content, usage };
   } catch (error) {
-    if (timedOut) throw new Error('DeepSeek 请求超时');
     if (opts.signal?.aborted) throw abortError();
     throw error;
   } finally {
-    clearTimeout(timer);
-    opts.signal?.removeEventListener('abort', onOuterAbort);
+    lifetime.close();
   }
-
-  if (!response.ok) {
-    if (response.status === 402) throw new DeepSeekInsufficientBalanceError();
-    throw new Error(`DeepSeek HTTP ${response.status}`);
-  }
-
-  const data = (await response.json()) as {
-    choices?: {
-      finish_reason?: string | null;
-      message?: { content?: string | null; reasoning_content?: string | null };
-    }[];
-    usage?: { prompt_tokens?: number; completion_tokens?: number };
-  };
-  const choice = data.choices?.[0];
-  const content = choice?.message?.content;
-  const finishReason = choice?.finish_reason ?? 'missing';
-  const completionTokens = data.usage?.completion_tokens ?? 0;
-  const promptTokens = data.usage?.prompt_tokens ?? 0;
-  const reasoningState = choice?.message?.reasoning_content ? 'present' : 'absent';
-  const outputDiagnostic = `finish_reason=${finishReason}, completion_tokens=${completionTokens}, prompt_tokens=${promptTokens}, reasoning_content=${reasoningState}`;
-  if (finishReason === 'length') {
-    throw new DeepSeekOutputLimitError(`DeepSeek 本次响应达到最大生成长度（这不是账户余额不足；${outputDiagnostic}）`);
-  }
-  if (!content?.trim()) {
-    const message = `DeepSeek 未返回最终内容（${outputDiagnostic}）`;
-    if (reasoningState === 'present') {
-      throw new DeepSeekOutputLimitError(message);
-    }
-    throw new Error(message);
-  }
-
-  return {
-    content,
-    usage: {
-      promptTokens: data.usage?.prompt_tokens ?? 0,
-      completionTokens: data.usage?.completion_tokens ?? 0,
-    },
-  };
 }

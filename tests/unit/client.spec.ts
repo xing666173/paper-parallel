@@ -13,6 +13,52 @@ function pendingUntilAbortFetch(): typeof fetch {
   })) as typeof fetch;
 }
 
+function responseBodyThatNeverSettlesFetch(): typeof fetch {
+  return (async () => new Response(new ReadableStream<Uint8Array>({
+    start() {
+      // Intentionally ignore cancellation to model a stalled browser/network body.
+    },
+  }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  })) as typeof fetch;
+}
+
+function fragmentedSseFetch(chunks: string[], requestBodies: string[]): typeof fetch {
+  return (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    requestBodies.push(String(init?.body ?? ''));
+    const encoder = new TextEncoder();
+    return new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+        controller.close();
+      },
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+    });
+  }) as typeof fetch;
+}
+
+function sseThatHeartbeatsThenStallsFetch(cancelled: { count: number }): typeof fetch {
+  return (async () => {
+    const encoder = new TextEncoder();
+    return new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(
+          'data: {"choices":[{"delta":{"reasoning_content":"working"},"finish_reason":null}],"usage":null}\n\n',
+        ));
+      },
+      cancel() {
+        cancelled.count += 1;
+      },
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+    });
+  }) as typeof fetch;
+}
+
 describe('translate: DeepSeek client', () => {
   afterEach(() => vi.useRealTimers());
 
@@ -124,6 +170,105 @@ describe('translate: DeepSeek client', () => {
     });
     controller.abort();
     await expect(aborted).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('times out while a response body is stalled even when the transport ignores abort', async () => {
+    vi.useFakeTimers();
+    let outcome: unknown = 'pending';
+    const request = chatCompletion({
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test', model: 'deepseek-v4-flash',
+      messages: [], fetchFn: responseBodyThatNeverSettlesFetch(), timeoutMs: 25,
+    });
+    void request.catch((error) => { outcome = error; });
+
+    await vi.advanceTimersByTimeAsync(25);
+
+    expect(outcome).toMatchObject({ name: 'DeepSeekTimeoutError' });
+  });
+
+  it('honors caller cancellation while a response body is stalled', async () => {
+    const controller = new AbortController();
+    let outcome: unknown = 'pending';
+    const request = chatCompletion({
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test', model: 'deepseek-v4-flash',
+      messages: [], fetchFn: responseBodyThatNeverSettlesFetch(), signal: controller.signal,
+    });
+    void request.catch((error) => { outcome = error; });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    controller.abort();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(outcome).toMatchObject({ name: 'AbortError' });
+  });
+
+  it('parses fragmented DeepSeek SSE and reports reasoning/content heartbeat without retaining reasoning', async () => {
+    const requestBodies: string[] = [];
+    const progress: Array<{ phase: string; receivedContentChars: number }> = [];
+    const fetchFn = fragmentedSseFetch([
+      'data: {"choices":[{"delta":{"reasoning_content":"private thought"},"finish_reason":null}],"usage":null}\n\n',
+      'data: {"choices":[{"delta":{"content":"{\\"blocks\\":"},"finish_reason":null}],"usage":null}\n',
+      '\ndata: {"choices":[{"delta":{"content":"[]}"},"finish_reason":"stop"}],"usage":null}\n\n',
+      'data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":7}}\n\ndata: [DO',
+      'NE]\n\n',
+    ], requestBodies);
+
+    const result = await chatCompletion({
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test', model: 'deepseek-v4-pro',
+      thinkingMode: 'enabled', responseFormat: 'json_object', messages: [], fetchFn,
+      stream: true,
+      onStreamProgress: (event) => { progress.push(event); },
+    });
+
+    expect(result).toEqual({
+      content: '{"blocks":[]}',
+      usage: { promptTokens: 12, completionTokens: 7 },
+    });
+    expect(JSON.parse(requestBodies[0]!)).toMatchObject({
+      stream: true,
+      stream_options: { include_usage: true },
+    });
+    expect(progress.map((event) => event.phase)).toContain('reasoning');
+    expect(progress.map((event) => event.phase)).toContain('content');
+    expect(JSON.stringify(result)).not.toContain('private thought');
+  });
+
+  it('cancels a stalled SSE reader when the inactivity watchdog expires', async () => {
+    vi.useFakeTimers();
+    const cancelled = { count: 0 };
+    let outcome: unknown = 'pending';
+    const request = chatCompletion({
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test', model: 'deepseek-v4-pro',
+      messages: [], fetchFn: sseThatHeartbeatsThenStallsFetch(cancelled),
+      stream: true, timeoutMs: 25,
+    });
+    void request.catch((error) => { outcome = error; });
+
+    await vi.advanceTimersByTimeAsync(25);
+
+    expect(outcome).toMatchObject({ name: 'DeepSeekTimeoutError' });
+    expect(cancelled.count).toBe(1);
+  });
+
+  it('cancels a stalled SSE reader when the caller stops the task', async () => {
+    const controller = new AbortController();
+    const cancelled = { count: 0 };
+    let outcome: unknown = 'pending';
+    const request = chatCompletion({
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test', model: 'deepseek-v4-pro',
+      messages: [], fetchFn: sseThatHeartbeatsThenStallsFetch(cancelled),
+      stream: true, signal: controller.signal,
+    });
+    void request.catch((error) => { outcome = error; });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    controller.abort();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(outcome).toMatchObject({ name: 'AbortError' });
+    expect(cancelled.count).toBe(1);
   });
 
   it('throws an error containing the HTTP status for non-2xx responses', async () => {
