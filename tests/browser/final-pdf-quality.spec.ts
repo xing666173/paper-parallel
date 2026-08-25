@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { chromium, expect, test } from '@playwright/test';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -42,10 +42,19 @@ async function waitForPipelineTerminal(page: import('@playwright/test').Page): P
   throw new Error(`Pipeline did not reach a terminal state within 25 minutes: ${lastSnapshot}`);
 }
 
-test('real API exact-paper PDF quality acceptance', async ({ page }) => {
+test('real API exact-paper PDF quality acceptance', async () => {
   test.skip(!API_KEY, 'PP_DEEPSEEK_API_KEY is not available in this process');
   test.skip(!existsSync(SOURCE_PDF), 'The local exact-paper fixture is unavailable');
   test.setTimeout(45 * 60_000);
+
+  const profileDirectory = path.resolve('reports', 'real-api', '.profiles', TRANSLATION_MODEL);
+  await mkdir(profileDirectory, { recursive: true });
+  const context = await chromium.launchPersistentContext(profileDirectory, {
+    headless: true,
+    baseURL: 'http://127.0.0.1:4173',
+    viewport: { width: 1440, height: 1000 },
+  });
+  const page = context.pages()[0] ?? await context.newPage();
 
   try {
     await page.goto('/');
@@ -109,5 +118,10 @@ test('real API exact-paper PDF quality acceptance', async ({ page }) => {
     }, null, 2));
   } finally {
     await page.locator('[data-field="api-key"]').fill('').catch(() => undefined);
+    await page.evaluate(() => {
+      localStorage.removeItem('paper-parallel.deepseek-key');
+      sessionStorage.removeItem('paper-parallel.deepseek-key-session');
+    }).catch(() => undefined);
+    await context.close();
   }
 });
