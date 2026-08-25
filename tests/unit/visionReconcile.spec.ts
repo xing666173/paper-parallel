@@ -19,21 +19,43 @@ describe('vision: deterministic layout reconciliation', () => {
     })]);
   });
 
-  it('fails closed for low confidence, page-edge and caption-overlapping assets', () => {
+  it('matches a nearby approximate caption box and trims a figure crop that includes the real caption', () => {
+    const result = reconcileVisionLayout(fixtureDoc(), [{
+      pageIndex: 0, layout: 'double', regions: [{
+        type: 'figure', bbox: [80, 190, 360, 320], column: 'left',
+        captionBBox: [80, 440, 360, 20], confidence: 0.99,
+      }],
+    }]);
+
+    expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions).toHaveLength(1);
+    const asset = result.assetRegions[0]!;
+    expect(asset.captionUnitId).toBe('caption-1');
+    expect(asset.rect.y + asset.rect.h).toBeLessThanOrEqual(372);
+  });
+
+  it('links the nearest real caption when Vision omits caption_bbox', () => {
+    const result = reconcileVisionLayout(fixtureDoc(), [{
+      pageIndex: 0, layout: 'double', regions: [{
+        type: 'figure', bbox: [80, 190, 360, 230], column: 'left', confidence: 0.99,
+      }],
+    }]);
+
+    expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions[0]?.captionUnitId).toBe('caption-1');
+  });
+
+  it('fails closed for low confidence and page-edge assets', () => {
     const result = reconcileVisionLayout(fixtureDoc(), [{
       pageIndex: 0, layout: 'double', regions: [
         { type: 'figure', bbox: [80, 190, 360, 260], column: 'left', confidence: 0.4 },
         { type: 'figure', bbox: [0, 0, 400, 300], column: 'left', confidence: 0.99 },
-        {
-          type: 'figure', bbox: [80, 190, 360, 320], column: 'left',
-          captionBBox: [80, 470, 360, 35], confidence: 0.99,
-        },
       ],
     }]);
 
     expect(result.assetRegions).toEqual([]);
     expect(result.unresolved.map((item) => item.reason)).toEqual([
-      'low-confidence', 'page-edge-touch', 'caption-overlap',
+      'low-confidence', 'page-edge-touch',
     ]);
   });
 

@@ -60,6 +60,26 @@ describe('project task store', () => {
     expect(store.lastResponseAt).toBe(1);
   });
 
+  it('logs rejected approximate Vision regions as local fallbacks instead of terminal failures', () => {
+    const { store } = setupStore();
+    store.recordAiEvent({
+      type: 'vision-layout-fallback', at: 9, page: 3, region: 2, reason: 'caption-unmatched',
+    });
+
+    expect(store.aiLog.at(-1)?.message).toBe(
+      'Vision Exp 第 3 页区域 2 未通过本地几何门（caption-unmatched），已改用 PDF 文字层回退识别',
+    );
+    expect(store.lastResponseAt).toBe(9);
+  });
+
+  it('shows page-level progress as soon as final visual review starts', () => {
+    const { store } = setupStore();
+    store.recordAiEvent({ type: 'vision-review-page-started', at: 11, page: 2, totalPages: 7 });
+
+    expect(store.aiLog.at(-1)?.message).toBe('Vision Exp 成品质检：开始检查第 2/7 页');
+    expect(store.lastResponseAt).toBe(11);
+  });
+
   it('coalesces streaming heartbeats while keeping the latest phase visible', () => {
     const { store } = setupStore();
     store.recordAiEvent({

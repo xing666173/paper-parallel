@@ -102,6 +102,30 @@ describe('production pipeline preparation', () => {
       .toBe(prepared.regions[0].orderedUnitIds.indexOf('fig-caption') - 1);
   });
 
+  it('places a captionless Vision formula through its covered semantic unit in a cross-page region', () => {
+    const doc = fixtureDoc();
+    doc.pageCount = 2;
+    doc.pages.push({ pageIndex: 1, width: 612, height: 792, columns: [] });
+    doc.blocks.push({
+      id: 'page-2-formula', docId: 'en', type: 'equation', pageIndex: 1,
+      rect: { x: 330, y: 120, w: 200, h: 30 }, order: 4,
+      text: 'z = x + y', splitAllowed: false, widthMode: 'column',
+    });
+    doc.semanticUnits.push({
+      id: 'page-2-formula', kind: 'formula', sourceText: 'z = x + y',
+      protectedTokens: [], assetId: 'page-2-formula', layoutRegionId: 'r1', order: 4,
+    });
+    doc.layoutRegions[0].orderedUnitIds.push('page-2-formula');
+
+    const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: [{
+      id: 'vision-p2-formula-1', kind: 'formula', pageIndex: 1,
+      rect: { x: 325, y: 300, w: 210, h: 40 }, widthMode: 'column',
+    }] });
+
+    expect(prepared.regions[0].orderedUnitIds).toContain('vision-p2-formula-1');
+    expect(prepared.units.find((unit) => unit.id === 'vision-p2-formula-1')?.layoutRegionId).toBe('r1');
+  });
+
   it('uses the repeated page header as the top boundary for side-by-side figures at the page top', () => {
     const doc = fixtureDoc();
     const runningHeader = 'ZK-Tracer: A High-Performance Heterogeneous Accelerator for Zero-Knowledge VM Trace Generation';
@@ -131,15 +155,78 @@ describe('production pipeline preparation', () => {
     }));
   });
 
+  it('uses extracted plot labels to bound a page-top figure without swallowing the page edge', () => {
+    const doc = fixtureDoc();
+    doc.pageCount = 2;
+    doc.pages.push({ pageIndex: 1, width: 612, height: 792, columns: [] });
+    doc.blocks.push(
+      {
+        id: 'plot-labels', docId: 'en', type: 'paragraph', pageIndex: 1,
+        rect: { x: 62, y: 96, w: 420, h: 88 }, order: 5,
+        text: 'Main Trace Generation\n1.0\n0.8\n0.6\n0.4\nProportion\n0.2\n0.0\nJson RSA',
+        splitAllowed: true, widthMode: 'span',
+      },
+      {
+        id: 'top-figure-caption', docId: 'en', type: 'caption', pageIndex: 1,
+        rect: { x: 71, y: 207, w: 487, h: 9 }, order: 6,
+        text: 'Figure 3: Profiling Figure 4: Workload Analysis',
+        splitAllowed: false, widthMode: 'span',
+      },
+    );
+    doc.semanticUnits.push(
+      { id: 'plot-labels', kind: 'paragraph', sourceText: 'Main Trace Generation\n1.0\n0.8', protectedTokens: [], layoutRegionId: 'page-top', order: 5 },
+      { id: 'top-figure-caption', kind: 'caption', sourceText: 'Figure 3: Profiling Figure 4: Workload Analysis', protectedTokens: [], layoutRegionId: 'page-top', order: 6 },
+    );
+    doc.layoutRegions.push({
+      id: 'page-top', mode: 'full-width', sourcePage: 1,
+      bounds: { x: 62, y: 96, w: 496, h: 120 }, orderedUnitIds: ['plot-labels', 'top-figure-caption'],
+    });
+
+    const prepared = prepareImmutableStructure(doc);
+
+    expect(prepared.assetRegions).toContainEqual(expect.objectContaining({
+      id: 'top-figure-caption-asset', kind: 'figure', pageIndex: 1,
+      rect: { x: 62, y: 90, w: 496, h: 111 },
+    }));
+    expect(prepared.units.some((unit) => unit.id === 'plot-labels')).toBe(false);
+  });
+
+  it('uses conservative page content margins for a pure-vector full-width figure fallback', () => {
+    const doc = fixtureDoc();
+    doc.pageCount = 2;
+    doc.pages.push({ pageIndex: 1, width: 612, height: 792, columns: [] });
+    doc.blocks.push({
+      id: 'vector-caption', docId: 'en', type: 'caption', pageIndex: 1,
+      rect: { x: 235, y: 249, w: 143, h: 9 }, order: 5,
+      text: 'Figure 5: Architecture', splitAllowed: false, widthMode: 'span',
+    });
+    doc.semanticUnits.push({
+      id: 'vector-caption', kind: 'caption', sourceText: 'Figure 5: Architecture',
+      protectedTokens: [], layoutRegionId: 'vector-region', order: 5,
+    });
+    doc.layoutRegions.push({
+      id: 'vector-region', mode: 'full-width', sourcePage: 1,
+      bounds: { x: 235, y: 249, w: 143, h: 9 }, orderedUnitIds: ['vector-caption'],
+    });
+
+    const prepared = prepareImmutableStructure(doc);
+    const asset = prepared.assetRegions.find((candidate) => candidate.id === 'vector-caption-asset');
+
+    expect(asset?.rect.x).toBeCloseTo(48.96);
+    expect(asset?.rect.w).toBeCloseTo(514.08);
+    expect(asset?.rect.y).toBeCloseTo(79.2);
+    expect(asset?.rect.y).toBeGreaterThan(0);
+  });
+
   it('preserves a captioned table as one full-column asset and excludes its body from translation', () => {
     const doc = fixtureDoc();
     doc.blocks.push(
-      { id: 'table-caption', docId: 'en', type: 'caption', pageIndex: 0, rect: { x: 330, y: 570, w: 200, h: 18 }, order: 4, text: 'Table 1: Results', splitAllowed: false, widthMode: 'column' },
+      { id: 'table-caption', docId: 'en', type: 'caption', pageIndex: 0, rect: { x: 330, y: 570, w: 200, h: 18 }, order: 4, text: 'Figure 9: Analysis\nTable 1: Results', splitAllowed: false, widthMode: 'column' },
       { id: 'table-body', docId: 'en', type: 'paragraph', pageIndex: 0, rect: { x: 330, y: 596, w: 200, h: 62 }, order: 5, text: 'Method Throughput Baseline 1.0 Ours 2.4', splitAllowed: true, widthMode: 'column' },
       { id: 'after-table', docId: 'en', type: 'paragraph', pageIndex: 0, rect: { x: 330, y: 690, w: 200, h: 28 }, order: 6, text: 'The results confirm the trend.', splitAllowed: true, widthMode: 'column' },
     );
     doc.semanticUnits.push(
-      { id: 'table-caption', kind: 'caption', sourceText: 'Table 1: Results', protectedTokens: [], layoutRegionId: 'r1', order: 4 },
+      { id: 'table-caption', kind: 'caption', sourceText: 'Figure 9: Analysis\nTable 1: Results', protectedTokens: [], layoutRegionId: 'r1', order: 4 },
       { id: 'table-body', kind: 'paragraph', sourceText: 'Method Throughput Baseline 1.0 Ours 2.4', protectedTokens: [], layoutRegionId: 'r1', order: 5 },
       { id: 'after-table', kind: 'paragraph', sourceText: 'The results confirm the trend.', protectedTokens: [], layoutRegionId: 'r1', order: 6 },
     );

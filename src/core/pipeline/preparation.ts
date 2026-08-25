@@ -165,6 +165,15 @@ function sameVisualColumn(
   return visualColumn(left, pageWidth) === visualColumn(right, pageWidth);
 }
 
+function looksLikeVisualLabels(block: Doc['blocks'][number]): boolean {
+  const lines = (block.text ?? '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (lines.length < 4) return false;
+  const labelLike = lines.filter((line) => (
+    line.length <= 32 || /^[-+]?\d[\d.,%‰+\- ]*$/.test(line)
+  )).length;
+  return labelLike / lines.length >= 0.7;
+}
+
 function visualColumnBounds(doc: Doc, anchor: Doc['blocks'][number]): { x: number; w: number } {
   const pageWidth = doc.pages[anchor.pageIndex]?.width ?? doc.meta.paperWidth;
   const columnBlocks = doc.blocks.filter((block) => (
@@ -173,6 +182,9 @@ function visualColumnBounds(doc: Doc, anchor: Doc['blocks'][number]): { x: numbe
   if (!columnBlocks.length) return { x: anchor.rect.x, w: anchor.rect.w };
   const x = Math.min(...columnBlocks.map((block) => block.rect.x));
   const right = Math.max(...columnBlocks.map((block) => block.rect.x + block.rect.w));
+  if (anchor.widthMode === 'span' && right - x < pageWidth * 0.6) {
+    return { x: pageWidth * 0.08, w: pageWidth * 0.84 };
+  }
   return { x, w: right - x };
 }
 
@@ -258,7 +270,23 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
       ))
       .reduce((boundary, block) => Math.max(boundary, block.rect.y + block.rect.h + 6), 0);
     const previousBoundary = previousBlock ? previousBlock.rect.y + previousBlock.rect.h + 6 : 0;
-    const top = previousBlock && previousBoundary < bottom - 24 ? previousBoundary : furnitureBoundary;
+    const visualLabelTop = doc.blocks
+      .filter((block) => (
+        block.pageIndex === captionBlock.pageIndex
+        && block.id !== caption.id
+        && block.rect.y < bottom
+        && block.rect.x < captionBlock.rect.x + captionBlock.rect.w
+        && block.rect.x + block.rect.w > captionBlock.rect.x
+        && looksLikeVisualLabels(block)
+      ))
+      .reduce((boundary, block) => Math.min(boundary, Math.max(1, block.rect.y - 6)), Number.POSITIVE_INFINITY);
+    const inferredTop = Math.max(
+      furnitureBoundary,
+      Number.isFinite(visualLabelTop)
+        ? visualLabelTop
+        : (doc.pages[captionBlock.pageIndex]?.height ?? doc.meta.paperHeight) * 0.1,
+    );
+    const top = previousBlock && previousBoundary < bottom - 24 ? previousBoundary : inferredTop;
     if (bottom - top < 24) {
       const previousId = previousBlock?.id ?? 'none';
       const previousText = previousBlock?.text?.replace(/\s+/g, ' ').slice(0, 48) ?? 'none';
@@ -370,7 +398,15 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
     if (!page) throw new Error(`Vision 资产 ${asset.id} 缺少页面尺寸`);
     const centerX = asset.rect.x + asset.rect.w / 2;
     const centerY = asset.rect.y + asset.rect.h / 2;
+    const coveredRegion = coveredUnits
+      .map((unit) => regions.find((candidate) => candidate.id === unit.layoutRegionId))
+      .find((candidate): candidate is LayoutRegion => Boolean(candidate));
+    const memberPageRegion = regions.find((candidate) => candidate.orderedUnitIds.some((unitId) => (
+      blocks.get(unitId)?.pageIndex === asset.pageIndex
+    )));
     const region = (caption ? regions.find((candidate) => candidate.id === caption.layoutRegionId) : undefined)
+      ?? coveredRegion
+      ?? memberPageRegion
       ?? regions.find((candidate) => (
         candidate.sourcePage === asset.pageIndex
         && centerX >= candidate.bounds.x && centerX <= candidate.bounds.x + candidate.bounds.w
@@ -401,6 +437,17 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
   }
 
   for (const asset of assetRegions) {
+    const coveredIds = new Set(doc.blocks
+      .filter((block) => block.id !== asset.captionUnitId && materiallyCovered(block, asset))
+      .map((block) => block.id));
+    if (coveredIds.size) {
+      units = units.filter((unit) => unit.id === asset.id || !coveredIds.has(unit.id));
+      for (const region of regions) {
+        region.orderedUnitIds = region.orderedUnitIds.filter((unitId) => (
+          unitId === asset.id || !coveredIds.has(unitId)
+        ));
+      }
+    }
     const page = doc.pages[asset.pageIndex];
     if (!page) throw new Error(`不可变资产 ${asset.id} 缺少页面尺寸`);
     const intersecting = doc.blocks.filter((block) => (

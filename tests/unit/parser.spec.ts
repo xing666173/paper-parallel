@@ -1,7 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import { itemsToLines, type SimpleTextItem } from '../../src/core/parser/lines';
 import { classifyLines, detectLayoutMode } from '../../src/core/parser/columns';
-import { groupLinesToBlocks, isDisplayFormulaCandidate } from '../../src/core/parser/blocks';
+import {
+  groupLinesToBlocks,
+  isDisplayFormulaCandidate,
+  isFigureCaptionText,
+  isTableCaptionText,
+} from '../../src/core/parser/blocks';
 import { parsePageItems } from '../../src/core/parser/index';
 import { normalizeTextItem } from '../../src/core/parser/pdfjsAdapter';
 
@@ -148,6 +153,12 @@ describe('parser: lines -> blocks', () => {
     }
     expect(blocks.find((block) => block.text.includes('Figure 3:'))?.type).toBe('caption');
     expect(blocks.find((block) => block.text.includes('Table 2:'))?.type).toBe('caption');
+  });
+
+  it('recognizes both captions when PDF extraction merges adjacent figure and table captions', () => {
+    const merged = 'Figure 9: Parallelism Analysis\nTable 2: ZK-Tracer PPA Results';
+    expect(isFigureCaptionText(merged)).toBe(true);
+    expect(isTableCaptionText(merged)).toBe(true);
   });
 
   it('在块文本中保留 PDF.js 文本项的字符索引和真实坐标', () => {

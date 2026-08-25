@@ -25,6 +25,10 @@ function projectAiMessage(event: AiLogEvent): string {
   switch (event.type) {
     case 'vision-layout-page':
       return `Vision Exp 版式识别：第 ${event.page}/${event.totalPages} 页${event.cached ? '（缓存命中）' : '已完成'}`;
+    case 'vision-layout-fallback':
+      return `Vision Exp 第 ${event.page} 页区域 ${event.region} 未通过本地几何门（${event.reason}），已改用 PDF 文字层回退识别`;
+    case 'vision-review-page-started':
+      return `Vision Exp 成品质检：开始检查第 ${event.page}/${event.totalPages} 页`;
     case 'vision-review-page':
       return `Vision Exp 成品质检：第 ${event.page}/${event.totalPages} 页已完成，发现 ${event.issueCount} 个可见问题`;
     case 'batch-started':
@@ -92,6 +96,8 @@ export function createTaskStore(dependencies: TaskStoreDependencies, id = 'task'
         || event.type === 'batch-progress'
         || event.type === 'batch-split'
         || event.type === 'vision-layout-page'
+        || event.type === 'vision-layout-fallback'
+        || event.type === 'vision-review-page-started'
         || event.type === 'vision-review-page'
       ) {
         lastResponseAt.value = event.at;

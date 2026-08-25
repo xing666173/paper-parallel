@@ -58,11 +58,28 @@ function enumValue<T extends string>(value: unknown, allowed: readonly T[], path
   return value as T;
 }
 
-function normalizedBox(value: unknown, path: string): NormalizedVisionBox {
-  if (!Array.isArray(value) || value.length !== 4 || value.some((item) => typeof item !== 'number' || !Number.isFinite(item))) {
+export function parseNormalizedVisionBox(value: unknown, path: string): NormalizedVisionBox {
+  let values: unknown[];
+  if (Array.isArray(value)) {
+    values = value;
+  } else if (value && typeof value === 'object') {
+    const box = value as Record<string, unknown>;
+    values = [box.x, box.y, box.width, box.height];
+  } else {
     throw new VisionProtocolError(`Vision JSON ${path} 必须为四个有限数字`);
   }
-  const [x, y, width, height] = value as number[];
+  if (values.length !== 4 || values.some((item) => typeof item !== 'number' || !Number.isFinite(item))) {
+    throw new VisionProtocolError(`Vision JSON ${path} 必须为四个有限数字`);
+  }
+  let [x, y, width, height] = values as number[];
+  const validXywh = x >= 0 && y >= 0 && width > 0 && height > 0 && x + width <= 1000 && y + height <= 1000;
+  if (!validXywh) {
+    const [x1, y1, x2, y2] = values as number[];
+    const unambiguousXyxy = x1 >= 0 && y1 >= 0 && x2 <= 1000 && y2 <= 1000 && x2 > x1 && y2 > y1;
+    if (unambiguousXyxy) {
+      [x, y, width, height] = [x1, y1, x2 - x1, y2 - y1];
+    }
+  }
   if (x < 0 || y < 0 || width <= 0 || height <= 0 || x + width > 1000 || y + height > 1000) {
     throw new VisionProtocolError(`Vision JSON ${path} 超出 0..1000 页面范围`);
   }
@@ -89,10 +106,10 @@ export function parseVisionPageAnalysis(value: unknown, expectedPageIndex: numbe
       type: enumValue(item.type, [
         'figure', 'table', 'display_formula', 'code', 'caption', 'header', 'footer', 'body_text',
       ] as const, `regions[${index}].type`),
-      bbox: normalizedBox(item.bbox, `regions[${index}].bbox`),
+      bbox: parseNormalizedVisionBox(item.bbox, `regions[${index}].bbox`),
       column: enumValue(item.column, ['left', 'right', 'full'] as const, `regions[${index}].column`),
       ...(captionValue === undefined ? {} : {
-        captionBBox: normalizedBox(captionValue, `regions[${index}].caption_bbox`),
+        captionBBox: parseNormalizedVisionBox(captionValue, `regions[${index}].caption_bbox`),
       }),
       confidence,
     };

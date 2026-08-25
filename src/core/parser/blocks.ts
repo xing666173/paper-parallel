@@ -35,11 +35,15 @@ function hasCaptionSuffix(suffix: string | undefined): boolean {
 }
 
 export function isFigureCaptionText(text: string): boolean {
-  return hasCaptionSuffix(text.trim().match(/^fig(?:ure)?\.?\s*(?:\d+|[IVXLCDM]+)(.*)$/i)?.[1]);
+  return text.split(/\r?\n/).some((line) => (
+    hasCaptionSuffix(line.trim().match(/^fig(?:ure)?\.?\s*(?:\d+|[IVXLCDM]+)(.*)$/i)?.[1])
+  ));
 }
 
 export function isTableCaptionText(text: string): boolean {
-  return hasCaptionSuffix(text.trim().match(/^table\s*(?:\d+|[IVXLCDM]+)(.*)$/i)?.[1]);
+  return text.split(/\r?\n/).some((line) => (
+    hasCaptionSuffix(line.trim().match(/^table\s*(?:\d+|[IVXLCDM]+)(.*)$/i)?.[1])
+  ));
 }
 
 function isNumberedCaptionText(text: string): boolean {

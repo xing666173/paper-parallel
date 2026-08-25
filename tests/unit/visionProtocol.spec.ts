@@ -24,6 +24,22 @@ describe('vision: page analysis protocol', () => {
     });
   });
 
+  it('accepts explicit xywh objects and repairs an unambiguous normalized xyxy array', () => {
+    expect(parseVisionPageAnalysis({
+      page: 1,
+      layout: 'mixed',
+      regions: [
+        { type: 'figure', bbox: { x: 80, y: 210, width: 420, height: 310 }, column: 'left', confidence: 0.97 },
+        { type: 'table', bbox: [520, 210, 940, 700], column: 'right', confidence: 0.96 },
+        { type: 'code', bbox: { x: 600, y: 300, width: 920, height: 760 }, column: 'right', confidence: 0.95 },
+      ],
+    }, 0).regions.map((region) => region.bbox)).toEqual([
+      [80, 210, 420, 310],
+      [520, 210, 420, 490],
+      [600, 300, 320, 460],
+    ]);
+  });
+
   it.each([
     [{ page: 1, layout: 'double', regions: [{ type: 'figure', bbox: [0, 1, 1001, 20], column: 'left', confidence: 1 }] }, 'bbox'],
     [{ page: 1, layout: 'double', regions: [{ type: 'photo', bbox: [1, 1, 20, 20], column: 'left', confidence: 1 }] }, 'type'],

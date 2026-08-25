@@ -29,6 +29,17 @@ describe('vision: final PDF review', () => {
     }, 1).pass).toBe(true);
   });
 
+  it('accepts explicit normalized xywh issue boxes', () => {
+    expect(parseVisionFinalPageReport({
+      target_page: 1,
+      issues: [{
+        type: 'clipped_text', severity: 'warning',
+        bbox: { x: 100, y: 200, width: 300, height: 40 },
+        confidence: 0.9, evidence: 'Possible clipping.',
+      }],
+    }, 0).issues[0]?.bbox).toEqual([100, 200, 300, 40]);
+  });
+
   it('maps naturally repaginated target pages to the dominant aligned source pages', () => {
     const mapping = buildTargetSourcePageMap({
       units: [
@@ -65,5 +76,77 @@ describe('vision: final PDF review', () => {
       { type: 'image_url', image_url: { url: 'data:image/png;base64,source-0', detail: 'original' } },
       { type: 'image_url', image_url: { url: 'data:image/png;base64,target-0', detail: 'original' } },
     ]);
+  });
+
+  it('retries an overlong visual report with a compact severe-only request', async () => {
+    const requests: any[] = [];
+    const page = { getViewport: () => ({ width: 1, height: 1 }), render: () => ({ promise: Promise.resolve() }) };
+    const report = await runVisionFinalReview({
+      sourcePdf: { numPages: 1, getPage: async () => page },
+      targetPdf: { numPages: 1, getPage: async () => page },
+      manifest: { units: [] } as any,
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test',
+      renderPage: async () => 'data:image/png;base64,page',
+      complete: async (request: any) => {
+        requests.push(request);
+        if (requests.length === 1) {
+          const error = new Error('finish_reason=length');
+          error.name = 'DeepSeekOutputLimitError';
+          throw error;
+        }
+        return { content: '{"target_page":1,"issues":[]}', usage: { promptTokens: 1, completionTokens: 1 } };
+      },
+    });
+
+    expect(report.pass).toBe(true);
+    expect(requests).toHaveLength(2);
+    expect(requests[1].messages[0].content[0].text).toContain('at most 6 severe issues');
+  });
+
+  it('reviews at most two pages concurrently, reports starts immediately, and preserves page order', async () => {
+    const page = { getViewport: () => ({ width: 1, height: 1 }), render: () => ({ promise: Promise.resolve() }) };
+    const resolvers: Array<() => void> = [];
+    let active = 0;
+    let maxActive = 0;
+    const started: number[] = [];
+    const completed: number[] = [];
+    const run = runVisionFinalReview({
+      sourcePdf: { numPages: 3, getPage: async () => page },
+      targetPdf: { numPages: 3, getPage: async () => page },
+      manifest: { units: [] } as any,
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test',
+      renderPage: async (_page, role, index) => `data:image/png;base64,${role}-${index}`,
+      onPageStart: ({ targetPageIndex }) => started.push(targetPageIndex),
+      onPage: ({ targetPageIndex }) => completed.push(targetPageIndex),
+      complete: async (request: any) => {
+        const targetPage = Number(request.messages[0].content[0].text.match(/translated target page (\d+)/)?.[1] ?? '0');
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise<void>((resolve) => resolvers.push(resolve));
+        active -= 1;
+        return {
+          content: JSON.stringify({
+            target_page: targetPage,
+            issues: [{
+              type: 'layout_drift', severity: 'warning', bbox: [0, 0, 10, 10],
+              confidence: 0.9, evidence: `page-${targetPage}`,
+            }],
+          }),
+          usage: { promptTokens: 1, completionTokens: 1 },
+        };
+      },
+    });
+
+    await vi.waitFor(() => expect(started).toEqual([0, 1]));
+    await vi.waitFor(() => expect(resolvers).toHaveLength(2));
+    resolvers[1]!();
+    await vi.waitFor(() => expect(started).toEqual([0, 1, 2]));
+    expect(completed).toEqual([1]);
+    resolvers[0]!();
+    resolvers[2]!();
+
+    const report = await run;
+    expect(maxActive).toBe(2);
+    expect(report.issues.map((issue) => issue.evidence)).toEqual(['page-1', 'page-2', 'page-3']);
   });
 });

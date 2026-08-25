@@ -56,7 +56,7 @@ export async function analyzePdfLayoutWithVision(options: AnalyzePdfLayoutOption
       model: VISION_LAYOUT_MODEL,
       thinkingMode: 'disabled',
       responseFormat: 'json_object',
-      maxTokens: 8_192,
+      maxTokens: 4_096,
       timeoutMs: 120_000,
       signal: options.signal,
       messages: [{ role: 'user', content: [

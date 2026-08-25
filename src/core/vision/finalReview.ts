@@ -3,6 +3,7 @@ import { chatCompletion, type ChatCompletionOptions, type ChatCompletionResult }
 import { buildVisionFinalReviewPrompt } from './prompts';
 import { renderPdfPageAsPng, type PdfPageForVision } from './render';
 import { VISION_LAYOUT_MODEL, type PdfDocumentForVision } from './analyze';
+import { parseNormalizedVisionBox } from './protocol';
 
 export type VisionFinalIssueType =
   | 'missing_text' | 'clipped_text' | 'overlap' | 'unreadable_glyphs'
@@ -41,17 +42,6 @@ function rootObject(value: unknown): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
-function normalizedBox(value: unknown, path: string): [number, number, number, number] {
-  if (!Array.isArray(value) || value.length !== 4 || value.some((item) => typeof item !== 'number' || !Number.isFinite(item))) {
-    throw new Error(`Vision 成品质检 ${path} 必须为四个有限数字`);
-  }
-  const [x, y, width, height] = value as number[];
-  if (x < 0 || y < 0 || width <= 0 || height <= 0 || x + width > 1000 || y + height > 1000) {
-    throw new Error(`Vision 成品质检 ${path} 超出页面范围`);
-  }
-  return [x, y, width, height];
-}
-
 const ISSUE_TYPES: readonly VisionFinalIssueType[] = [
   'missing_text', 'clipped_text', 'overlap', 'unreadable_glyphs', 'untranslated_body',
   'layout_collapse', 'layout_drift', 'asset_changed', 'asset_missing', 'formula_changed', 'table_changed',
@@ -78,7 +68,7 @@ export function parseVisionFinalPageReport(value: unknown, expectedTargetPageInd
       targetPageIndex: expectedTargetPageIndex,
       type: item.type as VisionFinalIssueType,
       severity: item.severity,
-      bbox: normalizedBox(item.bbox, `issues[${index}].bbox`),
+      bbox: parseNormalizedVisionBox(item.bbox, `issues[${index}].bbox`),
       confidence: item.confidence,
       evidence: item.evidence.trim().slice(0, 300),
     };
@@ -123,49 +113,90 @@ export interface RunVisionFinalReviewOptions {
   signal?: AbortSignal;
   complete?: (options: ChatCompletionOptions) => Promise<ChatCompletionResult>;
   renderPage?: (page: PdfPageForVision, role: 'source' | 'target', pageIndex: number) => Promise<string>;
+  onPageStart?(event: { targetPageIndex: number; totalPages: number }): void;
   onPage?(event: { targetPageIndex: number; totalPages: number; issueCount: number }): void;
 }
+
+export const VISION_FINAL_REVIEW_CONCURRENCY = 2;
 
 export async function runVisionFinalReview(options: RunVisionFinalReviewOptions): Promise<VisionFinalReport> {
   if (!options.apiKey.trim()) throw new Error('Vision Exp 成品质检需要 DeepSeek API Key');
   const complete = options.complete ?? chatCompletion;
   const renderPage = options.renderPage ?? ((page) => renderPdfPageAsPng(page));
   const mapping = buildTargetSourcePageMap(options.manifest, options.targetPdf.numPages, options.sourcePdf.numPages);
-  const sourceImages = new Map<number, string>();
-  const issues: VisionFinalIssue[] = [];
+  const sourceImages = new Map<number, Promise<string>>();
+  const pageIssues: VisionFinalIssue[][] = Array.from({ length: options.targetPdf.numPages }, () => []);
 
-  for (let targetPageIndex = 0; targetPageIndex < options.targetPdf.numPages; targetPageIndex += 1) {
+  const getSourceImage = (sourcePageIndex: number): Promise<string> => {
+    const cached = sourceImages.get(sourcePageIndex);
+    if (cached) return cached;
+    const rendered = options.sourcePdf.getPage(sourcePageIndex + 1)
+      .then((page) => renderPage(page, 'source', sourcePageIndex));
+    sourceImages.set(sourcePageIndex, rendered);
+    return rendered;
+  };
+
+  const reviewPage = async (targetPageIndex: number): Promise<void> => {
     if (options.signal?.aborted) throw new DOMException('已停止', 'AbortError');
+    options.onPageStart?.({ targetPageIndex, totalPages: options.targetPdf.numPages });
     const sourcePageIndices = mapping[targetPageIndex]!;
     const content: NonNullable<ChatCompletionOptions['messages'][number]['content']> extends infer _T ? any[] : never = [
       { type: 'text', text: buildVisionFinalReviewPrompt(targetPageIndex + 1, sourcePageIndices.map((page) => page + 1)) },
     ];
     for (const sourcePageIndex of sourcePageIndices) {
-      let image = sourceImages.get(sourcePageIndex);
-      if (!image) {
-        image = await renderPage(await options.sourcePdf.getPage(sourcePageIndex + 1), 'source', sourcePageIndex);
-        sourceImages.set(sourcePageIndex, image);
-      }
+      const image = await getSourceImage(sourcePageIndex);
       content.push({ type: 'text', text: `SOURCE PAGE ${sourcePageIndex + 1}` });
       content.push({ type: 'image_url', image_url: { url: image, detail: 'original' } });
     }
     const targetImage = await renderPage(await options.targetPdf.getPage(targetPageIndex + 1), 'target', targetPageIndex);
     content.push({ type: 'text', text: `TARGET PAGE ${targetPageIndex + 1}` });
     content.push({ type: 'image_url', image_url: { url: targetImage, detail: 'original' } });
-    const completion = await complete({
+    const requestReview = (compact: boolean) => complete({
       baseUrl: options.baseUrl,
       apiKey: options.apiKey,
       model: VISION_LAYOUT_MODEL,
       thinkingMode: 'disabled',
       responseFormat: 'json_object',
-      maxTokens: 4_096,
-      timeoutMs: 120_000,
+      maxTokens: compact ? 1_024 : 2_048,
+      timeoutMs: 90_000,
       signal: options.signal,
-      messages: [{ role: 'user', content }],
+      messages: [{ role: 'user', content: [
+        { type: 'text', text: buildVisionFinalReviewPrompt(
+          targetPageIndex + 1,
+          sourcePageIndices.map((page) => page + 1),
+          compact,
+        ) },
+        ...content.slice(1),
+      ] }],
     });
+    let completion: ChatCompletionResult;
+    try {
+      completion = await requestReview(false);
+    } catch (error) {
+      if (!(error instanceof Error) || error.name !== 'DeepSeekOutputLimitError') throw error;
+      completion = await requestReview(true);
+    }
     const pageReport = parseVisionFinalPageReport(completion.content, targetPageIndex);
-    issues.push(...pageReport.issues);
+    pageIssues[targetPageIndex] = pageReport.issues;
     options.onPage?.({ targetPageIndex, totalPages: options.targetPdf.numPages, issueCount: pageReport.issues.length });
+  };
+
+  let nextTargetPageIndex = 0;
+  const worker = async (): Promise<void> => {
+    while (nextTargetPageIndex < options.targetPdf.numPages) {
+      const targetPageIndex = nextTargetPageIndex;
+      nextTargetPageIndex += 1;
+      await reviewPage(targetPageIndex);
+    }
+  };
+  await Promise.all(Array.from(
+    { length: Math.min(VISION_FINAL_REVIEW_CONCURRENCY, options.targetPdf.numPages) },
+    () => worker(),
+  ));
+  const issues = pageIssues.flat();
+
+  if (options.signal?.aborted) {
+    throw new DOMException('已停止', 'AbortError');
   }
   return {
     pass: !issues.some((issue) => issue.severity === 'severe' && issue.confidence >= 0.8),

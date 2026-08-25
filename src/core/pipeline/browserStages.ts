@@ -185,12 +185,10 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
         }),
       });
       const reconciled = reconcileVisionLayout(doc, analyses);
-      if (reconciled.unresolved.length) {
-        const details = reconciled.unresolved.map((item) => (
-          `第 ${item.pageIndex + 1} 页区域 ${item.regionIndex + 1}: ${item.reason}`
-        )).join('；');
-        throw new Error(`Vision Exp 版式结果未通过本地协调：${details}`);
-      }
+      reconciled.unresolved.forEach((item) => options.onAiEvent?.({
+        type: 'vision-layout-fallback', at: Date.now(), page: item.pageIndex + 1,
+        region: item.regionIndex + 1, reason: item.reason,
+      }));
       const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: reconciled.assetRegions });
       const assets = await extractImmutableAssets(prepared.assetRegions, {
         crop: async (region) => cropPageRegionLossless(await pdf.getPage(region.pageIndex + 1), region.rect, 4),
@@ -422,6 +420,10 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
           baseUrl: options.baseUrl ?? 'https://api.deepseek.com',
           apiKey,
           signal,
+          onPageStart: (event) => options.onAiEvent?.({
+            type: 'vision-review-page-started', at: Date.now(), page: event.targetPageIndex + 1,
+            totalPages: event.totalPages,
+          }),
           onPage: (event) => options.onAiEvent?.({
             type: 'vision-review-page', at: Date.now(), page: event.targetPageIndex + 1,
             totalPages: event.totalPages, issueCount: event.issueCount,
