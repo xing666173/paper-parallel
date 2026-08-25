@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { itemsToLines, type SimpleTextItem } from '../../src/core/parser/lines';
 import { classifyLines, detectLayoutMode } from '../../src/core/parser/columns';
-import { groupLinesToBlocks } from '../../src/core/parser/blocks';
+import { groupLinesToBlocks, isDisplayFormulaCandidate } from '../../src/core/parser/blocks';
 import { parsePageItems } from '../../src/core/parser/index';
 import { normalizeTextItem } from '../../src/core/parser/pdfjsAdapter';
 
@@ -86,6 +86,20 @@ describe('parser: columns', () => {
 });
 
 describe('parser: lines -> blocks', () => {
+  it('requires mathematical dominance before classifying a centered line as a display formula', () => {
+    for (const prose of [
+      'Zero-knowledge virtual machines (zkVMs) are a key technology for',
+      'in Figure 1, consists of two main stages: (1) Front-end Execution',
+      'RISC-V ISA [34, 35] with two custom instructions: trace_on and',
+      'a high-performance multi-core CPU. When integrated with exist-',
+    ]) {
+      expect(isDisplayFormulaCandidate(prose, true), prose).toBe(false);
+    }
+    expect(isDisplayFormulaCandidate('e = gcd(f, (x^N - 1) mod f)   (1)', true)).toBe(true);
+    expect(isDisplayFormulaCandidate('T_total = T_front + T_back   (3)', true)).toBe(true);
+    expect(isDisplayFormulaCandidate('x = y + 1', false)).toBe(false);
+  });
+
   it('块类型序列与 P5 合成夹具一致(段间隙断块、题注/公式/章节识别)', () => {
     const fx = syntheticFixture();
     const lines = classifyLines(itemsToLines(fx.items), fx.pageW);

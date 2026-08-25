@@ -56,6 +56,25 @@ function median(arr: number[]): number {
   return a.length % 2 ? a[(a.length - 1) / 2] : (a[a.length / 2 - 1] + a[a.length / 2]) / 2;
 }
 
+export function isDisplayFormulaCandidate(text: string, centered: boolean): boolean {
+  if (!centered) return false;
+  const normalized = text.trim().replace(/\s+/g, ' ');
+  if (!normalized || normalized.length > 180) return false;
+
+  const naturalWords = normalized.match(/[A-Za-z]{3,}/g) ?? [];
+  if (naturalWords.length > 5) return false;
+
+  const relations = normalized.match(/(?:=|≠|≈|≤|≥|<|>)/g) ?? [];
+  const operators = normalized.match(/[+*/^{}×÷√∑∫]/g) ?? [];
+  const variables = normalized.match(/(?:^|[\s,(])[A-Za-z](?:_[A-Za-z0-9]+)?(?=$|[\s,)=+*/^])/g) ?? [];
+  const numbered = /\(\d+[a-z]?\)\s*$/i.test(normalized);
+  const mathScore = relations.length * 2 + operators.length + Math.min(variables.length, 3);
+
+  if (relations.length && mathScore >= 3) return true;
+  if (numbered && mathScore >= 3) return true;
+  return naturalWords.length <= 2 && mathScore >= 5;
+}
+
 function classifyLineRole(l: ClassifiedLine, col: ColumnBounds): RawBlock['type'] {
   const t = l.text.trim();
   const colCenter = (col.min + col.max) / 2;
@@ -85,8 +104,7 @@ function classifyLineRole(l: ClassifiedLine, col: ColumnBounds): RawBlock['type'
     return 'caption';
 
   // 独立公式:短、居中、含数学符号或右端编号
-  const syms = (t.match(/[=+\-*/^(){}[\]<>≤≥×÷√∑∫]/g) || []).length;
-  if (centered && t.length < 70 && (syms >= 3 || /\(\d+\)$/.test(t))) return 'equation';
+  if (isDisplayFormulaCandidate(t, centered)) return 'equation';
 
   // 参考文献
   if (/^\[\d+\]/.test(t)) return 'reference';

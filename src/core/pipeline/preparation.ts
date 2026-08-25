@@ -5,6 +5,7 @@ import type {
   SemanticUnitKind,
 } from '../../types/models';
 import type { DetectedAssetRegion } from '../assets/extract';
+import { validateImmutableRegion } from '../assets/geometryGate';
 import { buildSourceSentenceCandidates } from '../align/sourceSentences';
 import { extractProtectedTokens } from '../translate/protected';
 import { isFigureCaptionText, isTableCaptionText } from '../parser/blocks';
@@ -323,6 +324,23 @@ export function prepareImmutableStructure(doc: Doc): PreparedImmutableStructure 
     });
     const captionIndex = region.orderedUnitIds.indexOf(caption.id);
     region.orderedUnitIds.splice(captionIndex + 1, 0, id);
+  }
+
+  for (const asset of assetRegions) {
+    const page = doc.pages[asset.pageIndex];
+    if (!page) throw new Error(`不可变资产 ${asset.id} 缺少页面尺寸`);
+    const intersecting = doc.blocks.filter((block) => (
+      block.pageIndex === asset.pageIndex
+      && block.rect.x < asset.rect.x + asset.rect.w
+      && block.rect.x + block.rect.w > asset.rect.x
+      && block.rect.y < asset.rect.y + asset.rect.h
+      && block.rect.y + block.rect.h > asset.rect.y
+    ));
+    const captionRect = asset.captionUnitId ? blocks.get(asset.captionUnitId)?.rect : undefined;
+    const geometry = validateImmutableRegion(asset, page, intersecting, captionRect);
+    if (!geometry.pass) {
+      throw new Error(`不可变资产 ${asset.id} 几何校验失败（第 ${asset.pageIndex + 1} 页：${geometry.issues.join(', ')}）`);
+    }
   }
 
   return {
