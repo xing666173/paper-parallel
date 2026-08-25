@@ -37,3 +37,24 @@ export async function assertPdfHasDrawableContent(pdfBytes: Uint8Array): Promise
     await pdf.destroy();
   }
 }
+
+export async function assertEveryPdfPageHasContent(pdfBytes: Uint8Array): Promise<void> {
+  const loading = getDocument({ data: pdfBytes.slice() });
+  const pdf = await loading.promise;
+  try {
+    if (pdf.numPages < 1) throw new Error('Downloaded PDF has no pages');
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      const page = await pdf.getPage(pageNumber);
+      const content = await page.getTextContent();
+      const text = content.items
+        .filter((item): item is typeof item & { str: string } => 'str' in item && typeof item.str === 'string')
+        .map((item) => item.str)
+        .join('')
+        .trim();
+      const operators = await page.getOperatorList();
+      if (!text && operators.fnArray.length === 0) throw new Error(`Downloaded PDF page ${pageNumber} is blank`);
+    }
+  } finally {
+    await pdf.destroy();
+  }
+}

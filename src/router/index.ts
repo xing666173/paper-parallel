@@ -6,7 +6,7 @@ const routes: RouteRecordRaw[] = [
   { path: '/task/:projectId/read', name: 'reader', component: () => import('../views/ReaderTaskView.vue') },
 ];
 
-if (import.meta.env.DEV) {
+if (import.meta.env.DEV || import.meta.env.MODE === 'test') {
   routes.push({
     path: '/__typst-smoke', name: 'typst-smoke',
     component: () => import('../views/dev/TypstSmokeView.vue'),

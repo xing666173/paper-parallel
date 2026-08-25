@@ -28,7 +28,7 @@ export interface PdfContentGateResult {
 }
 
 function compact(value: string): string {
-  return value.normalize('NFKC').replace(/[\s\u200b-\u200d\ufeff]+/g, '');
+  return value.normalize('NFKC').replace(/[\s\u200b-\u200d\ufeff\p{P}\p{S}]+/gu, '');
 }
 
 export function runPdfContentGate(input: PdfContentGateInput): PdfContentGateResult {
@@ -54,7 +54,12 @@ export function runPdfContentGate(input: PdfContentGateInput): PdfContentGateRes
       message: `中文 PDF 页数异常：${input.pageTexts.length} 页，安全上限 ${input.maximumPages} 页`,
     });
   }
-  if (expected.length && chineseCharacters < Math.max(4, Math.floor(expected.join('').match(/\p{Script=Han}/gu)?.length ?? 0) * 0.25)) {
+  const expectedChineseCharacters = expected.join('').match(/\p{Script=Han}/gu)?.length ?? 0;
+  const minimumChineseCharacters = Math.min(
+    expectedChineseCharacters,
+    Math.max(4, Math.floor(expectedChineseCharacters * 0.25)),
+  );
+  if (expected.length && chineseCharacters < minimumChineseCharacters) {
     issues.push({ code: 'chinese-text-missing', message: '中文 PDF 的可提取中文正文不足' });
   }
   if (coverage < (input.minimumCoverage ?? 0.85)) {

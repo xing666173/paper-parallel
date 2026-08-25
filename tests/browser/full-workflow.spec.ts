@@ -1,4 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
+import { readFile } from 'node:fs/promises';
+import { assertEveryPdfPageHasContent, assertPdfContainsText } from './helpers/pdfAssertions';
 
 const FIXTURE = 'tests/fixtures/mixed-layout-paper.pdf';
 const FAKE_KEY = 'sk-browser-e2e-placeholder';
@@ -27,7 +29,11 @@ async function mockDeepSeek(
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
-        data: [{ id: 'deepseek-v4-flash' }, { id: 'deepseek-v4-pro' }],
+        data: [
+          { id: 'deepseek-v4-flash' },
+          { id: 'deepseek-v4-flash-vision-exp' },
+          { id: 'deepseek-v4-pro' },
+        ],
       }),
     });
   });
@@ -35,15 +41,24 @@ async function mockDeepSeek(
   await page.route('https://api.deepseek.com/chat/completions', async (route) => {
     expect(route.request().headers().authorization).toBe(`Bearer ${FAKE_KEY}`);
     const request = route.request().postDataJSON() as {
-      messages: Array<{ role: string; content: string }>;
+      messages: Array<{ role: string; content: string | Array<{ type: string; text?: string }> }>;
       max_tokens: number;
       thinking?: { type?: string };
       stream?: boolean;
     };
-    const userMessage = [...request.messages].reverse().find((message) => message.role === 'user')?.content ?? '';
+    const userContent = [...request.messages].reverse().find((message) => message.role === 'user')?.content ?? '';
+    const userMessage = typeof userContent === 'string'
+      ? userContent
+      : userContent.filter((part) => part.type === 'text').map((part) => part.text ?? '').join('\n');
     let content = 'pong';
 
-    if (userMessage !== 'Reply with pong.') {
+    if (Array.isArray(userContent) && userMessage.includes('inspecting one rendered page')) {
+      const pageNumber = Number(userMessage.match(/source page (\d+)/i)?.[1] ?? 1);
+      content = JSON.stringify({ page: pageNumber, layout: 'mixed', regions: [] });
+    } else if (Array.isArray(userContent) && userMessage.includes('final visual quality inspector')) {
+      const targetPage = Number(userMessage.match(/translated target page (\d+)/i)?.[1] ?? 1);
+      content = JSON.stringify({ target_page: targetPage, issues: [] });
+    } else if (userMessage !== 'Reply with pong.') {
       const prompt = JSON.parse(userMessage) as { blocks: PromptBlock[] };
       translatedBatches += 1;
       translationRequests.push({
@@ -152,6 +167,15 @@ test('uploads a mixed-layout PDF and reaches the synchronized dual-PDF reader', 
   await expect(page.getByLabel('英文 PDF 控制')).toContainText('100%');
   await expect(page.getByLabel('中文 PDF 控制')).toContainText('100%');
   await expect(page.getByLabel('英文 PDF 控制').getByRole('button', { name: '上一页' })).toBeDisabled();
+
+  const downloadPromise = page.waitForEvent('download');
+  await page.getByRole('button', { name: '下载中文 PDF' }).click();
+  const download = await downloadPromise;
+  const downloadPath = await download.path();
+  expect(downloadPath).toBeTruthy();
+  const downloadedPdf = new Uint8Array(await readFile(downloadPath!));
+  await assertPdfContainsText(downloadedPdf, '译文');
+  await assertEveryPdfPageHasContent(downloadedPdf);
 
   await page.getByRole('button', { name: '返回翻译任务' }).click();
   await expect(page.getByRole('heading', { name: '总体进度' })).toBeVisible();

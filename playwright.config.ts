@@ -7,12 +7,12 @@ export default defineConfig({
   outputDir: './node_modules/.cache/playwright-results',
   timeout: 210_000,
   expect: { timeout: 10_000 },
-  use: { ...devices['Desktop Chrome'], baseURL: 'http://127.0.0.1:5173' },
+  use: { ...devices['Desktop Chrome'], baseURL: 'http://127.0.0.1:4173' },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
   webServer: {
-    command: 'npm run dev -- --host 127.0.0.1',
-    url: 'http://127.0.0.1:5173',
-    reuseExistingServer: !process.env.CI,
+    command: 'npm run build -- --mode test && npm run preview -- --host 127.0.0.1 --port 4173',
+    url: 'http://127.0.0.1:4173',
+    reuseExistingServer: false,
     timeout: 120_000,
   },
 });

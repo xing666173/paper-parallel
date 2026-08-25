@@ -49,4 +49,17 @@ describe('compiled PDF content gate', () => {
       issues: [],
     });
   });
+
+  it('tolerates PDF line-breaking punctuation without accepting source-only text', () => {
+    expect(runPdfContentGate({
+      pageTexts: ['译文：Zero Knowledge VM Trace Generation'],
+      expectedTranslations: ['译文：Zero-Knowledge VM Trace Generation。'],
+      maximumPages: 3,
+    }).pass).toBe(true);
+    expect(runPdfContentGate({
+      pageTexts: ['Zero-Knowledge VM Trace Generation'],
+      expectedTranslations: ['译文：Zero-Knowledge VM Trace Generation。'],
+      maximumPages: 3,
+    }).pass).toBe(false);
+  });
 });
