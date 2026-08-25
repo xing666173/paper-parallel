@@ -197,6 +197,7 @@ export async function runVisionFinalReview(options: RunVisionFinalReviewOptions)
       model: VISION_LAYOUT_MODEL,
       thinkingMode: 'disabled',
       responseFormat: 'json_object',
+      stream: true,
       maxTokens: compact ? 384 : 768,
       timeoutMs: 90_000,
       signal: pageSignal,

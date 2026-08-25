@@ -69,7 +69,7 @@ describe('vision: final PDF review', () => {
 
     expect(report).toEqual({ pass: true, issues: [], reviewedPages: 1 });
     expect(requests[0]).toMatchObject({
-      model: 'deepseek-v4-flash-vision-exp', thinkingMode: 'disabled', responseFormat: 'json_object',
+      model: 'deepseek-v4-flash-vision-exp', thinkingMode: 'disabled', responseFormat: 'json_object', stream: true,
     });
     const images = requests[0].messages[0].content.filter((part: any) => part.type === 'image_url');
     expect(images).toEqual([
