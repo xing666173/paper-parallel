@@ -61,6 +61,7 @@ test('real API exact-paper PDF quality acceptance', async () => {
     page.on('console', (message) => {
       if (message.text().startsWith('[page heartbeat]')) console.log(message.text());
     });
+    page.on('pageerror', (error) => console.log(`[page error] ${error.message}`));
     await page.evaluate(() => {
       window.setInterval(() => {
         const stage = document.querySelector('[data-stage].is-current strong')?.textContent?.trim() ?? '页面跳转中';

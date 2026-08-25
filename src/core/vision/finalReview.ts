@@ -119,7 +119,7 @@ export interface RunVisionFinalReviewOptions {
   onPage?(event: { targetPageIndex: number; totalPages: number; issueCount: number }): void;
 }
 
-export const VISION_FINAL_REVIEW_CONCURRENCY = 2;
+export const VISION_FINAL_REVIEW_CONCURRENCY = 1;
 export const VISION_FINAL_REVIEW_PAGE_TIMEOUT_MS = 90_000;
 
 async function withPageDeadline<T>(
@@ -164,7 +164,7 @@ async function withPageDeadline<T>(
 export async function runVisionFinalReview(options: RunVisionFinalReviewOptions): Promise<VisionFinalReport> {
   if (!options.apiKey.trim()) throw new Error('Vision Exp 成品质检需要 DeepSeek API Key');
   const complete = options.complete ?? chatCompletion;
-  const renderPage = options.renderPage ?? ((page) => renderPdfPageAsPng(page));
+  const renderPage = options.renderPage ?? ((page) => renderPdfPageAsPng(page, { scale: 1.5 }));
   const mapping = buildTargetSourcePageMap(options.manifest, options.targetPdf.numPages, options.sourcePdf.numPages);
   const sourceImages = new Map<number, Promise<string>>();
   const pageIssues: VisionFinalIssue[][] = Array.from({ length: options.targetPdf.numPages }, () => []);

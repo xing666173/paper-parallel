@@ -103,7 +103,7 @@ describe('vision: final PDF review', () => {
     expect(requests[1].messages[0].content[0].text).toContain('at most 6 severe issues');
   });
 
-  it('reviews at most two pages concurrently, reports starts immediately, and preserves page order', async () => {
+  it('reviews heavy multimodal pages sequentially, reports starts immediately, and preserves page order', async () => {
     const page = { getViewport: () => ({ width: 1, height: 1 }), render: () => ({ promise: Promise.resolve() }) };
     const resolvers: Array<() => void> = [];
     let active = 0;
@@ -137,16 +137,19 @@ describe('vision: final PDF review', () => {
       },
     });
 
+    await vi.waitFor(() => expect(started).toEqual([0]));
+    await vi.waitFor(() => expect(resolvers).toHaveLength(1));
+    resolvers[0]!();
     await vi.waitFor(() => expect(started).toEqual([0, 1]));
     await vi.waitFor(() => expect(resolvers).toHaveLength(2));
     resolvers[1]!();
     await vi.waitFor(() => expect(started).toEqual([0, 1, 2]));
-    expect(completed).toEqual([1]);
-    resolvers[0]!();
+    await vi.waitFor(() => expect(resolvers).toHaveLength(3));
     resolvers[2]!();
 
     const report = await run;
-    expect(maxActive).toBe(2);
+    expect(maxActive).toBe(1);
+    expect(completed).toEqual([0, 1, 2]);
     expect(report.issues.map((issue) => issue.evidence)).toEqual(['page-1', 'page-2', 'page-3']);
   });
 
