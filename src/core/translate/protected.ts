@@ -20,6 +20,10 @@ export interface ProtectedTranslationMask {
   replacements: Map<string, string>;
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 export function maskProtectedTokensForTranslation(
   blocks: readonly TranslationBlockRequest[],
 ): ProtectedTranslationMask {
@@ -33,11 +37,12 @@ export function maskProtectedTokensForTranslation(
       tokenToMarker.set(token, marker);
       replacements.set(marker, token);
     });
-    const mask = (value: string): string => {
-      let result = value;
-      for (const [token, marker] of tokenToMarker) result = result.split(token).join(marker);
-      return result;
-    };
+    const tokenPattern = tokens.length
+      ? new RegExp(tokens.map(escapeRegExp).join('|'), 'g')
+      : undefined;
+    const mask = (value: string): string => tokenPattern
+      ? value.replace(tokenPattern, (token) => tokenToMarker.get(token)!)
+      : value;
     return {
       ...block,
       source: mask(block.source),

@@ -53,6 +53,26 @@ describe('generic academic translation protocol', () => {
     expect(restored.blocks[0]!.translation).toBe('图 2 使用 10 倍加速 [22]，随后再执行 10 步。');
     expect(validateBatchResponse([source], restored).ok).toBe(true);
   });
+
+  it('does not remask digits inside placeholders created for earlier protected tokens', () => {
+    const source: TranslationBlockRequest = {
+      blockId: 'numeric-markers', kind: 'paragraph',
+      source: 'Figure 1 compares RISC0 at 2 × speedup.',
+      alignmentMode: 'sentence-candidates',
+      sourceSentences: [{
+        id: 'numeric-markers-s-1',
+        text: 'Figure 1 compares RISC0 at 2 × speedup.',
+      }],
+      protectedTokens: ['1', '0', '2'],
+    };
+
+    const masked = maskProtectedTokensForTranslation([source]);
+
+    expect(masked.blocks[0]!.source).toBe(
+      'Figure ⟦PP0_0⟧ compares RISC⟦PP0_1⟧ at ⟦PP0_2⟧ × speedup.',
+    );
+    expect([...masked.replacements.keys()]).toEqual(['⟦PP0_0⟧', '⟦PP0_1⟧', '⟦PP0_2⟧']);
+  });
   it('creates stable source candidates before any translation request', () => {
     expect(buildSourceSentenceCandidates('p1', 'First result. Second result!')).toEqual({
       mode: 'sentence-candidates',
