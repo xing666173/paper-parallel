@@ -122,7 +122,17 @@ describe('parser: docBuilder', () => {
     expect(doc.pageCount).toBe(2);
     expect(doc.pages[0].pageIndex).toBe(0);
     expect(doc.pages[1].pageIndex).toBe(1);
-    expect(doc.layoutRegions.map((region) => region.mode)).toEqual(['full-width', 'double']);
+    expect(doc.layoutRegions.map((region) => ({
+      mode: region.mode,
+      sourcePage: region.sourcePage,
+    }))).toEqual([
+      { mode: 'full-width', sourcePage: 1 },
+      { mode: 'double', sourcePage: 1 },
+      { mode: 'double', sourcePage: 2 },
+    ]);
+    expect(doc.layoutRegions.flatMap((region) => region.orderedUnitIds)).toEqual(
+      doc.blocks.map((block) => block.id),
+    );
     expect(doc.semanticUnits.map((unit) => unit.id)).toEqual(doc.blocks.map((block) => block.id));
     expect(doc.semanticUnits.find((unit) => unit.kind === 'figure')?.assetId).toBeDefined();
   });

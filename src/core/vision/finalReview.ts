@@ -1,6 +1,6 @@
 import type { AlignmentManifest } from '../align/manifest';
 import { chatCompletion, type ChatCompletionOptions, type ChatCompletionResult } from '../translate/client';
-import { buildVisionFinalReviewPrompt } from './prompts';
+import { buildVisionFinalConfirmationPrompt, buildVisionFinalReviewPrompt } from './prompts';
 import { renderPdfPageAsPng, type PdfPageForVision } from './render';
 import { VISION_LAYOUT_MODEL, type PdfDocumentForVision } from './analyze';
 import { parseNormalizedVisionBox } from './protocol';
@@ -53,7 +53,7 @@ export function parseVisionFinalPageReport(value: unknown, expectedTargetPageInd
     throw new Error('Vision 成品质检 target_page 与请求页面不一致');
   }
   if (!Array.isArray(root.issues)) throw new Error('Vision 成品质检 issues 必须为数组');
-  const issues = root.issues.map((raw, index): VisionFinalIssue => {
+  const parsedIssues = root.issues.map((raw, index): VisionFinalIssue => {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error(`Vision 成品质检 issues[${index}] 必须为对象`);
     const item = raw as Record<string, unknown>;
     if (typeof item.type !== 'string' || !ISSUE_TYPES.includes(item.type as VisionFinalIssueType)) {
@@ -63,15 +63,34 @@ export function parseVisionFinalPageReport(value: unknown, expectedTargetPageInd
     if (typeof item.confidence !== 'number' || !Number.isFinite(item.confidence) || item.confidence < 0 || item.confidence > 1) {
       throw new Error(`Vision 成品质检 issues[${index}].confidence 无效`);
     }
-    if (typeof item.evidence !== 'string' || !item.evidence.trim()) throw new Error(`Vision 成品质检 issues[${index}].evidence 缺失`);
+    const evidence = typeof item.evidence === 'string' && item.evidence.trim()
+      ? item.evidence.trim().slice(0, 300)
+      : `${item.type}（模型未提供说明）`;
+    let bbox: [number, number, number, number];
+    try {
+      bbox = parseNormalizedVisionBox(item.bbox, `issues[${index}].bbox`);
+    } catch {
+      bbox = [0, 0, 1000, 1000];
+    }
     return {
       targetPageIndex: expectedTargetPageIndex,
       type: item.type as VisionFinalIssueType,
-      severity: item.severity,
-      bbox: parseNormalizedVisionBox(item.bbox, `issues[${index}].bbox`),
+      // Asset markers and source hashes are checked deterministically before
+      // this page review. With natural repagination, a source-page asset can
+      // legitimately appear on an adjacent target page, so a page-local
+      // "missing" guess must not veto the whole document.
+      severity: item.type === 'asset_missing' ? 'warning' : item.severity,
+      bbox,
       confidence: item.confidence,
-      evidence: item.evidence.trim().slice(0, 300),
+      evidence,
     };
+  });
+  const seen = new Set<string>();
+  const issues = parsedIssues.filter((issue) => {
+    const key = `${issue.type}\u0000${issue.evidence.trim().toLocaleLowerCase()}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
   });
   return {
     targetPageIndex: expectedTargetPageIndex,
@@ -115,6 +134,11 @@ export interface RunVisionFinalReviewOptions {
   complete?: (options: ChatCompletionOptions) => Promise<ChatCompletionResult>;
   renderPage?: (page: PdfPageForVision, role: 'source' | 'target', pageIndex: number) => Promise<string>;
   onPageStart?(event: { targetPageIndex: number; totalPages: number }): void;
+  onPagePhase?(event: {
+    targetPageIndex: number; totalPages: number;
+    phase: 'rendered' | 'connected' | 'content' | 'retrying' | 'returned';
+  }): void;
+  onPageInvalid?(event: { targetPageIndex: number; totalPages: number; reason: string }): void;
   onPageWait?(event: { targetPageIndex: number; totalPages: number; elapsedMs: number }): void;
   onPageTimeout?(event: { targetPageIndex: number; totalPages: number; timeoutMs: number }): void;
   onPage?(event: { targetPageIndex: number; totalPages: number; issueCount: number }): void;
@@ -122,6 +146,7 @@ export interface RunVisionFinalReviewOptions {
 
 export const VISION_FINAL_REVIEW_CONCURRENCY = 1;
 export const VISION_FINAL_REVIEW_PAGE_TIMEOUT_MS = 90_000;
+export const VISION_FINAL_REVIEW_RENDER_SCALE = 1.5;
 
 async function withPageDeadline<T>(
   operation: (signal: AbortSignal) => Promise<T>,
@@ -173,34 +198,49 @@ async function withPageDeadline<T>(
 export async function runVisionFinalReview(options: RunVisionFinalReviewOptions): Promise<VisionFinalReport> {
   if (!options.apiKey.trim()) throw new Error('Vision Exp 成品质检需要 DeepSeek API Key');
   const complete = options.complete ?? chatCompletion;
-  const renderPage = options.renderPage ?? ((page) => renderPdfPageAsPng(page, { scale: 1 }));
+  const renderPage = options.renderPage
+    ?? ((page) => renderPdfPageAsPng(page, { scale: VISION_FINAL_REVIEW_RENDER_SCALE }));
   const pageIssues: VisionFinalIssue[][] = Array.from({ length: options.targetPdf.numPages }, () => []);
   const runController = new AbortController();
   const onOuterAbort = () => runController.abort();
   if (options.signal?.aborted) runController.abort();
   else options.signal?.addEventListener('abort', onOuterAbort, { once: true });
   const runSignal = runController.signal;
-
   const performPageReview = async (targetPageIndex: number, pageSignal: AbortSignal): Promise<void> => {
     if (pageSignal.aborted) throw new DOMException('已停止', 'AbortError');
     options.onPageStart?.({ targetPageIndex, totalPages: options.targetPdf.numPages });
+    // Cross-page source/target image pairs are ambiguous after natural Chinese
+    // repagination. Immutable assets are checked by hash and alignment markers;
+    // this pass inspects the rendered target page for visible production defects.
     const sourcePageIndices: number[] = [];
     const content: NonNullable<ChatCompletionOptions['messages'][number]['content']> extends infer _T ? any[] : never = [
       { type: 'text', text: buildVisionFinalReviewPrompt(targetPageIndex + 1, sourcePageIndices.map((page) => page + 1)) },
     ];
     const targetImage = await renderPage(await options.targetPdf.getPage(targetPageIndex + 1), 'target', targetPageIndex);
+    options.onPagePhase?.({ targetPageIndex, totalPages: options.targetPdf.numPages, phase: 'rendered' });
     content.push({ type: 'text', text: `TARGET PAGE ${targetPageIndex + 1}` });
     content.push({ type: 'image_url', image_url: { url: targetImage, detail: 'original' } });
-    const requestReview = (compact: boolean) => complete({
+    const requestReview = (compact: boolean) => {
+      let contentReported = false;
+      return complete({
       baseUrl: options.baseUrl,
       apiKey: options.apiKey,
       model: VISION_LAYOUT_MODEL,
       thinkingMode: 'disabled',
       responseFormat: 'json_object',
-      stream: true,
+      stream: false,
       maxTokens: compact ? 384 : 768,
-      timeoutMs: 90_000,
+      timeoutMs: 30_000,
+      hardTimeoutMs: compact ? 30_000 : 45_000,
       signal: pageSignal,
+      onStreamProgress: (progress) => {
+        if (progress.phase === 'connected') {
+          options.onPagePhase?.({ targetPageIndex, totalPages: options.targetPdf.numPages, phase: 'connected' });
+        } else if (progress.phase === 'content' && !contentReported) {
+          contentReported = true;
+          options.onPagePhase?.({ targetPageIndex, totalPages: options.targetPdf.numPages, phase: 'content' });
+        }
+      },
       messages: [{ role: 'user', content: [
         { type: 'text', text: buildVisionFinalReviewPrompt(
           targetPageIndex + 1,
@@ -209,16 +249,81 @@ export async function runVisionFinalReview(options: RunVisionFinalReviewOptions)
         ) },
         ...content.slice(1),
       ] }],
-    });
+      });
+    };
     let completion: ChatCompletionResult;
     try {
       completion = await requestReview(false);
     } catch (error) {
-      if (!(error instanceof Error) || error.name !== 'DeepSeekOutputLimitError') throw error;
+      if (!(error instanceof Error)
+        || !['DeepSeekOutputLimitError', 'DeepSeekTimeoutError', 'TypeError'].includes(error.name)) throw error;
+      options.onPagePhase?.({ targetPageIndex, totalPages: options.targetPdf.numPages, phase: 'retrying' });
       completion = await requestReview(true);
     }
+    options.onPagePhase?.({ targetPageIndex, totalPages: options.targetPdf.numPages, phase: 'returned' });
     if (pageSignal.aborted) throw new DOMException('已停止', 'AbortError');
-    const pageReport = parseVisionFinalPageReport(completion.content, targetPageIndex);
+    let pageReport: VisionFinalPageReport;
+    try {
+      pageReport = parseVisionFinalPageReport(completion.content, targetPageIndex);
+    } catch (error) {
+      options.onPageInvalid?.({
+        targetPageIndex,
+        totalPages: options.targetPdf.numPages,
+        reason: error instanceof Error ? error.message : '未知响应格式错误',
+      });
+      throw error;
+    }
+    const severeCandidates = pageReport.issues.filter(
+      (issue) => issue.severity === 'severe' && issue.confidence >= 0.8,
+    );
+    if (severeCandidates.length) {
+      let contentReported = false;
+      const confirmation = await complete({
+        baseUrl: options.baseUrl,
+        apiKey: options.apiKey,
+        model: VISION_LAYOUT_MODEL,
+        thinkingMode: 'disabled',
+        responseFormat: 'json_object',
+        stream: false,
+        maxTokens: 384,
+        timeoutMs: 30_000,
+        hardTimeoutMs: 45_000,
+        signal: pageSignal,
+        onStreamProgress: (progress) => {
+          if (progress.phase === 'connected') {
+            options.onPagePhase?.({ targetPageIndex, totalPages: options.targetPdf.numPages, phase: 'connected' });
+          } else if (progress.phase === 'content' && !contentReported) {
+            contentReported = true;
+            options.onPagePhase?.({ targetPageIndex, totalPages: options.targetPdf.numPages, phase: 'content' });
+          }
+        },
+        messages: [{ role: 'user', content: [
+          {
+            type: 'text',
+            text: buildVisionFinalConfirmationPrompt(
+              targetPageIndex + 1,
+              severeCandidates.map((issue) => ({
+                type: issue.type,
+                bbox: issue.bbox,
+                evidence: issue.evidence,
+              })),
+            ),
+          },
+          { type: 'text', text: `TARGET PAGE ${targetPageIndex + 1}` },
+          { type: 'image_url', image_url: { url: targetImage, detail: 'original' } },
+        ] }],
+      });
+      const confirmationReport = parseVisionFinalPageReport(confirmation.content, targetPageIndex);
+      const candidateTypes = new Set(severeCandidates.map((issue) => issue.type));
+      pageReport = {
+        targetPageIndex,
+        issues: [
+          ...pageReport.issues.filter((issue) => !severeCandidates.includes(issue)),
+          ...confirmationReport.issues.filter((issue) => candidateTypes.has(issue.type)),
+        ],
+        pass: confirmationReport.pass,
+      };
+    }
     pageIssues[targetPageIndex] = pageReport.issues;
     options.onPage?.({ targetPageIndex, totalPages: options.targetPdf.numPages, issueCount: pageReport.issues.length });
   };

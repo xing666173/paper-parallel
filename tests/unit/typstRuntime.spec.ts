@@ -6,7 +6,10 @@ describe('Typst runtime paths', () => {
     expect(getTypstRuntimePaths('/paper-parallel/')).toEqual({
       compilerWasm: '/paper-parallel/vendor/typst/typst_ts_web_compiler_bg.wasm',
       rendererWasm: '/paper-parallel/vendor/typst/typst_ts_renderer_bg.wasm',
-      fontFiles: ['/paper-parallel/vendor/typst/noto-serif-sc-400.ttf'],
+      fontFiles: [
+        '/paper-parallel/vendor/typst/noto-serif-sc-400.ttf',
+        '/paper-parallel/vendor/typst/dejavu-math-tex-gyre.ttf',
+      ],
     });
   });
 
@@ -14,7 +17,10 @@ describe('Typst runtime paths', () => {
     expect(getTypstRuntimePaths('./')).toEqual({
       compilerWasm: './vendor/typst/typst_ts_web_compiler_bg.wasm',
       rendererWasm: './vendor/typst/typst_ts_renderer_bg.wasm',
-      fontFiles: ['./vendor/typst/noto-serif-sc-400.ttf'],
+      fontFiles: [
+        './vendor/typst/noto-serif-sc-400.ttf',
+        './vendor/typst/dejavu-math-tex-gyre.ttf',
+      ],
     });
   });
 
@@ -25,7 +31,10 @@ describe('Typst runtime paths', () => {
     )).toEqual({
       compilerWasm: 'https://xing666173.github.io/paper-parallel/vendor/typst/typst_ts_web_compiler_bg.wasm',
       rendererWasm: 'https://xing666173.github.io/paper-parallel/vendor/typst/typst_ts_renderer_bg.wasm',
-      fontFiles: ['https://xing666173.github.io/paper-parallel/vendor/typst/noto-serif-sc-400.ttf'],
+      fontFiles: [
+        'https://xing666173.github.io/paper-parallel/vendor/typst/noto-serif-sc-400.ttf',
+        'https://xing666173.github.io/paper-parallel/vendor/typst/dejavu-math-tex-gyre.ttf',
+      ],
     });
   });
 

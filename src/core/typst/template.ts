@@ -19,7 +19,7 @@ export function buildAcademicTemplate(options: AcademicTemplateOptions): string 
   margin: ${points(margin)},
   footer: context [#counter(page).display()],
 )
-#set text(font: ("Noto Serif SC", "Noto Serif CJK SC", "Source Han Serif SC"), size: 10pt)
+#set text(font: ("Noto Serif SC", "DejaVu Math TeX Gyre", "DejaVu Serif"), size: 10pt)
 #set par(justify: true, leading: 0.65em)
 #set heading(numbering: "1.1")
 
@@ -32,8 +32,9 @@ export function buildAcademicTemplate(options: AcademicTemplateOptions): string 
 #let pp-heading(body) = block(above: 7pt, below: 3pt)[#text(size: 12pt, weight: "bold")[#body]]
 #let pp-caption(body) = block(above: 3pt, below: 5pt)[#align(center)[#text(size: 9pt, weight: "bold")[#body]]]
 #let pp-reference(body) = text(size: 9pt)[#body]
-#let pp-asset(id, path, span: false) = {
-  let body = pp-unit(id)[#image(path, width: 100%)]
+#let pp-asset-group(body) = block(breakable: false, width: 100%, above: 2pt, below: 4pt)[#body]
+#let pp-asset(id, path, source-width, span: false) = {
+  let body = block(width: 100%)[#align(center)[#pp-unit(id)[#image(path, width: source-width)]]]
   if span { pp-full-width(body) } else { body }
 }
 `;

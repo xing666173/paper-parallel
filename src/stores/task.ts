@@ -31,6 +31,20 @@ function projectAiMessage(event: AiLogEvent): string {
       return `Vision Exp 第 ${event.page} 页区域 ${event.region} 未通过本地几何门（${event.reason}），已改用 PDF 文字层回退识别`;
     case 'vision-review-page-started':
       return `Vision Exp 成品质检：开始检查第 ${event.page}/${event.totalPages} 页`;
+    case 'vision-review-page-phase': {
+      const phase = event.phase === 'rendered'
+        ? '已渲染，正在连接 API'
+        : event.phase === 'connected'
+          ? 'API 已连接，等待模型输出'
+          : event.phase === 'content'
+            ? '正在接收模型输出'
+            : event.phase === 'retrying'
+              ? '首次请求异常，正在自动重试'
+              : '模型输出已返回，正在校验';
+      return `Vision Exp 成品质检：第 ${event.page}/${event.totalPages} 页${phase}`;
+    }
+    case 'vision-review-page-invalid':
+      return `Vision Exp 成品质检：第 ${event.page}/${event.totalPages} 页响应校验失败：${event.reason}`;
     case 'vision-review-page-waiting':
       return `Vision Exp 成品质检：第 ${event.page}/${event.totalPages} 页仍在等待（${Math.floor(event.elapsedMs / 1_000)} 秒）`;
     case 'vision-review-page-timeout':
@@ -39,6 +53,12 @@ function projectAiMessage(event: AiLogEvent): string {
       return `Vision Exp 成品质检：第 ${event.page}/${event.totalPages} 页已完成，发现 ${event.issueCount} 个可见问题`;
     case 'vision-review-completed':
       return `Vision Exp 成品质检：${event.reviewedPages} 页全部返回，共发现 ${event.issueCount} 个可见问题`;
+    case 'quality-finalizing':
+      return event.visualPass
+        ? '质量门通过，正在保存中文 PDF 与对齐数据'
+        : `视觉质量门未通过（${event.severeIssueCount} 个高置信严重问题），正在结束任务`;
+    case 'quality-persisted':
+      return '中文 PDF 与对齐数据已保存';
     case 'batch-started':
       return `开始批次 ${event.batchId}，共 ${event.blockIds.length} 个文本块`;
     case 'batch-received':
@@ -107,10 +127,14 @@ export function createTaskStore(dependencies: TaskStoreDependencies, id = 'task'
         || event.type === 'vision-layout-page'
         || event.type === 'vision-layout-fallback'
         || event.type === 'vision-review-page-started'
+        || event.type === 'vision-review-page-phase'
+        || event.type === 'vision-review-page-invalid'
         || event.type === 'vision-review-page-waiting'
         || event.type === 'vision-review-page-timeout'
         || event.type === 'vision-review-page'
         || event.type === 'vision-review-completed'
+        || event.type === 'quality-finalizing'
+        || event.type === 'quality-persisted'
       ) {
         lastResponseAt.value = event.at;
         if (event.type === 'batch-received' && event.completionTokens > 0 && event.elapsedMs > 0) {

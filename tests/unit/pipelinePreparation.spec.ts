@@ -62,6 +62,303 @@ describe('production pipeline preparation', () => {
     expect(requests.some((request) => request.blockId === 'eq1')).toBe(false);
   });
 
+  it('keeps bibliography entries verbatim instead of sending them through translation', () => {
+    const doc = fixtureDoc();
+    doc.blocks.push({
+      id: 'ref-1', docId: 'en', type: 'reference', pageIndex: 0,
+      rect: { x: 50, y: 700, w: 230, h: 30 }, order: 4,
+      text: '[1] A. Author. Paper title. 2024.', splitAllowed: true, widthMode: 'column',
+    });
+    doc.semanticUnits.push({
+      id: 'ref-1', kind: 'reference', sourceText: '[1] A. Author. Paper title. 2024.',
+      protectedTokens: [], layoutRegionId: 'r1', order: 4,
+    });
+
+    expect(buildTranslationRequestsFromDoc(doc).some((request) => request.blockId === 'ref-1')).toBe(false);
+  });
+
+  it('treats bibliography continuation paragraphs as references too', () => {
+    const doc = fixtureDoc();
+    doc.semanticUnits.push(
+      { id: 'refs', parentId: 'refs', kind: 'heading', sourceText: 'References', protectedTokens: [], layoutRegionId: 'r1', order: 4 },
+      { id: 'ref-head', parentId: 'refs', kind: 'reference', sourceText: '[1] A. Author.', protectedTokens: [], layoutRegionId: 'r1', order: 5 },
+      { id: 'ref-cont', parentId: 'refs', kind: 'paragraph', sourceText: 'Paper title. 2024.', protectedTokens: [], layoutRegionId: 'r1', order: 6 },
+    );
+    doc.layoutRegions[0].orderedUnitIds.push('refs', 'ref-head', 'ref-cont');
+
+    const prepared = prepareImmutableStructure(doc);
+
+    expect(prepared.units.find((unit) => unit.id === 'ref-cont')?.kind).toBe('reference');
+    const requests = buildTranslationRequestsFromDoc({ ...doc, semanticUnits: prepared.units });
+    expect(requests.some((request) => request.blockId === 'ref-cont')).toBe(false);
+    expect(prepared.units.find((unit) => unit.id === 'refs')?.kind).toBe('heading');
+    expect(requests.find((request) => request.blockId === 'refs')?.kind).toBe('heading');
+  });
+
+  it('expands a formula crop to include an adjacent math-only continuation block', () => {
+    const doc = fixtureDoc();
+    doc.blocks.push({
+      id: 'eq1-tail', docId: 'en', type: 'paragraph', pageIndex: 0,
+      rect: { x: 400, y: 528, w: 80, h: 14 }, order: 3.1,
+      text: 'k = 1', splitAllowed: true, widthMode: 'column',
+    });
+    doc.semanticUnits.push({
+      id: 'eq1-tail', kind: 'paragraph', sourceText: 'k = 1', protectedTokens: [],
+      layoutRegionId: 'r1', order: 3.1,
+    });
+    doc.layoutRegions[0].orderedUnitIds.push('eq1-tail');
+
+    const prepared = prepareImmutableStructure(doc);
+    expect(prepared.assetRegions.find((asset) => asset.id === 'eq1')?.rect)
+      .toEqual({ x: 330, y: 500, w: 200, h: 42 });
+    expect(prepared.units.some((unit) => unit.id === 'eq1-tail')).toBe(false);
+  });
+
+  it('removes an extracted math-only tail from prose immediately before an immutable formula', () => {
+    const doc = fixtureDoc();
+    doc.semanticUnits.find((unit) => unit.id === 'p1')!.sourceText = 'The values are defined below.\n𝑖 𝑗 1 ∑ 𝑖';
+    doc.blocks.find((block) => block.id === 'p1')!.text = 'The values are defined below.\n𝑖 𝑗 1 ∑ 𝑖';
+    doc.blocks.find((block) => block.id === 'p1')!.rect = { x: 50, y: 450, w: 230, h: 45 };
+
+    const prepared = prepareImmutableStructure(doc);
+
+    expect(prepared.units.find((unit) => unit.id === 'p1')?.sourceText).toBe('The values are defined below.');
+  });
+
+  it('expands a formula crop upward across numeric-only extracted lines using character geometry', () => {
+    const doc = fixtureDoc();
+    const preceding = doc.blocks.find((block) => block.id === 'p1')!;
+    preceding.text = 'The values are defined below.\n𝑖 𝑗\n∑ 𝑖\n1';
+    preceding.rect = { x: 330, y: 450, w: 230, h: 45 };
+    preceding.characterRects = [
+      ...[...'The values are defined below.'].map((ch, index) => ({
+        ch, sourceIndex: index, pageIndex: 0,
+        rect: { x: 330 + index * 4, y: 450, w: 3.8, h: 8 },
+      })),
+      { ch: '𝑖', sourceIndex: 30, pageIndex: 0, rect: { x: 390, y: 474, w: 5, h: 8 } },
+      { ch: '𝑗', sourceIndex: 32, pageIndex: 0, rect: { x: 410, y: 474, w: 5, h: 8 } },
+      { ch: '∑', sourceIndex: 34, pageIndex: 0, rect: { x: 374, y: 486, w: 8, h: 12 } },
+      { ch: '𝑖', sourceIndex: 36, pageIndex: 0, rect: { x: 390, y: 487, w: 5, h: 8 } },
+      { ch: '1', sourceIndex: 38, pageIndex: 0, rect: { x: 376, y: 490, w: 4, h: 7 } },
+    ];
+    doc.semanticUnits.find((unit) => unit.id === 'p1')!.sourceText = preceding.text;
+    doc.blocks.push({
+      id: 'eq1-tail', docId: 'en', type: 'paragraph', pageIndex: 0,
+      rect: { x: 405, y: 528, w: 80, h: 14 }, order: 3.1,
+      text: 'k = 1', splitAllowed: true, widthMode: 'column',
+    });
+    doc.semanticUnits.push({
+      id: 'eq1-tail', kind: 'paragraph', sourceText: 'k = 1', protectedTokens: [],
+      layoutRegionId: 'r1', order: 3.1,
+    });
+    doc.layoutRegions[0].orderedUnitIds.push('eq1-tail');
+
+    const prepared = prepareImmutableStructure(doc);
+    const formula = prepared.assetRegions.find((asset) => asset.id === 'eq1')!;
+
+    expect(formula.rect.y).toBeLessThanOrEqual(472);
+    expect(formula.rect.y + formula.rect.h).toBeGreaterThanOrEqual(542);
+    expect(prepared.units.find((unit) => unit.id === 'p1')?.sourceText)
+      .toBe('The values are defined below.');
+  });
+
+  it('widens a Vision table crop to include a numeric table-body block on the same rows', () => {
+    const doc = fixtureDoc();
+    doc.blocks.push({
+      id: 'table-body', docId: 'en', type: 'paragraph', pageIndex: 0,
+      rect: { x: 52, y: 420, w: 238, h: 60 }, order: 4,
+      text: 'PPA Frequency 100MHz Area 0.020mm2 Power 0.140mW',
+      splitAllowed: true, widthMode: 'column',
+    }, {
+      id: 'other-table-body', docId: 'en', type: 'paragraph', pageIndex: 0,
+      rect: { x: 330, y: 420, w: 230, h: 90 }, order: 5,
+      text: 'Benchmark CPU 5.6 ZK-Tracer 2.7 Speedup 2063',
+      splitAllowed: true, widthMode: 'column',
+    });
+    const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: [{
+      id: 'table', kind: 'table', pageIndex: 0,
+      rect: { x: 52, y: 415, w: 165, h: 75 }, widthMode: 'column',
+    }] });
+
+    expect(prepared.assetRegions.find((asset) => asset.id === 'table')?.rect)
+      .toEqual({ x: 52, y: 415, w: 238, h: 67 });
+  });
+
+  it('removes a trailing cluster of extracted chart labels from prose', () => {
+    const doc = fixtureDoc();
+    const source = [
+      'The process reads all trace data back from DRAM.',
+      'Main Trace Generation ModAdd MMAC',
+      'ModReduce', 'ModExp ModInv', '1.0', '0.8', '0.6', '0.4',
+      'Proportion', '0.2', '0.0', 'Json RSA', 'Tendermint',
+    ].join('\n');
+    const body = doc.blocks.find((block) => block.id === 'p1')!;
+    body.text = source;
+    doc.semanticUnits.find((unit) => unit.id === 'p1')!.sourceText = source;
+
+    const prepared = prepareImmutableStructure(doc);
+
+    expect(prepared.units.find((unit) => unit.id === 'p1')?.sourceText)
+      .toBe('The process reads all trace data back from DRAM.');
+  });
+
+  it('removes table rows from a mixed text block while preserving prose below the immutable table', () => {
+    const doc = fixtureDoc();
+    const tableText = 'CPU Baseline 100MHz\nArea 0.020mm²\nThe architecture reduces memory latency.';
+    let sourceIndex = 0;
+    const lines = [
+      { text: 'CPU Baseline 100MHz', y: 200 },
+      { text: 'Area 0.020mm²', y: 212 },
+      { text: 'The architecture reduces memory latency.', y: 242 },
+    ];
+    doc.blocks.push({
+      id: 'table-and-prose', docId: 'en', type: 'paragraph', pageIndex: 0,
+      rect: { x: 330, y: 200, w: 220, h: 52 }, order: 4, text: tableText,
+      splitAllowed: true, widthMode: 'column',
+      characterRects: lines.flatMap((line) => {
+        const chars = [...line.text].map((ch, index) => ({
+          ch, sourceIndex: sourceIndex + index, pageIndex: 0,
+          rect: { x: 332 + index * 4, y: line.y, w: 3.8, h: 8 },
+        }));
+        sourceIndex += line.text.length + 1;
+        return chars;
+      }),
+    });
+    doc.semanticUnits.push({
+      id: 'table-and-prose', kind: 'paragraph', sourceText: tableText,
+      protectedTokens: [], layoutRegionId: 'r1', order: 4,
+    });
+    doc.layoutRegions[0].orderedUnitIds.push('table-and-prose');
+
+    const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: [{
+      id: 'table-1', kind: 'table', pageIndex: 0,
+      rect: { x: 325, y: 194, w: 230, h: 32 }, widthMode: 'column',
+    }] });
+
+    expect(prepared.units.find((unit) => unit.id === 'table-and-prose')?.sourceText)
+      .toBe('The architecture reduces memory latency.');
+  });
+
+  it('separates overlapping arXiv metadata from a sentence and restores the sentence to its visual paragraph', () => {
+    const doc = fixtureDoc();
+    const metadata = 'arXiv:2605.25493v2 [cs.AR] 26 May 2026';
+    const suffix = 'rapidly evolving into the dominant system performance bottleneck.';
+    const mixed = `${metadata} ${suffix}`;
+    doc.blocks.push({
+      id: 'arxiv-mixed', docId: 'en', type: 'paragraph', pageIndex: 0,
+      rect: { x: 32, y: 420, w: 528, h: 10 }, order: 0.5, text: mixed,
+      splitAllowed: true, widthMode: 'span',
+      characterRects: [
+        ...[...metadata].map((ch, index) => ({
+          ch, sourceIndex: index, pageIndex: 0,
+          rect: { x: 32 + index * 8, y: 420, w: 7, h: 8 },
+        })),
+        ...[...suffix].map((ch, index) => ({
+          ch, sourceIndex: metadata.length + 1 + index, pageIndex: 0,
+          rect: { x: 330 + index * 3.5, y: 420, w: 3.2, h: 8 },
+        })),
+      ],
+    });
+    doc.semanticUnits.push({
+      id: 'arxiv-mixed', kind: 'paragraph', sourceText: mixed,
+      protectedTokens: [], layoutRegionId: 'r1', order: 0.5,
+    });
+    doc.layoutRegions[0].orderedUnitIds.splice(1, 0, 'arxiv-mixed');
+    const targetBlock = doc.blocks.find((block) => block.id === 'p1')!;
+    targetBlock.rect = { x: 330, y: 370, w: 230, h: 100 };
+    targetBlock.text = 'This unoptimized front-end is\nFor instance, further gains are limited.';
+    targetBlock.characterRects = [
+      ...[...'This unoptimized front-end is'].map((ch, index) => ({
+        ch, sourceIndex: index, pageIndex: 0,
+        rect: { x: 330 + index * 4, y: 408, w: 3.8, h: 8 },
+      })),
+      ...[...'For instance, further gains are limited.'].map((ch, index) => ({
+        ch, sourceIndex: 30 + index, pageIndex: 0,
+        rect: { x: 330 + index * 4, y: 432, w: 3.8, h: 8 },
+      })),
+    ];
+    doc.semanticUnits.find((unit) => unit.id === 'p1')!.sourceText = targetBlock.text;
+
+    const prepared = prepareImmutableStructure(doc);
+
+    expect(prepared.units.find((unit) => unit.id === 'arxiv-mixed')).toEqual(expect.objectContaining({
+      kind: 'reference', sourceText: metadata,
+    }));
+    expect(prepared.units.find((unit) => unit.id === 'p1')?.sourceText)
+      .toBe(`This unoptimized front-end is\n${suffix}\nFor instance, further gains are limited.`);
+  });
+
+  it('removes running headers embedded into a body block while preserving the body text', () => {
+    const doc = fixtureDoc();
+    const body = doc.blocks.find((block) => block.id === 'p1')!;
+    body.rect = { x: 50, y: 380, w: 230, h: 70 };
+    body.text = 'The translated body remains here.\nJieran Cui et al.';
+    body.characterRects = [
+      ...[...'The translated body remains here.'].map((ch, index) => ({
+        ch, sourceIndex: index, pageIndex: 0,
+        rect: { x: 50 + index * 4, y: 400, w: 3.8, h: 8 },
+      })),
+      ...[...'Jieran Cui et al.'].map((ch, index) => ({
+        ch, sourceIndex: 34 + index, pageIndex: 0,
+        rect: { x: 480 + index * 3, y: 59, w: 2.8, h: 7 },
+      })),
+    ];
+    doc.semanticUnits.find((unit) => unit.id === 'p1')!.sourceText = body.text;
+
+    const prepared = prepareImmutableStructure(doc);
+
+    expect(prepared.units.find((unit) => unit.id === 'p1')?.sourceText)
+      .toBe('The translated body remains here.');
+  });
+
+  it('removes repeated page furniture merged into body endings across pages', () => {
+    const doc = fixtureDoc();
+    const furniture = 'Jieran Cui et al.';
+    doc.pageCount = 2;
+    doc.pages.push({ pageIndex: 1, width: 612, height: 792, columns: [] });
+    const body = doc.blocks.find((block) => block.id === 'p1')!;
+    body.text = `The translated body remains here.\n${furniture}`;
+    body.characterRects = undefined;
+    doc.semanticUnits.find((unit) => unit.id === 'p1')!.sourceText = body.text;
+    doc.blocks.push({
+      id: 'running-author', docId: 'en', type: 'paragraph', pageIndex: 1,
+      rect: { x: 480, y: 58, w: 80, h: 8 }, order: 7,
+      text: furniture, splitAllowed: true, widthMode: 'column',
+    });
+    doc.semanticUnits.push({
+      id: 'running-author', kind: 'paragraph', sourceText: furniture,
+      protectedTokens: [], layoutRegionId: 'r1', order: 7,
+    });
+    doc.layoutRegions[0].orderedUnitIds.push('running-author');
+
+    const prepared = prepareImmutableStructure(doc);
+
+    expect(prepared.units.find((unit) => unit.id === 'p1')?.sourceText)
+      .toBe('The translated body remains here.');
+    expect(prepared.units.some((unit) => unit.id === 'running-author')).toBe(false);
+    expect(prepared.regions[0].orderedUnitIds).not.toContain('running-author');
+  });
+
+  it('creates a full-width horizontal row for source figures aligned on the same band', () => {
+    const doc = fixtureDoc();
+    doc.semanticUnits.push(
+      { id: 'cap-a', kind: 'caption', sourceText: 'Figure 2: A', protectedTokens: [], layoutRegionId: 'r1', order: 4 },
+      { id: 'cap-b', kind: 'caption', sourceText: 'Figure 3: B', protectedTokens: [], layoutRegionId: 'r1', order: 5 },
+    );
+    doc.layoutRegions[0].orderedUnitIds.push('cap-a', 'cap-b');
+    const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: [
+      { id: 'fig-a', kind: 'figure', pageIndex: 0, rect: { x: 50, y: 200, w: 160, h: 100 }, widthMode: 'column', captionUnitId: 'cap-a' },
+      { id: 'fig-b', kind: 'figure', pageIndex: 0, rect: { x: 225, y: 202, w: 160, h: 98 }, widthMode: 'column', captionUnitId: 'cap-b' },
+      { id: 'fig-c', kind: 'figure', pageIndex: 0, rect: { x: 400, y: 200, w: 160, h: 100 }, widthMode: 'column' },
+    ] });
+
+    const row = prepared.regions.find((region) => region.presentation === 'horizontal');
+    expect(row).toMatchObject({ mode: 'full-width', sourcePage: 0 });
+    expect(row?.orderedUnitIds).toEqual(['fig-a', 'cap-a', 'fig-b', 'cap-b', 'fig-c']);
+    expect(prepared.units.filter((unit) => row?.orderedUnitIds.includes(unit.id))
+      .every((unit) => unit.layoutRegionId === row?.id)).toBe(true);
+  });
+
   it('crops formulas exactly and inserts a figure asset before its caption from the visual gap', () => {
     const prepared = prepareImmutableStructure(fixtureDoc());
     expect(prepared.assetRegions).toContainEqual(expect.objectContaining({
@@ -243,6 +540,84 @@ describe('production pipeline preparation', () => {
       'table-caption', 'table-caption-asset', 'after-table',
     ]));
     expect(prepared.regions[0].orderedUnitIds).not.toContain('table-body');
+  });
+
+  it('splits a PDF text block that contains both a figure caption and a table title', () => {
+    const doc = fixtureDoc();
+    doc.blocks.push({
+      id: 'mixed-caption', docId: 'en', type: 'caption', pageIndex: 0,
+      rect: { x: 50, y: 300, w: 230, h: 34 }, order: 4,
+      text: 'Figure 9: Parallelism Analysis\nTable 2: PPA Results',
+      splitAllowed: false, widthMode: 'column',
+    });
+    doc.semanticUnits.push({
+      id: 'mixed-caption', kind: 'caption',
+      sourceText: 'Figure 9: Parallelism Analysis\nTable 2: PPA Results',
+      protectedTokens: [], layoutRegionId: 'r1', order: 4,
+    });
+    doc.layoutRegions[0].orderedUnitIds.push('mixed-caption');
+
+    const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: [
+      {
+        id: 'figure-9', kind: 'figure', pageIndex: 0,
+        rect: { x: 50, y: 180, w: 230, h: 110 }, widthMode: 'column',
+        captionUnitId: 'mixed-caption',
+      },
+      {
+        id: 'table-2', kind: 'table', pageIndex: 0,
+        rect: { x: 50, y: 345, w: 230, h: 90 }, widthMode: 'column',
+        captionUnitId: 'mixed-caption',
+      },
+    ] });
+
+    expect(prepared.units.some((unit) => unit.id === 'mixed-caption')).toBe(false);
+    expect(prepared.units).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'mixed-caption-figure', sourceText: 'Figure 9: Parallelism Analysis' }),
+      expect.objectContaining({ id: 'mixed-caption-table', sourceText: 'Table 2: PPA Results' }),
+    ]));
+    expect(prepared.assetRegions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'figure-9', captionUnitId: 'mixed-caption-figure' }),
+      expect.objectContaining({ id: 'table-2', captionUnitId: 'mixed-caption-table' }),
+    ]));
+  });
+
+  it('splits two figure captions merged into one PDF text block and binds them left-to-right', () => {
+    const doc = fixtureDoc();
+    doc.blocks.push({
+      id: 'paired-figures', docId: 'en', type: 'caption', pageIndex: 0,
+      rect: { x: 50, y: 300, w: 480, h: 18 }, order: 4,
+      text: 'Figure 9: Parallelism Analysis Figure 10: MTU and PTU Speedup',
+      splitAllowed: false, widthMode: 'span',
+    });
+    doc.semanticUnits.push({
+      id: 'paired-figures', kind: 'caption',
+      sourceText: 'Figure 9: Parallelism Analysis Figure 10: MTU and PTU Speedup',
+      protectedTokens: [], layoutRegionId: 'r1', order: 4,
+    });
+    doc.layoutRegions[0].orderedUnitIds.push('paired-figures');
+
+    const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: [
+      {
+        id: 'figure-9', kind: 'figure', pageIndex: 0,
+        rect: { x: 50, y: 180, w: 220, h: 110 }, widthMode: 'column',
+        captionUnitId: 'paired-figures',
+      },
+      {
+        id: 'figure-10', kind: 'figure', pageIndex: 0,
+        rect: { x: 310, y: 180, w: 220, h: 110 }, widthMode: 'column',
+        captionUnitId: 'paired-figures',
+      },
+    ] });
+
+    expect(prepared.units.some((unit) => unit.id === 'paired-figures')).toBe(false);
+    expect(prepared.units).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'paired-figures-figure-1', sourceText: 'Figure 9: Parallelism Analysis' }),
+      expect.objectContaining({ id: 'paired-figures-figure-2', sourceText: 'Figure 10: MTU and PTU Speedup' }),
+    ]));
+    expect(prepared.assetRegions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'figure-9', captionUnitId: 'paired-figures-figure-1' }),
+      expect.objectContaining({ id: 'figure-10', captionUnitId: 'paired-figures-figure-2' }),
+    ]));
   });
 
   it('drops source page numbers so the target PDF can paginate and number itself naturally', () => {

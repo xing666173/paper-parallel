@@ -51,16 +51,5 @@ export function buildLayoutRegions(input: LayoutRegionInput): LayoutRegion[] {
     current.orderedUnitIds.push(block.id);
   }
 
-  const merged: LayoutRegion[] = [];
-  for (const region of pageGroups) {
-    const previous = merged.at(-1);
-    const consecutive = previous && region.sourcePage - previous.sourcePage === 1;
-    if (previous && previous.mode === region.mode && consecutive) {
-      previous.orderedUnitIds.push(...region.orderedUnitIds);
-      previous.bounds = unionBounds(previous.bounds, region.bounds);
-      continue;
-    }
-    merged.push({ ...region, id: `region-${merged.length + 1}`, orderedUnitIds: [...region.orderedUnitIds] });
-  }
-  return merged;
+  return pageGroups;
 }

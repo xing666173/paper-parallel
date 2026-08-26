@@ -7,6 +7,8 @@ import {
 } from '../../src/core/translate/prompts';
 import {
   extractProtectedTokens,
+  maskProtectedTokensForTranslation,
+  restoreProtectedTokensFromTranslation,
   validateBatchResponse,
 } from '../../src/core/translate/protected';
 import type {
@@ -30,6 +32,27 @@ function paragraphRequest(): TranslationBlockRequest {
 }
 
 describe('generic academic translation protocol', () => {
+  it('masks repeated numbers and citations for the model and restores the validated response', () => {
+    const source: TranslationBlockRequest = {
+      blockId: 'p1', kind: 'paragraph',
+      source: 'Figure 2 uses 10 × speedup [22], then 10 more steps.',
+      alignmentMode: 'sentence-candidates',
+      sourceSentences: [{ id: 'p1-s-1', text: 'Figure 2 uses 10 × speedup [22], then 10 more steps.' }],
+      protectedTokens: ['2', '10', '[22]', '10'],
+    };
+    const masked = maskProtectedTokensForTranslation([source]);
+    expect(masked.blocks[0]!.source)
+      .toBe('Figure ⟦PP0_2⟧ uses ⟦PP0_1⟧ × speedup ⟦PP0_0⟧, then ⟦PP0_1⟧ more steps.');
+    const maskedTranslation = '图 ⟦PP0_2⟧ 使用 ⟦PP0_1⟧ 倍加速 ⟦PP0_0⟧，随后再执行 ⟦PP0_1⟧ 步。';
+    const restored = restoreProtectedTokensFromTranslation({ blocks: [{
+      blockId: 'p1', translation: maskedTranslation,
+      alignmentGroups: [{ sourceSentenceIds: ['p1-s-1'], targetSegments: [maskedTranslation] }],
+      newTerms: [], warnings: [],
+    }] }, masked.replacements);
+
+    expect(restored.blocks[0]!.translation).toBe('图 2 使用 10 倍加速 [22]，随后再执行 10 步。');
+    expect(validateBatchResponse([source], restored).ok).toBe(true);
+  });
   it('creates stable source candidates before any translation request', () => {
     expect(buildSourceSentenceCandidates('p1', 'First result. Second result!')).toEqual({
       mode: 'sentence-candidates',

@@ -88,6 +88,15 @@ describe('parser: columns', () => {
     expect(kinds.join('|')).toMatch(/^full(\|full)*(\|left)*(\|right)*$/);
     expect(detectLayoutMode(lines)).toBe('mixed');
   });
+
+  it('does not treat a short centered body continuation as full-width front matter', () => {
+    const lines = classifyLines([{
+      y: 306, x1: 318, x2: 364, h: 9,
+      text: 'acceleration.', items: [],
+    }], 612);
+
+    expect(lines[0]?.col).toBe('right');
+  });
 });
 
 describe('parser: lines -> blocks', () => {
@@ -188,7 +197,7 @@ describe('parser: pdfjsAdapter', () => {
     const item = { str: 'x', width: 5, height: 12, transform: [1, 0, 0, 1, 10, 20] };
     const viewport = { transform: [1, 0, 0, 1, 0, 0] };
     const r = normalizeTextItem(item, viewport);
-    expect(r).toEqual({ str: 'x', x: 10, y: 20, w: 5, h: 12 });
+    expect(r).toEqual({ str: 'x', x: 10, y: 8, w: 5, h: 12 });
   });
 
   it('带纵向翻转的视口矩阵(典型 PDF.js scale=1 视口)', () => {
@@ -197,7 +206,7 @@ describe('parser: pdfjsAdapter', () => {
     const item = { str: 'x', width: 5, height: 12, transform: [1, 0, 0, 1, 100, 700] };
     const r = normalizeTextItem(item, viewport);
     expect(r.x).toBeCloseTo(100);
-    expect(r.y).toBeCloseTo(92);
+    expect(r.y).toBeCloseTo(80);
     expect(r.w).toBeCloseTo(5);
     expect(r.h).toBeCloseTo(12);
   });

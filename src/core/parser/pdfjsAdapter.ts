@@ -33,8 +33,11 @@ export function normalizeTextItem(item: PdfTextItemLike, viewport: PdfViewportLi
   const vp = viewport.clone ? viewport.clone({ scale: 1 }) : viewport;
   const m = transformPoint(vp.transform, item.transform);
   const x = m[4];
-  const y = m[5];
   const h = Math.max(Math.hypot(m[2], m[3]), item.height || 0);
+  // PDF.js places m[5] on the text baseline. The rest of the pipeline uses
+  // top-left rectangles (canvas/PDF viewport coordinates), so retain the
+  // whole glyph box instead of starting crops at the baseline.
+  const y = m[5] - h;
   // PDF.js already reports TextItem.width in viewport-independent page units.
   // Applying the text/font matrix again scales it by the font size (often 9–15x)
   // and makes every column line look full-width. Only the viewport scale belongs

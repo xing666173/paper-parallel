@@ -56,8 +56,8 @@ export async function runProductionPipeline(
     : undefined;
   const persist = async (notify = true): Promise<void> => {
     snapshot = { ...snapshot, progress: { ...snapshot.progress } };
-    await options.repository.saveTask(snapshot);
     if (notify) options.onSnapshot?.(snapshot);
+    await options.repository.saveTask(snapshot);
   };
   const enter = async (stage: TaskStage): Promise<void> => {
     throwIfAborted(options.signal);

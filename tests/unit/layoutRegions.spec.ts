@@ -31,4 +31,18 @@ describe('layout regions', () => {
     expect(regions).toHaveLength(1);
     expect(regions[0]?.mode).toBe('single');
   });
+
+  it('keeps consecutive source pages separate even when their layout modes match', () => {
+    const regions = buildLayoutRegions({
+      pageWidth: 612,
+      blocks: [
+        { id: 'p1-left', pageIndex: 0, order: 0, col: 'left', rect: { x: 50, y: 80, w: 250, h: 600 } },
+        { id: 'p2-left', pageIndex: 1, order: 1, col: 'left', rect: { x: 50, y: 80, w: 250, h: 600 } },
+      ],
+    });
+
+    expect(regions).toHaveLength(2);
+    expect(regions.map((region) => region.sourcePage)).toEqual([0, 1]);
+    expect(regions.map((region) => region.orderedUnitIds)).toEqual([['p1-left'], ['p2-left']]);
+  });
 });

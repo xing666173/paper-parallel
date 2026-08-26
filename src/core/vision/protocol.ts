@@ -72,6 +72,9 @@ export function parseNormalizedVisionBox(value: unknown, path: string): Normaliz
     throw new VisionProtocolError(`Vision JSON ${path} 必须为四个有限数字`);
   }
   let [x, y, width, height] = values as number[];
+  if ([x, y, width, height].every((item) => item >= 0 && item <= 1)) {
+    [x, y, width, height] = [x * 1000, y * 1000, width * 1000, height * 1000];
+  }
   const validXywh = x >= 0 && y >= 0 && width > 0 && height > 0 && x + width <= 1000 && y + height <= 1000;
   if (!validXywh) {
     const [x1, y1, x2, y2] = values as number[];
@@ -84,6 +87,15 @@ export function parseNormalizedVisionBox(value: unknown, path: string): Normaliz
     throw new VisionProtocolError(`Vision JSON ${path} 超出 0..1000 页面范围`);
   }
   return [x, y, width, height];
+}
+
+function normalizedColumn(value: unknown, bbox: NormalizedVisionBox): VisionColumn {
+  if (value === 'left' || value === 'right' || value === 'full') return value;
+  const normalized = typeof value === 'string' ? value.toLowerCase().replace(/[ _]/g, '-') : '';
+  if (['both', 'span', 'full-width', 'center', 'centre', 'middle'].includes(normalized)) return 'full';
+  const [x, , width] = bbox;
+  if (width >= 560 || (x < 450 && x + width > 550)) return 'full';
+  return x + width / 2 < 500 ? 'left' : 'right';
 }
 
 export function parseVisionPageAnalysis(value: unknown, expectedPageIndex: number): VisionPageAnalysis {
@@ -102,12 +114,13 @@ export function parseVisionPageAnalysis(value: unknown, expectedPageIndex: numbe
       throw new VisionProtocolError(`Vision JSON regions[${index}].confidence 必须在 0..1`);
     }
     const captionValue = item.caption_bbox ?? item.captionBBox;
+    const bbox = parseNormalizedVisionBox(item.bbox, `regions[${index}].bbox`);
     return {
       type: enumValue(item.type, [
         'figure', 'table', 'display_formula', 'code', 'caption', 'header', 'footer', 'body_text',
       ] as const, `regions[${index}].type`),
-      bbox: parseNormalizedVisionBox(item.bbox, `regions[${index}].bbox`),
-      column: enumValue(item.column, ['left', 'right', 'full'] as const, `regions[${index}].column`),
+      bbox,
+      column: normalizedColumn(item.column, bbox),
       ...(captionValue === undefined ? {} : {
         captionBBox: parseNormalizedVisionBox(captionValue, `regions[${index}].caption_bbox`),
       }),

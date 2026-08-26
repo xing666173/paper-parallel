@@ -7,10 +7,17 @@ export type AiLogEvent =
         | 'page-coverage-excessive' | 'caption-overlap' | 'body-prose-density';
     }
   | { type: 'vision-review-page-started'; at: number; page: number; totalPages: number }
+  | {
+      type: 'vision-review-page-phase'; at: number; page: number; totalPages: number;
+      phase: 'rendered' | 'connected' | 'content' | 'retrying' | 'returned';
+    }
+  | { type: 'vision-review-page-invalid'; at: number; page: number; totalPages: number; reason: string }
   | { type: 'vision-review-page-waiting'; at: number; page: number; totalPages: number; elapsedMs: number }
   | { type: 'vision-review-page-timeout'; at: number; page: number; totalPages: number; timeoutMs: number }
   | { type: 'vision-review-page'; at: number; page: number; totalPages: number; issueCount: number }
   | { type: 'vision-review-completed'; at: number; reviewedPages: number; issueCount: number }
+  | { type: 'quality-finalizing'; at: number; visualPass: boolean; severeIssueCount: number }
+  | { type: 'quality-persisted'; at: number }
   | { type: 'batch-started'; at: number; batchId: string; blockIds: string[]; modelId: string }
   | {
       type: 'batch-received'; at: number; batchId: string; elapsedMs: number;

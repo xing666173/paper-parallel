@@ -34,7 +34,7 @@ function translationKind(kind: SemanticUnitKind): TranslationBlockKind {
 export function buildTranslationRequestsFromDoc(doc: Doc): TranslationBlockRequest[] {
   return [...doc.semanticUnits]
     .sort((left, right) => left.order - right.order)
-    .filter((unit) => !IMMUTABLE_KINDS.has(unit.kind) && Boolean(unit.sourceText?.trim()))
+    .filter((unit) => unit.kind !== 'reference' && !IMMUTABLE_KINDS.has(unit.kind) && Boolean(unit.sourceText?.trim()))
     .map((unit) => {
       const candidates = buildSourceSentenceCandidates(unit.id, unit.sourceText!);
       return {
@@ -149,7 +149,259 @@ function intersectionArea(left: { x: number; y: number; w: number; h: number }, 
 
 function materiallyCovered(block: Doc['blocks'][number], asset: DetectedAssetRegion): boolean {
   if (block.pageIndex !== asset.pageIndex) return false;
+  if (block.characterRects?.length) {
+    const visible = block.characterRects.filter((character) => character.ch.trim().length > 0);
+    if (visible.length) {
+      const covered = visible.filter((character) => {
+        const center = {
+          x: character.rect.x + character.rect.w / 2,
+          y: character.rect.y + character.rect.h / 2,
+        };
+        return center.x >= asset.rect.x && center.x <= asset.rect.x + asset.rect.w
+          && center.y >= asset.rect.y && center.y <= asset.rect.y + asset.rect.h;
+      }).length;
+      return covered / visible.length >= 0.8;
+    }
+  }
   return intersectionArea(block.rect, asset.rect) / Math.max(1, block.rect.w * block.rect.h) >= 0.5;
+}
+
+function withoutAssetTextLines(
+  block: Doc['blocks'][number],
+  source: string,
+  assets: readonly DetectedAssetRegion[],
+): string {
+  if (!block.characterRects?.length || !assets.length) return source;
+  let offset = 0;
+  const kept: string[] = [];
+  for (const line of source.split(/\r?\n/)) {
+    const start = offset;
+    const end = start + line.length;
+    offset = end + 1;
+    const characters = block.characterRects.filter((character) => (
+      character.sourceIndex >= start
+      && character.sourceIndex < end
+      && character.ch.trim().length > 0
+    ));
+    if (!characters.length) {
+      kept.push(line);
+      continue;
+    }
+    const inside = characters.filter((character) => assets.some((asset) => {
+      const centerX = character.rect.x + character.rect.w / 2;
+      const centerY = character.rect.y + character.rect.h / 2;
+      return centerX >= asset.rect.x && centerX <= asset.rect.x + asset.rect.w
+        && centerY >= asset.rect.y && centerY <= asset.rect.y + asset.rect.h;
+    })).length;
+    if (inside / characters.length < 0.6) kept.push(line);
+  }
+  return kept.join('\n').trim();
+}
+
+function separateOverlappingArxivMetadata(doc: Doc, units: SemanticUnit[]): void {
+  for (const block of doc.blocks) {
+    const match = block.text?.match(/^(arXiv:\S+\s+\[[^\]]+\]\s+\d{1,2}\s+[A-Za-z]+\s+\d{4})\s+(.+)$/);
+    if (!match || !block.characterRects?.length) continue;
+    const metadata = match[1]!;
+    const suffix = match[2]!;
+    const suffixStart = block.text!.indexOf(suffix);
+    const suffixCharacters = block.characterRects.filter((character) => character.sourceIndex >= suffixStart);
+    if (!suffixCharacters.length) continue;
+    const centerX = (Math.min(...suffixCharacters.map((character) => character.rect.x))
+      + Math.max(...suffixCharacters.map((character) => character.rect.x + character.rect.w))) / 2;
+    const centerY = (Math.min(...suffixCharacters.map((character) => character.rect.y))
+      + Math.max(...suffixCharacters.map((character) => character.rect.y + character.rect.h))) / 2;
+    const targetBlock = doc.blocks
+      .filter((candidate) => (
+        candidate.id !== block.id
+        && candidate.pageIndex === block.pageIndex
+        && candidate.type === 'paragraph'
+        && centerX >= candidate.rect.x && centerX <= candidate.rect.x + candidate.rect.w
+        && centerY >= candidate.rect.y && centerY <= candidate.rect.y + candidate.rect.h
+      ))
+      .sort((left, right) => left.rect.w * left.rect.h - right.rect.w * right.rect.h)[0];
+    const metadataUnit = units.find((unit) => unit.id === block.id);
+    const targetUnit = targetBlock ? units.find((unit) => unit.id === targetBlock.id) : undefined;
+    if (!metadataUnit || !targetBlock || !targetUnit?.sourceText) continue;
+    const nextCharacter = (targetBlock.characterRects ?? [])
+      .filter((character) => character.rect.y > centerY + 2)
+      .sort((left, right) => left.rect.y - right.rect.y || left.sourceIndex - right.sourceIndex)[0];
+    const insertion = Math.min(targetUnit.sourceText.length, nextCharacter?.sourceIndex ?? targetUnit.sourceText.length);
+    targetUnit.sourceText = [
+      targetUnit.sourceText.slice(0, insertion).trimEnd(),
+      suffix,
+      targetUnit.sourceText.slice(insertion).trimStart(),
+    ].filter(Boolean).join('\n');
+    metadataUnit.sourceText = metadata;
+    metadataUnit.kind = 'reference';
+    metadataUnit.protectedTokens = extractProtectedTokens(metadata);
+  }
+}
+
+function withoutEmbeddedMarginFurniture(doc: Doc, block: Doc['blocks'][number], source: string): string {
+  if (!block.characterRects?.length || !/\r?\n/.test(source)) return source;
+  let offset = 0;
+  const lines = source.split(/\r?\n/).map((line) => {
+    const start = offset;
+    const end = start + line.length;
+    offset = end + 1;
+    const characters = block.characterRects!.filter((character) => (
+      character.sourceIndex >= start
+      && character.sourceIndex < end
+      && character.ch.trim().length > 0
+    ));
+    const nearMargin = characters.filter((character) => {
+      const page = doc.pages[character.pageIndex];
+      if (!page) return false;
+      const centerY = character.rect.y + character.rect.h / 2;
+      return centerY < page.height * 0.1 || centerY > page.height * 0.92;
+    }).length;
+    return { line, furniture: characters.length > 0 && nearMargin / characters.length >= 0.8 };
+  });
+  if (!lines.some((line) => line.furniture) || !lines.some((line) => !line.furniture && line.line.trim())) {
+    return source;
+  }
+  return lines.filter((line) => !line.furniture).map((line) => line.line).join('\n').trim();
+}
+
+function normalizedFurnitureLine(value: string): string {
+  return value.trim().replace(/\s+/g, ' ').toLocaleLowerCase();
+}
+
+function repeatedEmbeddedFurnitureLines(doc: Doc): Set<string> {
+  const occurrences = new Map<string, Array<{ standalone: boolean; nearMargin: boolean }>>();
+  for (const block of doc.blocks) {
+    const lines = (block.text ?? '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    const finalLine = lines.at(-1);
+    if (!finalLine || finalLine.length < 6 || finalLine.length > 180) continue;
+    const pageHeight = doc.pages[block.pageIndex]?.height ?? doc.meta.paperHeight;
+    const nearMargin = block.rect.y < pageHeight * 0.12
+      || block.rect.y + block.rect.h > pageHeight * 0.92;
+    const key = normalizedFurnitureLine(finalLine);
+    const records = occurrences.get(key) ?? [];
+    records.push({ standalone: lines.length === 1, nearMargin });
+    occurrences.set(key, records);
+  }
+
+  const result = new Set<string>();
+  for (const [key, records] of occurrences) {
+    if (records.length < 2) continue;
+    const looksLikeAuthor = /\bet\s+al\.?$/i.test(key);
+    const looksLikeRunningTitle = key.length >= 45 && /[a-z]/i.test(key);
+    const repeatedlyObserved = records.length >= 3;
+    const hasStandaloneMarginCopy = records.some((record) => record.standalone && record.nearMargin);
+    if ((looksLikeAuthor || looksLikeRunningTitle || repeatedlyObserved) && (hasStandaloneMarginCopy || repeatedlyObserved)) {
+      result.add(key);
+    }
+  }
+  return result;
+}
+
+function withoutRepeatedEmbeddedFurniture(
+  doc: Doc,
+  block: Doc['blocks'][number],
+  source: string,
+  repeatedLines: ReadonlySet<string>,
+): string {
+  if (!repeatedLines.size || !source.trim()) return source;
+  const lines = source.split(/\r?\n/);
+  if (lines.length === 1) {
+    const pageHeight = doc.pages[block.pageIndex]?.height ?? doc.meta.paperHeight;
+    const nearMargin = block.rect.y < pageHeight * 0.12
+      || block.rect.y + block.rect.h > pageHeight * 0.92;
+    // Keep the real document title on the first page. Repeated standalone
+    // copies on later page margins are running furniture.
+    return block.pageIndex > 0 && nearMargin && repeatedLines.has(normalizedFurnitureLine(source))
+      ? ''
+      : source;
+  }
+  return lines
+    .filter((line) => !repeatedLines.has(normalizedFurnitureLine(line)))
+    .join('\n')
+    .trim();
+}
+
+function withoutTrailingVisualLabelCluster(source: string): string {
+  const lines = source.split(/\r?\n/);
+  if (lines.length < 7) return source;
+  let start = lines.length;
+  for (let index = lines.length - 1; index > 0; index -= 1) {
+    const line = lines[index]!.trim();
+    const words = line.match(/[A-Za-z][A-Za-z0-9_.-]*/g)?.length ?? 0;
+    const labelLike = line.length > 0
+      && line.length <= 42
+      && !/[.!?;:]\s*$/.test(line)
+      && (words <= 5 || /^[\d\s.,%+\-×]+$/.test(line));
+    if (!labelLike) break;
+    start = index;
+  }
+  const suffix = lines.slice(start).map((line) => line.trim()).filter(Boolean);
+  if (suffix.length < 6) return source;
+  const numericLines = suffix.filter((line) => /\d/.test(line)).length;
+  const chartTerms = suffix.filter((line) => (
+    /\b(?:proportion|speedup|benchmark|mod(?:add|reduce|exp|inv)|mmac|rsa|json|tendermint|trace generation)\b/i.test(line)
+  )).length;
+  if (numericLines < 3 || chartTerms < 1) return source;
+  return lines.slice(0, start).join('\n').trim();
+}
+
+function unionRect(left: Doc['blocks'][number]['rect'], right: Doc['blocks'][number]['rect']) {
+  const x = Math.min(left.x, right.x);
+  const y = Math.min(left.y, right.y);
+  const r = Math.max(left.x + left.w, right.x + right.w);
+  const b = Math.max(left.y + left.h, right.y + right.h);
+  return { x, y, w: r - x, h: b - y };
+}
+
+function formulaContinuation(anchor: Doc['blocks'][number], candidate: Doc['blocks'][number]): boolean {
+  if (candidate.id === anchor.id || candidate.pageIndex !== anchor.pageIndex) return false;
+  if (candidate.type !== 'paragraph') return false;
+  const text = candidate.text?.trim() ?? '';
+  if (!text || text.length > 120 || (text.match(/[A-Za-z]{3,}/g)?.length ?? 0) > 4) return false;
+  if (!/[=+\-*/∑∫√≤≥≈≠𝑎-𝑧𝛼-𝜔α-ωΑ-Ω]/u.test(text)) return false;
+  const verticalGap = Math.max(
+    0,
+    candidate.rect.y - (anchor.rect.y + anchor.rect.h),
+    anchor.rect.y - (candidate.rect.y + candidate.rect.h),
+  );
+  const horizontalOverlap = Math.max(0, Math.min(
+    anchor.rect.x + anchor.rect.w,
+    candidate.rect.x + candidate.rect.w,
+  ) - Math.max(anchor.rect.x, candidate.rect.x));
+  return verticalGap <= 18 && horizontalOverlap > 0;
+}
+
+function withoutTrailingFormulaFragment(source: string): string {
+  const lines = source.split(/\r?\n/);
+  let cut = lines.length;
+  let containsMath = false;
+  for (let index = lines.length - 1; index > 0; index -= 1) {
+    const tail = lines[index]!.trim();
+    const naturalWords = tail.match(/[A-Za-z]{3,}/g) ?? [];
+    const mathLike = /[=+\-*/∑∫√≤≥≈≠𝑎-𝑧𝛼-𝜔α-ωΑ-Ω]/u.test(tail);
+    const numericOnly = /^[\d\s.,()[\]{}]+$/.test(tail);
+    if (tail.length > 100 || naturalWords.length > 1 || (!mathLike && !numericOnly)) break;
+    cut = index;
+    containsMath ||= mathLike;
+  }
+  return containsMath ? lines.slice(0, cut).join('\n').trim() : source.trim();
+}
+
+function trailingFormulaRect(
+  block: Doc['blocks'][number],
+  cleanedLength: number,
+): Doc['blocks'][number]['rect'] | undefined {
+  const characters = (block.characterRects ?? []).filter((character) => (
+    character.pageIndex === block.pageIndex
+    && character.sourceIndex >= cleanedLength
+    && /[\d=+\-*/∑∫√≤≥≈≠𝑎-𝑧𝛼-𝜔α-ωΑ-Ω]/u.test(character.ch)
+  ));
+  if (!characters.length) return undefined;
+  const x = Math.min(...characters.map((character) => character.rect.x));
+  const y = Math.min(...characters.map((character) => character.rect.y));
+  const right = Math.max(...characters.map((character) => character.rect.x + character.rect.w));
+  const bottom = Math.max(...characters.map((character) => character.rect.y + character.rect.h));
+  return { x: x - 2, y: y - 2, w: right - x + 4, h: bottom - y + 4 };
 }
 
 function visualColumn(block: Doc['blocks'][number], pageWidth: number): 'span' | 'left' | 'right' {
@@ -214,6 +466,15 @@ function detectedPageFurnitureIds(doc: Doc): Set<string> {
   return ids;
 }
 
+function splitMergedCaptionText(source: string): Array<{ kind: 'figure' | 'table'; text: string }> {
+  const starts = [...source.matchAll(/\b(Figure|Table)\s+\d+[A-Za-z]?\s*[:.]\s*/gi)];
+  if (starts.length < 2) return [];
+  return starts.map((match, index) => ({
+    kind: match[1]!.toLocaleLowerCase() as 'figure' | 'table',
+    text: source.slice(match.index!, starts[index + 1]?.index ?? source.length).trim(),
+  })).filter((segment) => segment.text.length > 0);
+}
+
 export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOptions = {}): PreparedImmutableStructure {
   const regions = doc.layoutRegions.map((region) => ({ ...region, orderedUnitIds: [...region.orderedUnitIds] }));
   let units = doc.semanticUnits.map((unit) => ({ ...unit, protectedTokens: [...unit.protectedTokens] }));
@@ -223,6 +484,7 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
     ...asset, rect: { ...asset.rect },
   }));
   const furnitureIds = detectedPageFurnitureIds(doc);
+  const repeatedFurnitureLines = repeatedEmbeddedFurnitureLines(doc);
   if (furnitureIds.size) {
     units = units.filter((unit) => !furnitureIds.has(unit.id));
     for (const region of regions) {
@@ -230,18 +492,172 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
     }
   }
 
+  separateOverlappingArxivMetadata(doc, units);
+  const emptiedFurnitureIds = new Set<string>();
+  for (const unit of units) {
+    if (!unit.sourceText) continue;
+    const block = blocks.get(unit.id);
+    if (!block) continue;
+    const geometryCleaned = withoutEmbeddedMarginFurniture(doc, block, unit.sourceText);
+    const labelsCleaned = withoutTrailingVisualLabelCluster(geometryCleaned);
+    const cleaned = withoutRepeatedEmbeddedFurniture(doc, block, labelsCleaned, repeatedFurnitureLines);
+    if (cleaned !== unit.sourceText) {
+      unit.sourceText = cleaned;
+      unit.protectedTokens = extractProtectedTokens(cleaned);
+      if (!cleaned) emptiedFurnitureIds.add(unit.id);
+    }
+  }
+  if (emptiedFurnitureIds.size) {
+    units = units.filter((unit) => !emptiedFurnitureIds.has(unit.id));
+    for (const region of regions) {
+      region.orderedUnitIds = region.orderedUnitIds.filter((unitId) => !emptiedFurnitureIds.has(unitId));
+    }
+  }
+
+  const bibliographySectionIds = new Set(units
+    .filter((unit) => unit.kind === 'heading' && /^(references|bibliography|参考文献)\s*$/i.test(unit.sourceText?.trim() ?? ''))
+    .map((unit) => unit.id));
+  if (bibliographySectionIds.size) {
+    units = units.map((unit) => unit.id !== unit.parentId && bibliographySectionIds.has(unit.parentId ?? '')
+      ? { ...unit, kind: 'reference' as const }
+      : unit);
+  }
+
+  // PDF text extraction can merge adjacent captions from multiple visual
+  // objects into one block (for example Figure 9 + Figure 10, or Figure 9 +
+  // Table 2). Keep the crops separate and create one semantic caption per
+  // visual object, preserving the source left-to-right order within each kind.
+  const assetsByCaption = new Map<string, DetectedAssetRegion[]>();
+  for (const asset of verifiedAssetRegions) {
+    if (!asset.captionUnitId) continue;
+    const group = assetsByCaption.get(asset.captionUnitId) ?? [];
+    group.push(asset);
+    assetsByCaption.set(asset.captionUnitId, group);
+  }
+  for (const [captionId, assets] of assetsByCaption) {
+    const original = units.find((unit) => unit.id === captionId);
+    if (!original?.sourceText) continue;
+    const segments = splitMergedCaptionText(original.sourceText);
+    if (segments.length < 2) continue;
+    const supportedAssets = assets.filter((asset) => asset.kind === 'figure' || asset.kind === 'table');
+    const countsMatch = supportedAssets.length === assets.length
+      && (['figure', 'table'] as const).every((kind) => (
+        supportedAssets.filter((asset) => asset.kind === kind).length
+        === segments.filter((segment) => segment.kind === kind).length
+      ));
+    if (!countsMatch) continue;
+
+    const segmentTotals = new Map<'figure' | 'table', number>();
+    const segmentOrdinals = new Map<'figure' | 'table', number>();
+    for (const kind of ['figure', 'table'] as const) {
+      segmentTotals.set(kind, segments.filter((segment) => segment.kind === kind).length);
+    }
+    const replacements: SemanticUnit[] = segments.map((segment, index) => {
+      const ordinal = (segmentOrdinals.get(segment.kind) ?? 0) + 1;
+      segmentOrdinals.set(segment.kind, ordinal);
+      const suffix = (segmentTotals.get(segment.kind) ?? 0) > 1
+        ? `${segment.kind}-${ordinal}`
+        : segment.kind;
+      return {
+        ...original,
+        id: `${captionId}-${suffix}`,
+        kind: segment.kind === 'table' ? 'table-title' : 'caption',
+        sourceText: segment.text,
+        protectedTokens: extractProtectedTokens(segment.text),
+        order: original.order + (index - (segments.length - 1) / 2) * 0.01,
+      };
+    });
+    units = units.filter((unit) => unit.id !== captionId).concat(replacements);
+    for (const region of regions) {
+      const index = region.orderedUnitIds.indexOf(captionId);
+      if (index >= 0) region.orderedUnitIds.splice(index, 1, ...replacements.map((unit) => unit.id));
+    }
+    for (const kind of ['figure', 'table'] as const) {
+      const kindAssets = supportedAssets
+        .filter((asset) => asset.kind === kind)
+        .sort((left, right) => left.rect.x - right.rect.x || left.rect.y - right.rect.y);
+      const kindReplacements = replacements.filter((replacement) => (
+        replacement.kind === (kind === 'table' ? 'table-title' : 'caption')
+      ));
+      kindAssets.forEach((asset, index) => {
+        asset.captionUnitId = kindReplacements[index]!.id;
+      });
+    }
+  }
+
+  for (const asset of verifiedAssetRegions) {
+    if (asset.kind !== 'table') continue;
+    const numericRows = doc.blocks.filter((block) => {
+      if (block.pageIndex !== asset.pageIndex || block.id === asset.captionUnitId) return false;
+      const horizontalOverlap = Math.max(0, Math.min(
+        block.rect.x + block.rect.w,
+        asset.rect.x + asset.rect.w,
+      ) - Math.max(block.rect.x, asset.rect.x));
+      const overlap = Math.max(0, Math.min(
+        block.rect.y + block.rect.h,
+        asset.rect.y + asset.rect.h,
+      ) - Math.max(block.rect.y, asset.rect.y));
+      const numericTokens = block.text?.match(/\d+(?:[.,]\d+)?/g) ?? [];
+      return horizontalOverlap / Math.max(1, Math.min(block.rect.w, asset.rect.w)) >= 0.2
+        && overlap / Math.max(1, block.rect.h) >= 0.6
+        && numericTokens.length >= 2;
+    });
+    if (!numericRows.length) continue;
+    const left = Math.min(asset.rect.x, ...numericRows.map((block) => block.rect.x));
+    const right = Math.max(asset.rect.x + asset.rect.w, ...numericRows.map((block) => block.rect.x + block.rect.w));
+    const assetBottom = asset.rect.y + asset.rect.h;
+    const numericBottom = Math.max(...numericRows.map((block) => block.rect.y + block.rect.h)) + 2;
+    const bottom = Math.min(assetBottom, numericBottom);
+    asset.rect = {
+      ...asset.rect,
+      x: left,
+      w: right - left,
+      h: bottom > asset.rect.y + 12 ? bottom - asset.rect.y : asset.rect.h,
+    };
+  }
+
   for (const unit of units) {
     if (unit.kind !== 'formula' && unit.kind !== 'code' && unit.kind !== 'page-furniture') continue;
     const block = blocks.get(unit.id);
     if (!block) throw new Error(`不可变资产 ${unit.id} 缺少源坐标`);
     if (verifiedAssetRegions.some((asset) => materiallyCovered(block, asset))) continue;
+    let rect = unit.kind === 'formula'
+      ? doc.blocks
+        .filter((candidate) => formulaContinuation(block, candidate))
+        .reduce((combined, candidate) => unionRect(combined, candidate.rect), { ...block.rect })
+      : { ...block.rect };
     assetRegions.push({
       id: unit.assetId ?? unit.id,
       kind: unit.kind,
       pageIndex: block.pageIndex,
-      rect: { ...block.rect },
+      rect,
       widthMode: block.widthMode,
     });
+    if (unit.kind === 'formula') {
+      const previousBlock = doc.blocks
+        .filter((candidate) => (
+          candidate.id !== block.id
+          && candidate.pageIndex === block.pageIndex
+          && candidate.rect.y + candidate.rect.h <= block.rect.y + 2
+        ))
+        .sort((left, right) => (
+          right.rect.y + right.rect.h - (left.rect.y + left.rect.h)
+        ))[0];
+      const previous = previousBlock
+        ? units.find((candidate) => candidate.id === previousBlock.id)
+        : undefined;
+      if (previous?.sourceText && previousBlock) {
+        const cleaned = withoutTrailingFormulaFragment(previous.sourceText);
+        const formulaTail = cleaned.length < previous.sourceText.trim().length
+          ? trailingFormulaRect(previousBlock, cleaned.length)
+          : undefined;
+        if (formulaTail) {
+          rect = unionRect(rect, formulaTail);
+          assetRegions[assetRegions.length - 1]!.rect = rect;
+        }
+        previous.sourceText = cleaned;
+      }
+    }
   }
 
   for (const caption of units.filter((unit) => (
@@ -436,6 +852,25 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
     assetRegions.push(asset);
   }
 
+  const emptyAfterAssetMask = new Set<string>();
+  for (const unit of units) {
+    if (!unit.sourceText || unit.kind === 'caption' || unit.kind === 'table-title') continue;
+    const block = blocks.get(unit.id);
+    if (!block) continue;
+    const pageAssets = assetRegions.filter((asset) => (
+      asset.pageIndex === block.pageIndex && asset.id !== unit.id
+    ));
+    if (!pageAssets.length) continue;
+    unit.sourceText = withoutAssetTextLines(block, unit.sourceText, pageAssets);
+    if (!unit.sourceText) emptyAfterAssetMask.add(unit.id);
+  }
+  if (emptyAfterAssetMask.size) {
+    units = units.filter((unit) => !emptyAfterAssetMask.has(unit.id));
+    for (const region of regions) {
+      region.orderedUnitIds = region.orderedUnitIds.filter((unitId) => !emptyAfterAssetMask.has(unitId));
+    }
+  }
+
   for (const asset of assetRegions) {
     const coveredIds = new Set(doc.blocks
       .filter((block) => block.id !== asset.captionUnitId && materiallyCovered(block, asset))
@@ -461,6 +896,85 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
     const geometry = validateImmutableRegion(asset, page, intersecting, captionRect);
     if (!geometry.pass) {
       throw new Error(`不可变资产 ${asset.id} 几何校验失败（第 ${asset.pageIndex + 1} 页：${geometry.issues.join(', ')}）`);
+    }
+  }
+
+  const horizontalRows: LayoutRegion[] = [];
+  const pageKindGroups = new Map<string, DetectedAssetRegion[]>();
+  for (const asset of assetRegions) {
+    if (asset.kind !== 'figure' && asset.kind !== 'table') continue;
+    const key = `${asset.pageIndex}:${asset.kind}`;
+    const group = pageKindGroups.get(key) ?? [];
+    group.push(asset);
+    pageKindGroups.set(key, group);
+  }
+  for (const [key, candidates] of pageKindGroups) {
+    const pending = [...candidates].sort((left, right) => left.rect.y - right.rect.y || left.rect.x - right.rect.x);
+    let rowNumber = 0;
+    while (pending.length) {
+      const anchor = pending.shift()!;
+      const band = [anchor];
+      for (let index = pending.length - 1; index >= 0; index -= 1) {
+        const candidate = pending[index]!;
+        const overlap = Math.max(0, Math.min(
+          anchor.rect.y + anchor.rect.h,
+          candidate.rect.y + candidate.rect.h,
+        ) - Math.max(anchor.rect.y, candidate.rect.y));
+        if (Math.abs(candidate.rect.y - anchor.rect.y) <= 12
+          && overlap / Math.max(1, Math.min(anchor.rect.h, candidate.rect.h)) >= 0.6) {
+          band.push(candidate);
+          pending.splice(index, 1);
+        }
+      }
+      if (band.length < 2) continue;
+      band.sort((left, right) => left.rect.x - right.rect.x);
+      const grouped = new Map<string, DetectedAssetRegion[]>();
+      for (const asset of band) {
+        const captionKey = asset.captionUnitId ?? `asset:${asset.id}`;
+        const members = grouped.get(captionKey) ?? [];
+        members.push(asset);
+        grouped.set(captionKey, members);
+      }
+      const orderedUnitIds: string[] = [];
+      for (const members of grouped.values()) {
+        const captionId = members[0]?.captionUnitId;
+        if (members[0]?.kind === 'table' && captionId) orderedUnitIds.push(captionId);
+        orderedUnitIds.push(...members.map((asset) => asset.id));
+        if (members[0]?.kind === 'figure' && captionId) orderedUnitIds.push(captionId);
+      }
+      const uniqueUnitIds = [...new Set(orderedUnitIds)];
+      const left = Math.min(...band.map((asset) => asset.rect.x));
+      const top = Math.min(...band.map((asset) => asset.rect.y));
+      const right = Math.max(...band.map((asset) => asset.rect.x + asset.rect.w));
+      const bottom = Math.max(...band.map((asset) => asset.rect.y + asset.rect.h));
+      const [pageText, kind] = key.split(':');
+      const rowId = `asset-row-p${Number(pageText) + 1}-${kind}-${++rowNumber}`;
+      for (const region of regions) {
+        region.orderedUnitIds = region.orderedUnitIds.filter((unitId) => !uniqueUnitIds.includes(unitId));
+      }
+      for (const unit of units) {
+        if (uniqueUnitIds.includes(unit.id)) unit.layoutRegionId = rowId;
+      }
+      horizontalRows.push({
+        id: rowId,
+        mode: 'full-width',
+        presentation: 'horizontal',
+        sourcePage: anchor.pageIndex,
+        bounds: { x: left, y: top, w: right - left, h: bottom - top },
+        orderedUnitIds: uniqueUnitIds,
+      });
+    }
+  }
+  if (horizontalRows.length) {
+    for (const pageIndex of [...new Set(horizontalRows.map((row) => row.sourcePage))]) {
+      const rows = horizontalRows
+        .filter((row) => row.sourcePage === pageIndex)
+        .sort((left, right) => left.bounds.y - right.bounds.y);
+      const firstPageRegion = regions.findIndex((region) => region.sourcePage === pageIndex);
+      regions.splice(firstPageRegion < 0 ? regions.length : firstPageRegion, 0, ...rows);
+    }
+    for (let index = regions.length - 1; index >= 0; index -= 1) {
+      if (!regions[index]!.orderedUnitIds.length) regions.splice(index, 1);
     }
   }
 

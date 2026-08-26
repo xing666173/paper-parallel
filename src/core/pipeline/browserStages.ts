@@ -16,6 +16,10 @@ import { extractImmutableAssets } from '../assets/extract';
 import { cropPageRegionLossless } from '../assets/crop';
 import { buildTranslationBatches, translationLimitsFor } from '../translate/batcher';
 import { runTranslationTask } from '../translate/coordinator';
+import {
+  maskProtectedTokensForTranslation,
+  restoreProtectedTokensFromTranslation,
+} from '../translate/protected';
 import { chatCompletion } from '../translate/client';
 import { buildBatchPrompt, buildSystemPrompt, SYSTEM_PROMPT_VERSION } from '../translate/prompts';
 import type { TranslationBlockRequest, TranslationBlockResponse, TranslationRequest } from '../translate/protocol';
@@ -36,7 +40,6 @@ import { serializeVisionPageAnalysis } from '../vision/protocol';
 import { inspectCompiledPdf, runPdfContentGate } from '../quality/pdfContentGate';
 import { persistValidatedOutputs } from '../quality/finalPersistence';
 import { runVisionFinalReview, type VisionFinalReport } from '../vision/finalReview';
-import { releasePdfDocument } from '../vision/cleanup';
 
 const SESSION_KEY_STORAGE = 'paper-parallel.deepseek-key-session';
 const LOCAL_KEY_STORAGE = 'paper-parallel.deepseek-key';
@@ -122,6 +125,23 @@ function typstTextUnit(
   };
 }
 
+function typstSourceColumn(
+  unit: SemanticUnit,
+  doc: Doc,
+  assets: readonly ImmutableAsset[],
+): TypstSemanticUnit['sourceColumn'] {
+  const block = doc.blocks.find((candidate) => candidate.id === unit.id);
+  const asset = unit.assetId
+    ? assets.find((candidate) => candidate.id === unit.assetId)
+    : assets.find((candidate) => candidate.captionUnitId === unit.id);
+  const rect = asset?.sourceRect ?? block?.rect;
+  const pageIndex = asset?.sourcePage ?? block?.pageIndex ?? 0;
+  const pageWidth = doc.pages[pageIndex]?.width ?? doc.meta.paperWidth;
+  if (!rect || !Number.isFinite(pageWidth) || pageWidth <= 0) return 'span';
+  if (rect.w >= pageWidth * 0.55) return 'span';
+  return rect.x + rect.w / 2 < pageWidth / 2 ? 'left' : 'right';
+}
+
 export function createBrowserPipelineStages(options: BrowserPipelineStageOptions): ProductionPipelineStages {
   const settings = requireValue(options.snapshot.settings, '任务缺少模型与源文件设置');
   const apiKey = options.apiKey
@@ -190,6 +210,17 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
         }),
       });
       const reconciled = reconcileVisionLayout(doc, analyses);
+      if (import.meta.env.MODE === 'test') {
+        (globalThis as typeof globalThis & { __PP_DIAGNOSTIC_LAYOUT__?: unknown })
+          .__PP_DIAGNOSTIC_LAYOUT__ = {
+            pages: doc.pages,
+            blocks: doc.blocks.map(({ characterRects: _characters, ...block }) => block),
+            semanticUnits: doc.semanticUnits,
+            layoutRegions: doc.layoutRegions,
+            analyses,
+            reconciled,
+          };
+      }
       reconciled.unresolved.forEach((item) => options.onAiEvent?.({
         type: 'vision-layout-fallback', at: Date.now(), page: item.pageIndex + 1,
         region: item.regionIndex + 1, reason: item.reason,
@@ -242,6 +273,7 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
         signal,
         request: async (batch, batchSignal) => {
           const requestThinkingMode = batch.recovery?.disableThinking ? 'disabled' : settings.thinkingMode;
+          const protectedMask = maskProtectedTokensForTranslation(batch.blocks);
           const requestBody: TranslationRequest = {
             documentContext: {
               title: doc.meta.title ?? settings.sourceFileName,
@@ -261,7 +293,7 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
                 validationDetails: batch.recovery.validationDetails ?? [],
               },
             } : {}),
-            blocks: batch.blocks,
+            blocks: protectedMask.blocks,
           };
           const recoveryInstruction = batch.recovery
             ? [
@@ -292,8 +324,9 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
               { role: 'user', content: buildBatchPrompt(requestBody) },
             ],
           });
+          const normalized = normalizeDeepSeekTranslationResponse(parseDeepSeekTranslationJson(completion.content));
           return {
-            ...normalizeDeepSeekTranslationResponse(parseDeepSeekTranslationJson(completion.content)),
+            ...restoreProtectedTokensFromTranslation(normalized, protectedMask.replacements),
             usage: completion.usage,
           };
         },
@@ -337,14 +370,23 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
       const responseById = new Map(translations.map((response) => [response.blockId, response]));
       const requestById = new Map(requests.map((request) => [request.blockId, request]));
       const typstUnits: TypstSemanticUnit[] = prepared.units.map((unit) => {
+        const sourceColumn = typstSourceColumn(unit, doc, current.assets ?? []);
         if (unit.assetId) return {
-          id: unit.id, kind: unit.kind, layoutRegionId: unit.layoutRegionId, order: unit.order, assetId: unit.assetId,
+          id: unit.id, kind: unit.kind, layoutRegionId: unit.layoutRegionId,
+          order: unit.order, assetId: unit.assetId, sourceColumn,
         };
-        return typstTextUnit(
+        if (unit.kind === 'reference') return {
+          id: unit.id, kind: unit.kind, layoutRegionId: unit.layoutRegionId,
+          order: unit.order, text: unit.sourceText ?? '', sourceColumn,
+        };
+        return {
+          ...typstTextUnit(
           unit,
           requireValue(requestById.get(unit.id), `缺少翻译请求 ${unit.id}`),
           requireValue(responseById.get(unit.id), `缺少翻译结果 ${unit.id}`),
-        );
+          ),
+          sourceColumn,
+        };
       });
       const typstProject = await buildTypstProject({
         metadata: { paperWidth: doc.meta.paperWidth, paperHeight: doc.meta.paperHeight },
@@ -360,6 +402,13 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
         runtimePaths: getTypstRuntimePaths(import.meta.env.BASE_URL, document.baseURI), signal,
         onProgress: (phase) => options.onCompileProgress?.(phase),
       });
+      if (import.meta.env.MODE === 'test') {
+        const debugGlobal = globalThis as typeof globalThis & { __PP_DIAGNOSTIC_PDF_URL__?: string };
+        if (debugGlobal.__PP_DIAGNOSTIC_PDF_URL__) URL.revokeObjectURL(debugGlobal.__PP_DIAGNOSTIC_PDF_URL__);
+        debugGlobal.__PP_DIAGNOSTIC_PDF_URL__ = URL.createObjectURL(
+          new Blob([compiled.pdf], { type: 'application/pdf' }),
+        );
+      }
       return { ...current, compiled };
     },
 
@@ -417,7 +466,7 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
       const targetLoading = getDocument({ data: compiled.pdf.slice() });
       const targetPdf = await targetLoading.promise;
       let visualReport: VisionFinalReport;
-      try {
+      {
         visualReport = await runVisionFinalReview({
           sourcePdf,
           targetPdf: targetPdf as any,
@@ -428,6 +477,14 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
           onPageStart: (event) => options.onAiEvent?.({
             type: 'vision-review-page-started', at: Date.now(), page: event.targetPageIndex + 1,
             totalPages: event.totalPages,
+          }),
+          onPagePhase: (event) => options.onAiEvent?.({
+            type: 'vision-review-page-phase', at: Date.now(), page: event.targetPageIndex + 1,
+            totalPages: event.totalPages, phase: event.phase,
+          }),
+          onPageInvalid: (event) => options.onAiEvent?.({
+            type: 'vision-review-page-invalid', at: Date.now(), page: event.targetPageIndex + 1,
+            totalPages: event.totalPages, reason: event.reason,
           }),
           onPageWait: (event) => options.onAiEvent?.({
             type: 'vision-review-page-waiting', at: Date.now(), page: event.targetPageIndex + 1,
@@ -442,16 +499,28 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
             totalPages: event.totalPages, issueCount: event.issueCount,
           }),
         });
+        if (import.meta.env.MODE === 'test') {
+          (globalThis as typeof globalThis & { __PP_DIAGNOSTIC_VISUAL_REPORT__?: VisionFinalReport })
+            .__PP_DIAGNOSTIC_VISUAL_REPORT__ = visualReport;
+        }
         options.onAiEvent?.({
           type: 'vision-review-completed', at: Date.now(), reviewedPages: visualReport.reviewedPages,
           issueCount: visualReport.issues.length,
         });
-      } finally {
-        releasePdfDocument(targetPdf);
       }
       const severeVisualIssues = visualReport.issues.filter((issue) => (
         issue.severity === 'severe' && issue.confidence >= 0.8
       ));
+      options.onAiEvent?.({
+        type: 'quality-finalizing', at: Date.now(), visualPass: visualReport.pass,
+        severeIssueCount: severeVisualIssues.length,
+      });
+      const visualError = severeVisualIssues.map((issue) => (
+        `第 ${issue.targetPageIndex + 1} 页 ${issue.type}：${issue.evidence}`
+      )).join('；');
+      if (!visualReport.pass) {
+        throw new Error(`视觉质检未通过：${visualError || 'Vision Exp 发现严重页面缺陷'}`);
+      }
       const updatedAt = Date.now();
       const artifacts = [
         {
@@ -472,14 +541,13 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
         alignmentPass: alignment.pass,
         alignmentError: alignment.issues.map((issue) => issue.message).join('；'),
         visualPass: visualReport.pass,
-        visualError: severeVisualIssues.map((issue) => (
-          `第 ${issue.targetPageIndex + 1} 页 ${issue.type}：${issue.evidence}`
-        )).join('；'),
+        visualError,
         artifacts,
         manifest,
         putArtifact: (artifact) => options.repository.putArtifact(artifact),
         saveAlignmentManifest: (value) => options.repository.saveAlignmentManifest(value),
       });
+      options.onAiEvent?.({ type: 'quality-persisted', at: Date.now() });
       const persisted = Boolean(
         await options.repository.findArtifact(`${options.projectId}:chinese-pdf`)
         && await options.repository.loadAlignmentManifest(options.projectId),

@@ -15,6 +15,67 @@ export function extractProtectedTokens(text: string): string[] {
   return Array.from(text.matchAll(PROTECTED_TOKEN_PATTERN), (match) => match[0]);
 }
 
+export interface ProtectedTranslationMask {
+  blocks: TranslationBlockRequest[];
+  replacements: Map<string, string>;
+}
+
+export function maskProtectedTokensForTranslation(
+  blocks: readonly TranslationBlockRequest[],
+): ProtectedTranslationMask {
+  const replacements = new Map<string, string>();
+  const maskedBlocks = blocks.map((block, blockIndex) => {
+    const tokens = uniqueInOrder([...block.protectedTokens, ...extractProtectedTokens(block.source)])
+      .sort((left, right) => right.length - left.length);
+    const tokenToMarker = new Map<string, string>();
+    tokens.forEach((token, tokenIndex) => {
+      const marker = `⟦PP${blockIndex}_${tokenIndex}⟧`;
+      tokenToMarker.set(token, marker);
+      replacements.set(marker, token);
+    });
+    const mask = (value: string): string => {
+      let result = value;
+      for (const [token, marker] of tokenToMarker) result = result.split(token).join(marker);
+      return result;
+    };
+    return {
+      ...block,
+      source: mask(block.source),
+      sourceSentences: block.sourceSentences.map((sentence) => ({ ...sentence, text: mask(sentence.text) })),
+      protectedTokens: block.protectedTokens.map((token) => tokenToMarker.get(token) ?? token),
+    };
+  });
+  return { blocks: maskedBlocks, replacements };
+}
+
+export function restoreProtectedTokensFromTranslation(
+  response: TranslationResponse,
+  replacements: ReadonlyMap<string, string>,
+): TranslationResponse {
+  const restore = (value: string): string => {
+    let result = value;
+    for (const [marker, token] of replacements) result = result.split(marker).join(token);
+    return result;
+  };
+  return {
+    blocks: response.blocks.map((block) => ({
+      ...block,
+      translation: restore(block.translation),
+      alignmentGroups: block.alignmentGroups.map((group) => ({
+        ...group,
+        targetSegments: group.targetSegments.map(restore),
+      })),
+      newTerms: block.newTerms.map((term) => ({
+        ...term,
+        source: restore(term.source),
+        target: restore(term.target),
+        ...(term.abbreviation ? { abbreviation: restore(term.abbreviation) } : {}),
+      })),
+      warnings: block.warnings.map(restore),
+    })),
+  };
+}
+
 function uniqueInOrder(values: string[]): string[] {
   const seen = new Set<string>();
   return values.filter((value) => {

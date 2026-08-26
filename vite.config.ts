@@ -24,6 +24,10 @@ export default defineConfig({
             path: join('assets', 'fonts', 'noto-serif-sc-400.ttf'),
             type: 'font/ttf',
           }],
+          ['/vendor/typst/dejavu-math-tex-gyre.ttf', {
+            path: join('node_modules', 'dejavu-fonts-ttf', 'ttf', 'DejaVuMathTeXGyre.ttf'),
+            type: 'font/ttf',
+          }],
         ]);
         server.middlewares.use((request, response, next) => {
           const vendor = vendorFiles.get(request.url?.split('?')[0] ?? '');
@@ -46,6 +50,14 @@ export default defineConfig({
         copyFileSync(
           join('assets', 'fonts', 'noto-serif-sc-400.ttf'),
           join(typstVendor, 'noto-serif-sc-400.ttf'),
+        );
+        copyFileSync(
+          join('node_modules', 'dejavu-fonts-ttf', 'ttf', 'DejaVuMathTeXGyre.ttf'),
+          join(typstVendor, 'dejavu-math-tex-gyre.ttf'),
+        );
+        copyFileSync(
+          join('node_modules', 'dejavu-fonts-ttf', 'LICENSE'),
+          join(typstVendor, 'dejavu-fonts-LICENSE.txt'),
         );
       },
     },

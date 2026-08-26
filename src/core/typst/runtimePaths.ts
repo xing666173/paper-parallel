@@ -13,6 +13,9 @@ export function getTypstRuntimePaths(baseUrl: string, documentBaseUrl?: string):
   return {
     compilerWasm: resolve('vendor/typst/typst_ts_web_compiler_bg.wasm'),
     rendererWasm: resolve('vendor/typst/typst_ts_renderer_bg.wasm'),
-    fontFiles: [resolve('vendor/typst/noto-serif-sc-400.ttf')],
+    fontFiles: [
+      resolve('vendor/typst/noto-serif-sc-400.ttf'),
+      resolve('vendor/typst/dejavu-math-tex-gyre.ttf'),
+    ],
   };
 }

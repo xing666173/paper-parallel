@@ -112,6 +112,36 @@ describe('project task store', () => {
     expect(store.lastResponseAt).toBe(14);
   });
 
+  it('reports final visual-gate and persistence phases', () => {
+    const { store } = setupStore();
+    store.recordAiEvent({ type: 'quality-finalizing', at: 15, visualPass: true, severeIssueCount: 0 });
+    expect(store.aiLog.at(-1)?.message).toBe('质量门通过，正在保存中文 PDF 与对齐数据');
+    store.recordAiEvent({ type: 'quality-persisted', at: 16 });
+    expect(store.aiLog.at(-1)?.message).toBe('中文 PDF 与对齐数据已保存');
+  });
+
+  it('reports the active sub-phase of a final-review page', () => {
+    const { store } = setupStore();
+    store.recordAiEvent({
+      type: 'vision-review-page-phase', at: 12, page: 6, totalPages: 11, phase: 'rendered',
+    });
+
+    expect(store.aiLog.at(-1)?.message).toBe('Vision Exp 成品质检：第 6/11 页已渲染，正在连接 API');
+    expect(store.lastResponseAt).toBe(12);
+  });
+
+  it('reports a final-review protocol failure before the task unwinds', () => {
+    const { store } = setupStore();
+    store.recordAiEvent({
+      type: 'vision-review-page-invalid', at: 13, page: 7, totalPages: 11,
+      reason: 'Vision 成品质检 target_page 与请求页面不一致',
+    });
+
+    expect(store.aiLog.at(-1)?.message).toBe(
+      'Vision Exp 成品质检：第 7/11 页响应校验失败：Vision 成品质检 target_page 与请求页面不一致',
+    );
+  });
+
   it('coalesces streaming heartbeats while keeping the latest phase visible', () => {
     const { store } = setupStore();
     store.recordAiEvent({

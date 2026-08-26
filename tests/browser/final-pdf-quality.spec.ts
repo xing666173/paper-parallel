@@ -29,8 +29,12 @@ async function waitForPipelineTerminal(page: import('@playwright/test').Page): P
   let lastSnapshot = '尚未进入处理页';
   while (Date.now() < deadline) {
     if (/#\/task\/pp-[a-f0-9]{64}\/read(?:\?|$)/.test(page.url())) return 'reader';
-    if (await page.locator('.quality-error').isVisible({ timeout: 2_000 }).catch(() => false)) {
-      throw new Error(await page.locator('.quality-error').innerText({ timeout: 2_000 }));
+    const qualityError = await page.evaluate(() => (
+      document.querySelector('.quality-error')?.textContent?.replace(/\s+/g, ' ').trim() ?? ''
+    )).catch(() => '');
+    if (qualityError) {
+      await saveFailureDiagnostics(page);
+      throw new Error(qualityError);
     }
     const stage = await page.locator('[data-stage].is-current strong').innerText({ timeout: 2_000 }).catch(() => '页面跳转中');
     const progress = await page.locator('.progress-number-row').innerText({ timeout: 2_000 }).catch(() => '进度不可用');
@@ -40,6 +44,45 @@ async function waitForPipelineTerminal(page: import('@playwright/test').Page): P
     await page.waitForTimeout(15_000);
   }
   throw new Error(`Pipeline did not reach a terminal state within 25 minutes: ${lastSnapshot}`);
+}
+
+async function saveFailureDiagnostics(page: import('@playwright/test').Page): Promise<void> {
+  const outputDirectory = path.resolve('reports', 'real-api', TRANSLATION_MODEL);
+  await mkdir(outputDirectory, { recursive: true });
+  const hasDiagnosticPdf = await page.evaluate(() => Boolean(
+    (globalThis as typeof globalThis & { __PP_DIAGNOSTIC_PDF_URL__?: string }).__PP_DIAGNOSTIC_PDF_URL__,
+  ));
+  if (hasDiagnosticPdf) {
+    const downloadPromise = page.waitForEvent('download', { timeout: 30_000 });
+    await page.evaluate(() => {
+      const url = (globalThis as typeof globalThis & { __PP_DIAGNOSTIC_PDF_URL__?: string })
+        .__PP_DIAGNOSTIC_PDF_URL__;
+      if (!url) return;
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = 'diagnostic-failed.pdf';
+      anchor.click();
+    });
+    const download = await downloadPromise;
+    await download.saveAs(path.join(outputDirectory, 'diagnostic-failed.pdf'));
+  }
+  const visualReport = await page.evaluate(() => {
+    const debugGlobal = globalThis as typeof globalThis & {
+      __PP_DIAGNOSTIC_VISUAL_REPORT__?: unknown;
+    };
+    return debugGlobal.__PP_DIAGNOSTIC_VISUAL_REPORT__ ?? null;
+  });
+  await writeFile(
+    path.join(outputDirectory, 'diagnostic-visual-report.json'),
+    JSON.stringify(visualReport, null, 2),
+  );
+  const layout = await page.evaluate(() => (
+    globalThis as typeof globalThis & { __PP_DIAGNOSTIC_LAYOUT__?: unknown }
+  ).__PP_DIAGNOSTIC_LAYOUT__ ?? null);
+  await writeFile(
+    path.join(outputDirectory, 'diagnostic-layout.json'),
+    JSON.stringify(layout, null, 2),
+  );
 }
 
 test('real API exact-paper PDF quality acceptance', async () => {
@@ -63,12 +106,14 @@ test('real API exact-paper PDF quality acceptance', async () => {
     });
     page.on('pageerror', (error) => console.log(`[page error] ${error.message}`));
     await page.evaluate(() => {
-      window.setInterval(() => {
+      const runtime = globalThis as typeof globalThis & { __PP_TEST_HEARTBEAT_ID__?: number };
+      runtime.__PP_TEST_HEARTBEAT_ID__ = window.setInterval(() => {
         const stage = document.querySelector('[data-stage].is-current strong')?.textContent?.trim() ?? '页面跳转中';
         const progress = document.querySelector('.progress-number-row')?.textContent?.replace(/\s+/g, ' ').trim() ?? '进度不可用';
         const logs = document.querySelectorAll('.log-entry');
         const lastLog = logs.item(logs.length - 1)?.textContent?.replace(/\s+/g, ' ').trim() ?? '等待首条日志';
-        console.log(`[page heartbeat] stage=${stage}; progress=${progress}; log=${lastLog}`);
+        const qualityError = document.querySelector('.quality-error')?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+        console.log(`[page heartbeat] stage=${stage}; progress=${progress}; log=${lastLog}; error=${qualityError}`);
       }, 5_000);
     });
     await page.locator('[data-field="pdf"]').setInputFiles(SOURCE_PDF);
@@ -97,7 +142,7 @@ test('real API exact-paper PDF quality acceptance', async () => {
     const pageCount = Number(countText.match(/\/\s*(\d+)/)?.[1] ?? 0);
     expect(pageCount).toBeGreaterThan(0);
     for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
-      const canvas = page.locator('[data-pdf-side="zh"] canvas');
+      const canvas = page.getByLabel(`中文译文第 ${pageNumber} 页`, { exact: true });
       await expect(canvas).toBeVisible();
       await canvas.screenshot({ path: path.join(outputDirectory, `page-${String(pageNumber).padStart(2, '0')}.png`) });
       if (pageNumber < pageCount) {
@@ -118,11 +163,24 @@ test('real API exact-paper PDF quality acceptance', async () => {
       completedAt: new Date().toISOString(),
     }, null, 2));
   } finally {
-    await page.locator('[data-field="api-key"]').fill('').catch(() => undefined);
     await page.evaluate(() => {
+      const runtime = globalThis as typeof globalThis & { __PP_TEST_HEARTBEAT_ID__?: number };
+      if (runtime.__PP_TEST_HEARTBEAT_ID__ !== undefined) {
+        window.clearInterval(runtime.__PP_TEST_HEARTBEAT_ID__);
+        delete runtime.__PP_TEST_HEARTBEAT_ID__;
+      }
+      const keyInput = document.querySelector<HTMLInputElement>('[data-field="api-key"]');
+      if (keyInput) keyInput.value = '';
       localStorage.removeItem('paper-parallel.deepseek-key');
       sessionStorage.removeItem('paper-parallel.deepseek-key-session');
     }).catch(() => undefined);
-    await context.close();
+    await Promise.race([
+      page.close({ runBeforeUnload: false }).catch(() => undefined),
+      new Promise<void>((resolve) => setTimeout(resolve, 3_000)),
+    ]);
+    await Promise.race([
+      context.close(),
+      new Promise<void>((resolve) => setTimeout(resolve, 5_000)),
+    ]);
   }
 });

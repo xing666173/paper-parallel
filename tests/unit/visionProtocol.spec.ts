@@ -40,6 +40,31 @@ describe('vision: page analysis protocol', () => {
     ]);
   });
 
+  it('converts fractional 0..1 xywh geometry into the 0..1000 protocol space', () => {
+    expect(parseVisionPageAnalysis({
+      page: 1,
+      layout: 'single',
+      regions: [{
+        type: 'figure',
+        bbox: { x: 0.08, y: 0.18, width: 0.84, height: 0.03 },
+        column: 'full',
+        confidence: 0.95,
+      }],
+    }, 0).regions[0].bbox).toEqual([80, 180, 840, 30]);
+  });
+
+  it('infers a recoverable column label from validated normalized geometry', () => {
+    const regions = parseVisionPageAnalysis({
+      page: 1, layout: 'mixed', regions: [
+        { type: 'figure', bbox: [50, 100, 400, 200], column: 'column-1', confidence: 0.9 },
+        { type: 'figure', bbox: [550, 100, 400, 200], column: 'column-2', confidence: 0.9 },
+        { type: 'table', bbox: [100, 400, 800, 200], column: 'both', confidence: 0.9 },
+      ],
+    }, 0).regions;
+
+    expect(regions.map((region) => region.column)).toEqual(['left', 'right', 'full']);
+  });
+
   it.each([
     [{ page: 1, layout: 'double', regions: [{ type: 'figure', bbox: [0, 1, 1001, 20], column: 'left', confidence: 1 }] }, 'bbox'],
     [{ page: 1, layout: 'double', regions: [{ type: 'photo', bbox: [1, 1, 20, 20], column: 'left', confidence: 1 }] }, 'type'],

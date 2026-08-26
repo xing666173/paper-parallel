@@ -59,6 +59,23 @@ function sseThatHeartbeatsThenStallsFetch(cancelled: { count: number }): typeof 
   }) as typeof fetch;
 }
 
+function endlessImmediateSseFetch(cancelled: { count: number }): typeof fetch {
+  return (async () => {
+    const encoder = new TextEncoder();
+    return new Response(new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(encoder.encode(': keep-alive\n\n'));
+      },
+      cancel() {
+        cancelled.count += 1;
+      },
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+    });
+  }) as typeof fetch;
+}
+
 describe('translate: DeepSeek client', () => {
   afterEach(() => vi.useRealTimers());
 
@@ -279,6 +296,16 @@ describe('translate: DeepSeek client', () => {
     await vi.advanceTimersByTimeAsync(25);
 
     expect(outcome).toMatchObject({ name: 'DeepSeekTimeoutError' });
+    expect(cancelled.count).toBe(1);
+  });
+
+  it('enforces an absolute deadline when SSE keep-alives continuously resolve reader.read', async () => {
+    const cancelled = { count: 0 };
+    await expect(chatCompletion({
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test', model: 'deepseek-v4-flash-vision-exp',
+      messages: [], fetchFn: endlessImmediateSseFetch(cancelled),
+      stream: true, timeoutMs: 1_000, hardTimeoutMs: 20,
+    })).rejects.toMatchObject({ name: 'DeepSeekTimeoutError' });
     expect(cancelled.count).toBe(1);
   });
 

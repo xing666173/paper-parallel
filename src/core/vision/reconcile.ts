@@ -73,7 +73,7 @@ function captionFor(
       })
       .filter((candidate) => (
         candidate.horizontalRatio >= 0.25
-        && candidate.dy <= Math.max(48, captionRect.h * 4, candidate.block.rect.h * 4)
+        && candidate.dy <= Math.max(144, captionRect.h * 4, candidate.block.rect.h * 4)
       ))
       .sort((left, right) => left.distance - right.distance)[0]?.block;
     if (nearby) return nearby;
@@ -96,20 +96,172 @@ function captionFor(
     .sort((left, right) => Math.abs(left.gap) - Math.abs(right.gap))[0]?.block;
 }
 
-function withoutCaption(rect: Rect, captionRect: Rect | undefined, type: VisionRegion['type']): Rect {
-  if (!captionRect || intersectionArea(rect, captionRect) <= 0) return rect;
+function withoutCaption(
+  rect: Rect,
+  captionRects: readonly (Rect | undefined)[],
+  type: VisionRegion['type'],
+): Rect {
+  const applicable = captionRects.filter((candidate): candidate is Rect => Boolean(
+    candidate && intersectionArea(rect, candidate) > 0,
+  ));
+  if (!applicable.length) return rect;
   const bottom = rect.y + rect.h;
-  const captionCenter = captionRect.y + captionRect.h / 2;
   const assetCenter = rect.y + rect.h / 2;
-  if (type === 'figure' && captionCenter >= assetCenter) {
-    const trimmedBottom = Math.max(rect.y, captionRect.y - 2);
+  const below = applicable.filter((candidate) => candidate.y + candidate.h / 2 >= assetCenter);
+  if (type === 'figure' && below.length) {
+    const trimmedBottom = Math.max(rect.y, Math.min(...below.map((candidate) => candidate.y)) - 2);
     return { ...rect, h: trimmedBottom - rect.y };
   }
-  if (type === 'table' && captionCenter <= assetCenter) {
-    const trimmedTop = Math.min(bottom, captionRect.y + captionRect.h + 2);
+  const above = applicable.filter((candidate) => candidate.y + candidate.h / 2 <= assetCenter);
+  if (type === 'table' && above.length) {
+    const trimmedTop = Math.min(bottom, Math.max(...above.map((candidate) => candidate.y + candidate.h)) + 2);
     return { ...rect, y: trimmedTop, h: bottom - trimmedTop };
   }
   return rect;
+}
+
+function withAdjacentCaptionClearance(rect: Rect, caption: Rect | undefined, type: VisionRegion['type']): Rect {
+  if (!caption) return rect;
+  const bottom = rect.y + rect.h;
+  if (type === 'table') {
+    const captionBottom = caption.y + caption.h;
+    const top = captionBottom + 4;
+    if (rect.y >= captionBottom - 1 && rect.y < top && top < bottom - 12) {
+      return { ...rect, y: top, h: bottom - top };
+    }
+  }
+  if (type === 'figure') {
+    const trimmedBottom = caption.y - 4;
+    if (bottom <= caption.y + 1 && bottom > trimmedBottom && trimmedBottom > rect.y + 12) {
+      return { ...rect, h: trimmedBottom - rect.y };
+    }
+  }
+  return rect;
+}
+
+interface CharacterLine {
+  y: number;
+  bottom: number;
+  text: string;
+}
+
+function characterLines(doc: Doc, pageIndex: number, rect: Rect): CharacterLine[] {
+  const characters = doc.blocks
+    .flatMap((block) => block.characterRects ?? [])
+    .filter((character) => (
+      character.pageIndex === pageIndex
+      && intersectionArea(character.rect, rect) > 0
+    ))
+    .sort((left, right) => left.rect.y - right.rect.y || left.rect.x - right.rect.x);
+  const lines: Array<{ characters: typeof characters }> = [];
+  for (const character of characters) {
+    const line = lines.find((candidate) => (
+      Math.abs(candidate.characters[0]!.rect.y - character.rect.y) <= 2
+    ));
+    if (line) line.characters.push(character);
+    else lines.push({ characters: [character] });
+  }
+  return lines.map((line) => {
+    line.characters.sort((left, right) => left.rect.x - right.rect.x);
+    return {
+      y: Math.min(...line.characters.map((character) => character.rect.y)),
+      bottom: Math.max(...line.characters.map((character) => character.rect.y + character.rect.h)),
+      text: line.characters.map((character) => character.ch).join(''),
+    };
+  }).sort((left, right) => left.y - right.y);
+}
+
+function withoutTopMarginFurniture(doc: Doc, pageIndex: number, rect: Rect, type: VisionRegion['type']): Rect {
+  if ((type !== 'figure' && type !== 'table') || rect.y > doc.pages[pageIndex]!.height * 0.12) return rect;
+  const page = doc.pages[pageIndex]!;
+  const furniture = characterLines(doc, pageIndex, rect).filter((line) => {
+    const naturalWords = line.text.match(/[A-Za-z]{3,}/g)?.length ?? 0;
+    return line.y < page.height * 0.1
+      && line.y < rect.y + 40
+      && naturalWords >= 4
+      && line.text.trim().length >= 24;
+  });
+  if (!furniture.length) return rect;
+  const bottom = rect.y + rect.h;
+  const top = Math.max(...furniture.map((line) => line.bottom)) + 4;
+  return top < bottom - 12 ? { ...rect, y: top, h: bottom - top } : rect;
+}
+
+function withoutTrailingProse(doc: Doc, pageIndex: number, rect: Rect, type: VisionRegion['type']): Rect {
+  if (type !== 'table') return rect;
+  const lines = characterLines(doc, pageIndex, rect);
+  if (lines.length < 4) return rect;
+  for (let index = 3; index < lines.length; index += 1) {
+    const previous = lines[index - 1]!;
+    const current = lines[index]!;
+    const whitespace = current.y - previous.bottom;
+    const proseWords = current.text.match(/[A-Za-z]{3,}/g)?.length ?? 0;
+    const proseLike = proseWords >= 4
+      || (proseWords >= 3 && /[.!?]\s*$/.test(current.text));
+    if (whitespace < 4 || !proseLike) continue;
+    const bottom = Math.min(rect.y + rect.h, previous.bottom + 2);
+    if (bottom > rect.y + 12) return { ...rect, h: bottom - rect.y };
+  }
+  return rect;
+}
+
+function withPrecedingTextClearance(
+  doc: Doc,
+  pageIndex: number,
+  rect: Rect,
+  type: VisionRegion['type'],
+): Rect {
+  if (type !== 'figure') return rect;
+  const bottom = rect.y + rect.h;
+  const touching = doc.blocks
+    .filter((block) => {
+      if (block.pageIndex !== pageIndex || block.type === 'caption' || looksLikeVisualText(block)) return false;
+      const blockBottom = block.rect.y + block.rect.h;
+      const horizontalOverlap = Math.max(0, Math.min(
+        block.rect.x + block.rect.w,
+        rect.x + rect.w,
+      ) - Math.max(block.rect.x, rect.x));
+      return horizontalOverlap > 0 && blockBottom >= rect.y - 4 && blockBottom <= rect.y + 2;
+    })
+    .sort((left, right) => right.rect.y + right.rect.h - (left.rect.y + left.rect.h))[0];
+  if (!touching) return rect;
+  const top = touching.rect.y + touching.rect.h + 6;
+  return top < bottom - 12 ? { ...rect, y: top, h: bottom - top } : rect;
+}
+
+function looksLikeVisualText(block: Doc['blocks'][number]): boolean {
+  const text = block.text?.trim() ?? '';
+  if (!text) return true;
+  const shortLines = text.split(/\r?\n/).filter(Boolean).filter((line) => line.trim().length <= 32).length;
+  return shortLines >= 4 || block.type === 'figure' || block.type === 'table' || block.type === 'equation';
+}
+
+function regionArea(region: DetectedAssetRegion): number {
+  return region.rect.w * region.rect.h;
+}
+
+function preferredRegion(left: DetectedAssetRegion, right: DetectedAssetRegion): DetectedAssetRegion {
+  if (Boolean(left.captionUnitId) !== Boolean(right.captionUnitId)) return left.captionUnitId ? left : right;
+  return regionArea(left) >= regionArea(right) ? left : right;
+}
+
+function deduplicateRegions(regions: readonly DetectedAssetRegion[]): DetectedAssetRegion[] {
+  const kept: DetectedAssetRegion[] = [];
+  for (const region of regions) {
+    const duplicateIndex = kept.findIndex((candidate) => {
+      if (candidate.pageIndex !== region.pageIndex || candidate.kind !== region.kind) return false;
+      const overlap = intersectionArea(candidate.rect, region.rect);
+      const containment = overlap / Math.max(1, Math.min(regionArea(candidate), regionArea(region)));
+      return containment >= 0.8 || (
+        Boolean(candidate.captionUnitId)
+        && candidate.captionUnitId === region.captionUnitId
+        && overlap / Math.max(1, Math.max(regionArea(candidate), regionArea(region))) >= 0.45
+      );
+    });
+    if (duplicateIndex < 0) kept.push(region);
+    else kept[duplicateIndex] = preferredRegion(kept[duplicateIndex]!, region);
+  }
+  return kept;
 }
 
 const ASSET_KIND = {
@@ -147,13 +299,20 @@ export function reconcileVisionLayout(
         unresolved.push({ pageIndex: page.pageIndex, regionIndex, type: vision.type, reason: 'caption-unmatched' });
         return;
       }
-      rect = withoutCaption(rect, caption?.rect, vision.type);
+      rect = withoutCaption(rect, [caption?.rect, captionRect], vision.type);
+      rect = withAdjacentCaptionClearance(rect, caption?.rect, vision.type);
+      rect = withoutTopMarginFurniture(doc, page.pageIndex, rect, vision.type);
+      rect = withoutTrailingProse(doc, page.pageIndex, rect, vision.type);
+      rect = withPrecedingTextClearance(doc, page.pageIndex, rect, vision.type);
       const asset: DetectedAssetRegion = {
         id: `vision-p${page.pageIndex + 1}-${vision.type.replace('display_', '')}-${regionIndex + 1}`,
         kind: ASSET_KIND[vision.type as keyof typeof ASSET_KIND],
         pageIndex: page.pageIndex,
         rect,
-        widthMode: vision.column === 'full' ? 'span' : 'column',
+        // Some multimodal responses call a centered panel "full" even when
+        // it occupies only one source column. Physical width is the reliable
+        // signal for whether it must span the target columns.
+        widthMode: rect.w >= page.width * 0.55 ? 'span' : 'column',
         captionUnitId: caption?.id,
       };
       const intersecting = doc.blocks.filter((block) => (
@@ -167,5 +326,5 @@ export function reconcileVisionLayout(
       assetRegions.push(asset);
     });
   }
-  return { assetRegions, unresolved };
+  return { assetRegions: deduplicateRegions(assetRegions), unresolved };
 }

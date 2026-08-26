@@ -19,6 +19,16 @@ describe('vision: deterministic layout reconciliation', () => {
     })]);
   });
 
+  it('does not promote a narrow centered panel to a spanning asset from the model label alone', () => {
+    const result = reconcileVisionLayout(fixtureDoc(), [{
+      pageIndex: 0, layout: 'mixed', regions: [{
+        type: 'figure', bbox: [350, 190, 300, 230], column: 'full', confidence: 0.99,
+      }],
+    }]);
+
+    expect(result.assetRegions[0]?.widthMode).toBe('column');
+  });
+
   it('matches a nearby approximate caption box and trims a figure crop that includes the real caption', () => {
     const result = reconcileVisionLayout(fixtureDoc(), [{
       pageIndex: 0, layout: 'double', regions: [{
@@ -34,6 +44,31 @@ describe('vision: deterministic layout reconciliation', () => {
     expect(asset.rect.y + asset.rect.h).toBeLessThanOrEqual(372);
   });
 
+  it('reconciles a coarse Vision caption box to the only same-column PDF caption', () => {
+    const result = reconcileVisionLayout(fixtureDoc(), [{
+      pageIndex: 0, layout: 'double', regions: [{
+        type: 'figure', bbox: [80, 190, 360, 390], column: 'left',
+        captionBBox: [80, 600, 360, 20], confidence: 0.99,
+      }],
+    }]);
+
+    expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions[0]?.captionUnitId).toBe('caption-1');
+    expect(result.assetRegions[0]!.rect.y + result.assetRegions[0]!.rect.h).toBeLessThanOrEqual(370);
+  });
+
+  it('matches a materially displaced Vision caption when the horizontal column is unambiguous', () => {
+    const result = reconcileVisionLayout(fixtureDoc(), [{
+      pageIndex: 0, layout: 'double', regions: [{
+        type: 'figure', bbox: [80, 190, 360, 500], column: 'left',
+        captionBBox: [80, 650, 360, 20], confidence: 0.99,
+      }],
+    }]);
+
+    expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions[0]?.captionUnitId).toBe('caption-1');
+  });
+
   it('links the nearest real caption when Vision omits caption_bbox', () => {
     const result = reconcileVisionLayout(fixtureDoc(), [{
       pageIndex: 0, layout: 'double', regions: [{
@@ -42,6 +77,136 @@ describe('vision: deterministic layout reconciliation', () => {
     }]);
 
     expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions[0]?.captionUnitId).toBe('caption-1');
+  });
+
+  it('uses the earliest caption boundary so the immutable crop never bakes in caption text', () => {
+    const result = reconcileVisionLayout(fixtureDoc(), [{
+      pageIndex: 0, layout: 'double', regions: [{
+        type: 'figure', bbox: [80, 190, 360, 330], column: 'left',
+        captionBBox: [80, 450, 360, 35], confidence: 0.99,
+      }],
+    }]);
+
+    expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions[0]?.rect.y).toBe(150.48);
+    expect(result.assetRegions[0]!.rect.y + result.assetRegions[0]!.rect.h)
+      .toBeLessThanOrEqual(354.4);
+  });
+
+  it('trims prose below a table when character-line geometry exposes a large vertical gap', () => {
+    const doc = fixtureDoc();
+    const lines = [
+      { y: 96, text: 'Method Throughput Area' },
+      { y: 110, text: 'Baseline 1.0 12.4' },
+      { y: 121, text: 'Ours 2.4 10.1' },
+      { y: 132, text: 'Optimized 3.1 9.7' },
+      { y: 145, text: 'memory access latency.' },
+      { y: 172, text: 'Further analysis confirms the same trend.' },
+    ];
+    let sourceIndex = 0;
+    doc.blocks.push({
+      id: 'table-text', docId: 'en', type: 'paragraph', pageIndex: 0,
+      rect: { x: 320, y: 96, w: 235, h: 86 }, order: 2,
+      text: lines.map((line) => line.text).join('\n'), splitAllowed: true, widthMode: 'column',
+      characterRects: lines.flatMap((line) => {
+        const chars = [...line.text];
+        const result = chars.map((ch, index) => ({
+          ch, sourceIndex: sourceIndex + index, pageIndex: 0,
+          rect: { x: 322 + index * 4.4, y: line.y, w: 4.2, h: 8 },
+        }));
+        sourceIndex += chars.length + 1;
+        return result;
+      }),
+    });
+
+    const result = reconcileVisionLayout(doc, [{
+      pageIndex: 0, layout: 'double', regions: [{
+        type: 'table', bbox: [510, 110, 410, 130], column: 'right', confidence: 0.99,
+      }],
+    }]);
+
+    expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions[0]!.rect.y + result.assetRegions[0]!.rect.h)
+      .toBeLessThan(145);
+    expect(result.assetRegions[0]!.rect.y + result.assetRegions[0]!.rect.h)
+      .toBeGreaterThan(139);
+  });
+
+  it('keeps raster clearance between a table crop and a caption immediately above it', () => {
+    const doc = fixtureDoc();
+    const caption = doc.blocks.find((block) => block.id === 'caption-1')!;
+    caption.text = 'Table 1: Experimental Setup';
+    caption.rect = { x: 320, y: 140, w: 220, h: 20 };
+    doc.semanticUnits.find((unit) => unit.id === 'caption-1')!.sourceText = caption.text;
+
+    const result = reconcileVisionLayout(doc, [{
+      pageIndex: 0, layout: 'double', regions: [{
+        type: 'table', bbox: [500, 203, 400, 250], column: 'right', confidence: 0.99,
+      }],
+    }]);
+
+    expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions[0]!.rect.y).toBeGreaterThanOrEqual(164);
+  });
+
+  it('adds clearance above a figure when a preceding text block touches its crop edge', () => {
+    const doc = fixtureDoc();
+    doc.blocks.push({
+      id: 'authors', docId: 'en', type: 'authors', pageIndex: 0,
+      rect: { x: 170, y: 176, w: 360, h: 21.5 }, order: 1,
+      text: 'Corresponding author: author@example.org', splitAllowed: true, widthMode: 'span',
+    });
+
+    const result = reconcileVisionLayout(doc, [{
+      pageIndex: 0, layout: 'mixed', regions: [{
+        type: 'figure', bbox: [500, 250, 480, 230], column: 'right', confidence: 0.99,
+      }],
+    }]);
+
+    expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions[0]!.rect.y).toBeGreaterThanOrEqual(199.5);
+    expect(result.assetRegions[0]!.rect.y + result.assetRegions[0]!.rect.h).toBeCloseTo(380.16);
+  });
+
+  it('trims a repeated running title carried by cross-page character geometry from a top figure', () => {
+    const doc = fixtureDoc();
+    const title = 'ZK-Tracer: A High-Performance Heterogeneous Accelerator';
+    doc.blocks.push({
+      id: 'cross-page-block', docId: 'en', type: 'paragraph', pageIndex: 1,
+      rect: { x: 50, y: 650, w: 240, h: 50 }, order: 2,
+      text: title, splitAllowed: true, widthMode: 'column',
+      characterRects: [...title].map((ch, index) => ({
+        ch, sourceIndex: index, pageIndex: 0,
+        rect: { x: 330 + index * 3.2, y: 60, w: 3, h: 7 },
+      })),
+    });
+
+    const result = reconcileVisionLayout(doc, [{
+      pageIndex: 0, layout: 'double', regions: [{
+        type: 'figure', bbox: [500, 70, 430, 300], column: 'right', confidence: 0.99,
+      }],
+    }]);
+
+    expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions[0]!.rect.y).toBeGreaterThanOrEqual(71);
+  });
+
+  it('deduplicates a nested subregion when Vision also returns the complete figure', () => {
+    const result = reconcileVisionLayout(fixtureDoc(), [{
+      pageIndex: 0, layout: 'double', regions: [
+        {
+          type: 'figure', bbox: [80, 190, 360, 260], column: 'left',
+          captionBBox: [80, 470, 360, 35], confidence: 0.97,
+        },
+        {
+          type: 'figure', bbox: [100, 220, 180, 120], column: 'left', confidence: 0.99,
+        },
+      ],
+    }]);
+
+    expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions).toHaveLength(1);
     expect(result.assetRegions[0]?.captionUnitId).toBe('caption-1');
   });
 

@@ -32,6 +32,7 @@ export interface ChatCompletionOptions extends DeepSeekConnectionOptions {
   temperature?: number;
   maxTokens?: number;
   timeoutMs?: number;
+  hardTimeoutMs?: number;
   stream?: boolean;
   onStreamProgress?(progress: ChatStreamProgress): void;
 }
@@ -66,8 +67,10 @@ export class DeepSeekInsufficientBalanceError extends Error {
 }
 
 export class DeepSeekTimeoutError extends Error {
-  constructor(timeoutMs: number) {
-    super(`DeepSeek 请求超时：连续 ${Math.ceil(timeoutMs / 1_000)} 秒未收到响应数据`);
+  constructor(timeoutMs: number, mode: 'inactivity' | 'absolute' = 'inactivity') {
+    super(mode === 'absolute'
+      ? `DeepSeek 请求超时：总用时超过 ${Math.ceil(timeoutMs / 1_000)} 秒`
+      : `DeepSeek 请求超时：连续 ${Math.ceil(timeoutMs / 1_000)} 秒未收到响应数据`);
     this.name = 'DeepSeekTimeoutError';
   }
 }
@@ -98,20 +101,26 @@ interface RequestLifetime {
   signal: AbortSignal;
   wait<T>(operation: Promise<T>): Promise<T>;
   heartbeat(): void;
+  assertActive(): void;
   close(): void;
 }
 
-function createRequestLifetime(timeoutMs: number, outerSignal?: AbortSignal): RequestLifetime {
+function createRequestLifetime(timeoutMs: number, outerSignal?: AbortSignal, hardTimeoutMs?: number): RequestLifetime {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let hardTimer: ReturnType<typeof setTimeout> | undefined;
   let closed = false;
+  let terminalError: unknown;
   let rejectGate!: (error: unknown) => void;
   const gate = new Promise<never>((_resolve, reject) => { rejectGate = reject; });
+  const startedAt = Date.now();
 
   const rejectAndAbort = (error: unknown): void => {
     if (closed) return;
     closed = true;
+    terminalError = error;
     if (timer) clearTimeout(timer);
+    if (hardTimer) clearTimeout(hardTimer);
     rejectGate(error);
     controller.abort();
   };
@@ -123,15 +132,37 @@ function createRequestLifetime(timeoutMs: number, outerSignal?: AbortSignal): Re
   const onOuterAbort = (): void => rejectAndAbort(abortError());
   outerSignal?.addEventListener('abort', onOuterAbort, { once: true });
   armWatchdog();
+  if (hardTimeoutMs != null) {
+    hardTimer = setTimeout(
+      () => rejectAndAbort(new DeepSeekTimeoutError(hardTimeoutMs, 'absolute')),
+      hardTimeoutMs,
+    );
+  }
+
+  const assertActive = (): void => {
+    if (terminalError) throw terminalError;
+    if (hardTimeoutMs != null && Date.now() - startedAt >= hardTimeoutMs) {
+      const error = new DeepSeekTimeoutError(hardTimeoutMs, 'absolute');
+      rejectAndAbort(error);
+      throw error;
+    }
+  };
 
   return {
     signal: controller.signal,
-    wait: <T>(operation: Promise<T>) => Promise.race([operation, gate]),
+    wait: async <T>(operation: Promise<T>) => {
+      assertActive();
+      const result = await Promise.race([operation, gate]);
+      assertActive();
+      return result;
+    },
     heartbeat: armWatchdog,
+    assertActive,
     close: () => {
       if (!closed) {
         closed = true;
         if (timer) clearTimeout(timer);
+        if (hardTimer) clearTimeout(hardTimer);
       }
       outerSignal?.removeEventListener('abort', onOuterAbort);
     },
@@ -165,6 +196,7 @@ async function readStreamingCompletion(
   let finishReason = 'missing';
   let reasoningPresent = false;
   let doneReceived = false;
+  let chunkCount = 0;
   const usage: ChatUsage = { promptTokens: 0, completionTokens: 0 };
 
   const consumeEvent = (eventText: string): void => {
@@ -196,6 +228,7 @@ async function readStreamingCompletion(
     while (!doneReceived) {
       const { done, value } = await lifetime.wait(reader.read());
       if (done) break;
+      lifetime.assertActive();
       lifetime.heartbeat();
       buffer += decoder.decode(value, { stream: true });
       buffer = buffer.replace(/\r\n/g, '\n');
@@ -204,6 +237,11 @@ async function readStreamingCompletion(
         consumeEvent(buffer.slice(0, boundary));
         buffer = buffer.slice(boundary + 2);
         boundary = buffer.indexOf('\n\n');
+      }
+      chunkCount += 1;
+      if (chunkCount % 16 === 0) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        lifetime.assertActive();
       }
     }
     buffer += decoder.decode();
@@ -252,7 +290,7 @@ export async function chatCompletion(opts: ChatCompletionOptions): Promise<ChatC
 
   const fetchImpl = opts.fetchFn ?? fetch;
   const timeoutMs = opts.timeoutMs ?? 120_000;
-  const lifetime = createRequestLifetime(timeoutMs, opts.signal);
+  const lifetime = createRequestLifetime(timeoutMs, opts.signal, opts.hardTimeoutMs);
 
   const body: Record<string, unknown> = {
     model: opts.model,

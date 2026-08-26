@@ -107,6 +107,7 @@ export interface LayoutRegion {
   sourcePage: number;
   bounds: Rect;
   columnGap?: number;
+  presentation?: 'horizontal';
   orderedUnitIds: string[];
 }
 

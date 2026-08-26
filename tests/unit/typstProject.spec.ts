@@ -37,14 +37,118 @@ describe('Typst project generation', () => {
     expect(project.mainContent).toContain('#pp-title[');
     expect(project.mainContent).toContain('#pp-double[');
     expect(project.mainContent).toContain('#pp-unit("sec-1-p-1-g-1-t-1")');
-    expect(project.mainContent).toContain('#pp-asset("fig-1", "/assets/fig-1.png", span: true)');
+    expect(project.mainContent).toContain('#pp-asset("fig-1", "/assets/fig-1.png", 220pt, span: true)');
     expect(project.mainContent).toContain('#pp-caption[');
     expect(project.mainContent).toContain('footer: context');
+    expect(project.mainContent).toContain('"DejaVu Math TeX Gyre"');
     expect(project.mainContent.indexOf('pp-full-width')).toBeLessThan(project.mainContent.indexOf('pp-double'));
     expect(project.files.get('/assets/fig-1.png')).toEqual(figBytes);
     expect(project.markerIds).toEqual([
       'title', 'sec-1-p-1-g-1-t-1', 'fig-1', 'fig-1-caption-g-1-t-1',
     ]);
+  });
+
+  it('preserves the source physical width instead of stretching every asset to its container', async () => {
+    const { assets } = await buildAssetManifest([{
+      id: 'fig-small', kind: 'figure', pageIndex: 0,
+      rect: { x: 100, y: 200, w: 126.5, h: 90 }, bytes: new Uint8Array([1]),
+      widthMode: 'column',
+    }]);
+    const project = await buildTypstProject({
+      metadata: { paperWidth: 612, paperHeight: 792 },
+      regions: [{ id: 'r1', mode: 'double', sourcePage: 0, bounds: { x: 50, y: 80, w: 512, h: 600 }, orderedUnitIds: ['fig-small'] }],
+      units: [{ id: 'fig-small', kind: 'figure', layoutRegionId: 'r1', order: 0, assetId: 'fig-small' }],
+      assets,
+    });
+
+    expect(project.mainContent).toContain('#pp-asset("fig-small", "/assets/fig-small.png", 126.5pt, span: false)');
+    expect(project.mainContent).not.toContain('#image(path, width: 100%)');
+  });
+
+  it('preserves explicit left-to-right source column flow in a double-column region', async () => {
+    const project = await buildTypstProject({
+      metadata: { paperWidth: 612, paperHeight: 792 },
+      regions: [{
+        id: 'r1', mode: 'double', sourcePage: 0,
+        bounds: { x: 50, y: 80, w: 512, h: 600 }, orderedUnitIds: ['left', 'right'],
+      }],
+      units: [
+        { id: 'left', kind: 'paragraph', layoutRegionId: 'r1', order: 0, text: '左栏', sourceColumn: 'left' },
+        { id: 'right', kind: 'paragraph', layoutRegionId: 'r1', order: 1, text: '右栏', sourceColumn: 'right' },
+      ],
+      assets: [],
+    });
+
+    expect(project.mainContent).toContain('#colbreak()');
+    expect(project.mainContent.indexOf('左栏')).toBeLessThan(project.mainContent.indexOf('#colbreak()'));
+    expect(project.mainContent.indexOf('#colbreak()')).toBeLessThan(project.mainContent.indexOf('右栏'));
+  });
+
+  it('starts each later source page at a weak page boundary', async () => {
+    const project = await buildTypstProject({
+      metadata: { paperWidth: 612, paperHeight: 792 },
+      regions: [
+        { id: 'p1', mode: 'double', sourcePage: 0, bounds: { x: 50, y: 80, w: 512, h: 600 }, orderedUnitIds: ['a'] },
+        { id: 'p2', mode: 'double', sourcePage: 1, bounds: { x: 50, y: 80, w: 512, h: 600 }, orderedUnitIds: ['b'] },
+      ],
+      units: [
+        { id: 'a', kind: 'paragraph', layoutRegionId: 'p1', order: 0, text: '第一页' },
+        { id: 'b', kind: 'paragraph', layoutRegionId: 'p2', order: 1, text: '第二页' },
+      ],
+      assets: [],
+    });
+
+    expect(project.mainContent.match(/#pagebreak\(weak: true\)/g)).toHaveLength(1);
+    expect(project.mainContent.indexOf('#pagebreak(weak: true)'))
+      .toBeLessThan(project.mainContent.indexOf('第二页'));
+  });
+
+  it('keeps an immutable figure and translated caption in one unbreakable group', async () => {
+    const { assets } = await buildAssetManifest([{
+      id: 'fig', kind: 'figure', pageIndex: 0,
+      rect: { x: 50, y: 100, w: 220, h: 160 }, bytes: new Uint8Array([1]),
+      widthMode: 'column', captionUnitId: 'cap',
+    }]);
+    const project = await buildTypstProject({
+      metadata: { paperWidth: 612, paperHeight: 792 },
+      regions: [{
+        id: 'r1', mode: 'double', sourcePage: 0,
+        bounds: { x: 50, y: 80, w: 512, h: 600 }, orderedUnitIds: ['fig', 'cap'],
+      }],
+      units: [
+        { id: 'fig', kind: 'figure', layoutRegionId: 'r1', order: 0, assetId: 'fig', sourceColumn: 'left' },
+        { id: 'cap', kind: 'caption', layoutRegionId: 'r1', order: 1, text: '图 1：结构。', sourceColumn: 'left' },
+      ],
+      assets,
+    });
+
+    expect(project.mainContent).toContain('#pp-asset-group[');
+    expect(project.mainContent).toContain('#let pp-asset-group(body) = block(breakable: false');
+    expect(project.mainContent.indexOf('#pp-asset(')).toBeLessThan(project.mainContent.indexOf('#pp-caption['));
+  });
+
+  it('renders a horizontal source asset band as one multi-column grid', async () => {
+    const { assets } = await buildAssetManifest([
+      { id: 'a', kind: 'figure', pageIndex: 0, rect: { x: 50, y: 100, w: 160, h: 90 }, bytes: new Uint8Array([1]), captionUnitId: 'ca' },
+      { id: 'b', kind: 'figure', pageIndex: 0, rect: { x: 225, y: 100, w: 160, h: 90 }, bytes: new Uint8Array([2]), captionUnitId: 'cb' },
+      { id: 'c', kind: 'figure', pageIndex: 0, rect: { x: 400, y: 100, w: 160, h: 90 }, bytes: new Uint8Array([3]), captionUnitId: 'cc' },
+    ]);
+    const project = await buildTypstProject({
+      metadata: { paperWidth: 612, paperHeight: 792 },
+      regions: [{
+        id: 'row', mode: 'full-width', presentation: 'horizontal', sourcePage: 0,
+        bounds: { x: 50, y: 100, w: 510, h: 110 },
+        orderedUnitIds: ['a', 'ca', 'b', 'cb', 'c', 'cc'],
+      }],
+      units: ['a', 'b', 'c'].flatMap((id, index) => [
+        { id, kind: 'figure' as const, layoutRegionId: 'row', order: index * 2, assetId: id },
+        { id: `c${id}`, kind: 'caption' as const, layoutRegionId: 'row', order: index * 2 + 1, text: `图 ${index + 1}` },
+      ]),
+      assets,
+    });
+
+    expect(project.mainContent).toContain('#grid(columns: 3, gutter: 6pt');
+    expect(project.mainContent).toContain('155.2pt');
   });
 
   it('escapes Typst syntax without changing ordinary protected text', () => {

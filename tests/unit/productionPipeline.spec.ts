@@ -63,6 +63,31 @@ describe('recoverable production pipeline orchestration', () => {
     expect((await repository.loadTask('p3'))).toMatchObject({ stage: 'validating', status: 'failed' });
   });
 
+  it('publishes a failed snapshot before a slow failure-state write completes', async () => {
+    const base = createProjectRepository('production-pipeline-slow-failure-save-test');
+    let releaseFailureSave: (() => void) | undefined;
+    const repository = {
+      ...base,
+      saveTask: vi.fn((snapshot) => snapshot.status === 'failed'
+        ? new Promise<void>((resolve) => { releaseFailureSave = resolve; })
+        : base.saveTask(snapshot)),
+    };
+    const stages = stageDoubles([]);
+    stages.validate = vi.fn(async () => { throw new Error('visual gate failed'); });
+    const snapshots: string[] = [];
+    const run = runProductionPipeline({
+      snapshot: { ...createTaskSnapshot('slow-failure', 1), settings: settings() },
+      repository,
+      signal: new AbortController().signal,
+      stages,
+      onSnapshot: (snapshot) => snapshots.push(`${snapshot.status}:${snapshot.error ?? ''}`),
+    });
+
+    await vi.waitFor(() => expect(snapshots.at(-1)).toBe('failed:visual gate failed'));
+    releaseFailureSave?.();
+    await expect(run).rejects.toThrow('visual gate failed');
+  });
+
   it('keeps live validated, retry, and failed counts when translation later fails', async () => {
     const repository = createProjectRepository('production-pipeline-progress-failure-test');
     const stages = stageDoubles([]);

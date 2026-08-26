@@ -3,9 +3,13 @@ import {
   buildTargetSourcePageMap,
   parseVisionFinalPageReport,
   runVisionFinalReview,
+  VISION_FINAL_REVIEW_RENDER_SCALE,
 } from '../../src/core/vision/finalReview';
 
 describe('vision: final PDF review', () => {
+  it('renders dense academic pages above CSS-pixel resolution for legible inspection', () => {
+    expect(VISION_FINAL_REVIEW_RENDER_SCALE).toBeGreaterThanOrEqual(1.5);
+  });
   it('derives failure from a confident severe finding instead of trusting a model pass flag', () => {
     const report = parseVisionFinalPageReport({
       target_page: 1,
@@ -29,6 +33,32 @@ describe('vision: final PDF review', () => {
     }, 1).pass).toBe(true);
   });
 
+  it('merges repeated findings with the same type and evidence', () => {
+    const report = parseVisionFinalPageReport({
+      target_page: 1,
+      issues: Array.from({ length: 6 }, (_, index) => ({
+        type: 'unreadable_glyphs', severity: 'severe',
+        bbox: [75, 280 + index * 20, 180, 10], confidence: 0.9,
+        evidence: '图2中部分文字模糊，难以辨认',
+      })),
+    }, 0);
+
+    expect(report.issues).toHaveLength(1);
+  });
+
+  it('does not let a page-local missing-asset guess veto natural repagination', () => {
+    const report = parseVisionFinalPageReport({
+      target_page: 1,
+      issues: [{
+        type: 'asset_missing', severity: 'severe', bbox: [1, 1, 20, 20],
+        confidence: 0.99, evidence: 'Source-only figure is absent here.',
+      }],
+    }, 0);
+
+    expect(report.pass).toBe(true);
+    expect(report.issues[0]?.severity).toBe('warning');
+  });
+
   it('accepts explicit normalized xywh issue boxes', () => {
     expect(parseVisionFinalPageReport({
       target_page: 1,
@@ -38,6 +68,30 @@ describe('vision: final PDF review', () => {
         confidence: 0.9, evidence: 'Possible clipping.',
       }],
     }, 0).issues[0]?.bbox).toEqual([100, 200, 300, 40]);
+  });
+
+  it('keeps a valid finding when Vision omits its optional evidence sentence', () => {
+    const issue = parseVisionFinalPageReport({
+      target_page: 1,
+      issues: [{
+        type: 'overlap', severity: 'warning', bbox: [10, 20, 30, 40], confidence: 0.8,
+      }],
+    }, 0).issues[0];
+
+    expect(issue?.evidence).toBe('overlap（模型未提供说明）');
+  });
+
+  it('keeps a finding and uses a conservative full-page box when Vision returns invalid coordinates', () => {
+    const issue = parseVisionFinalPageReport({
+      target_page: 1,
+      issues: [{
+        type: 'clipped_text', severity: 'severe', bbox: [-10, 20, 1_200, 980],
+        confidence: 0.95, evidence: 'Text is clipped.',
+      }],
+    }, 0).issues[0];
+
+    expect(issue?.bbox).toEqual([0, 0, 1000, 1000]);
+    expect(issue?.severity).toBe('severe');
   });
 
   it('maps naturally repaginated target pages to the single dominant aligned source page', () => {
@@ -69,13 +123,75 @@ describe('vision: final PDF review', () => {
 
     expect(report).toEqual({ pass: true, issues: [], reviewedPages: 1 });
     expect(requests[0]).toMatchObject({
-      model: 'deepseek-v4-flash-vision-exp', thinkingMode: 'disabled', responseFormat: 'json_object', stream: true,
+      model: 'deepseek-v4-flash-vision-exp', thinkingMode: 'disabled', responseFormat: 'json_object', stream: false,
     });
     const images = requests[0].messages[0].content.filter((part: any) => part.type === 'image_url');
     expect(images).toEqual([
       { type: 'image_url', image_url: { url: 'data:image/png;base64,target-0', detail: 'original' } },
     ]);
     expect(renderPage).not.toHaveBeenCalledWith(expect.anything(), 'source', expect.anything());
+    expect(requests[0].messages[0].content[0].text).toContain(
+      'Do not report small or fine English labels inside verified immutable assets as unreadable merely because they are dense',
+    );
+  });
+
+  it('requires a focused second review before a severe visual guess can block the PDF', async () => {
+    const requests: any[] = [];
+    const page = { getViewport: () => ({ width: 1, height: 1 }), render: () => ({ promise: Promise.resolve() }) };
+    const report = await runVisionFinalReview({
+      sourcePdf: { numPages: 1, getPage: async () => page },
+      targetPdf: { numPages: 1, getPage: async () => page },
+      manifest: { units: [] } as any,
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test',
+      renderPage: async () => 'data:image/png;base64,page',
+      complete: async (request: any) => {
+        requests.push(request);
+        return requests.length === 1
+          ? {
+            content: JSON.stringify({
+              target_page: 1,
+              issues: [{
+                type: 'clipped_text', severity: 'severe', bbox: [50, 60, 450, 40],
+                confidence: 0.9, evidence: 'Acknowledgement text clipped at top left',
+              }],
+            }),
+            usage: { promptTokens: 1, completionTokens: 1 },
+          }
+          : { content: '{"target_page":1,"issues":[]}', usage: { promptTokens: 1, completionTokens: 1 } };
+      },
+    });
+
+    expect(requests).toHaveLength(2);
+    expect(requests[1].messages[0].content[0].text).toContain('glyph strokes are visibly cut');
+    expect(report.pass).toBe(true);
+    expect(report.issues).toEqual([]);
+  });
+
+  it('still blocks a severe defect that the focused second review confirms', async () => {
+    const requests: any[] = [];
+    const page = { getViewport: () => ({ width: 1, height: 1 }), render: () => ({ promise: Promise.resolve() }) };
+    const severe = JSON.stringify({
+      target_page: 1,
+      issues: [{
+        type: 'overlap', severity: 'severe', bbox: [100, 200, 400, 200],
+        confidence: 0.95, evidence: 'Body text overlaps the figure',
+      }],
+    });
+    const report = await runVisionFinalReview({
+      sourcePdf: { numPages: 1, getPage: async () => page },
+      targetPdf: { numPages: 1, getPage: async () => page },
+      manifest: { units: [] } as any,
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test',
+      renderPage: async () => 'data:image/png;base64,page',
+      complete: async (request: any) => {
+        requests.push(request);
+        return { content: severe, usage: { promptTokens: 1, completionTokens: 1 } };
+      },
+    });
+
+    expect(requests).toHaveLength(2);
+    expect(report.pass).toBe(false);
+    expect(report.issues).toHaveLength(1);
   });
 
   it('retries an overlong visual report with a compact severe-only request', async () => {

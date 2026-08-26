@@ -21,7 +21,11 @@ export function classifyLines(lines: ParsedLine[], pageW: number): ClassifiedLin
     const span = l.x2 - l.x1;
     const mid = (l.x1 + l.x2) / 2;
     const nearCenter = Math.abs(mid - pageW / 2) <= pageW * 0.08;
-    const centeredFrontMatter = nearCenter && l.x1 > pageW * 0.18 && l.x2 < pageW * 0.82;
+    const authorLike = /[,，]|university|大学|学院|laboratory|\blab\b/i.test(l.text);
+    const centeredFrontMatter = nearCenter
+      && (span > pageW * 0.28 || authorLike)
+      && l.x1 > pageW * 0.18
+      && l.x2 < pageW * 0.82;
     const namedFrontMatter = /^(abstract|摘要|key ?words|关键词)[\s—\-:：]/i.test(l.text.trim());
     let col: ColumnKind = 'left';
     if (span > pageW * 0.5 || centeredFrontMatter || namedFrontMatter) col = 'full';
