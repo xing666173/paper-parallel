@@ -100,6 +100,19 @@ describe('immutable asset geometry gate', () => {
     ).pass).toBe(true);
   });
 
+  it('accepts a high-confidence pseudocode crop even when its comments resemble prose', () => {
+    const algorithm = block(
+      'algorithm',
+      'Algorithm 1 The Pippenger Algorithm\nRequire: A scalar vector and a chosen window size.\n1: for j to 1 do // Convert the original task into subtasks.\n2: return Q',
+      70, 100, 470, 360,
+    );
+    expect(validateImmutableRegion(
+      { id: 'code', kind: 'code', pageIndex: 0, rect: { x: 65, y: 90, w: 480, h: 380 }, widthMode: 'span' },
+      page,
+      [algorithm],
+    ).pass).toBe(true);
+  });
+
   it('still rejects sentence-like prose when character geometry confirms it is inside the crop', () => {
     const swallowed = block(
       'p1',

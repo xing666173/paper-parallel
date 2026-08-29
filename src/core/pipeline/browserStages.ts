@@ -130,7 +130,8 @@ function typstSourceColumn(
   doc: Doc,
   assets: readonly ImmutableAsset[],
 ): TypstSemanticUnit['sourceColumn'] {
-  const block = doc.blocks.find((candidate) => candidate.id === unit.id);
+  const block = doc.blocks.find((candidate) => candidate.id === unit.id)
+    ?? (unit.parentId ? doc.blocks.find((candidate) => candidate.id === unit.parentId) : undefined);
   const asset = unit.assetId
     ? assets.find((candidate) => candidate.id === unit.assetId)
     : assets.find((candidate) => candidate.captionUnitId === unit.id);
@@ -225,7 +226,21 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
         type: 'vision-layout-fallback', at: Date.now(), page: item.pageIndex + 1,
         region: item.regionIndex + 1, reason: item.reason,
       }));
-      const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: reconciled.assetRegions });
+      const prepared = prepareImmutableStructure(doc, {
+        verifiedAssetRegions: reconciled.assetRegions,
+        pageLayouts: new Map(analyses.map((analysis) => [analysis.pageIndex, analysis.layout])),
+      });
+      if (import.meta.env.MODE === 'test') {
+        const diagnosticGlobal = globalThis as typeof globalThis & { __PP_DIAGNOSTIC_LAYOUT__?: unknown };
+        diagnosticGlobal.__PP_DIAGNOSTIC_LAYOUT__ = {
+          ...(diagnosticGlobal.__PP_DIAGNOSTIC_LAYOUT__ as Record<string, unknown> ?? {}),
+          prepared: {
+            regions: prepared.regions,
+            units: prepared.units,
+            assetRegions: prepared.assetRegions,
+          },
+        };
+      }
       const assets = await extractImmutableAssets(prepared.assetRegions, {
         crop: async (region) => cropPageRegionLossless(await pdf.getPage(region.pageIndex + 1), region.rect, 4),
       });
@@ -392,6 +407,10 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
         metadata: { paperWidth: doc.meta.paperWidth, paperHeight: doc.meta.paperHeight },
         regions: prepared.regions, units: typstUnits, assets: current.assets ?? [],
       });
+      if (import.meta.env.MODE === 'test') {
+        (globalThis as typeof globalThis & { __PP_DIAGNOSTIC_TYPST_SOURCE__?: string })
+          .__PP_DIAGNOSTIC_TYPST_SOURCE__ = typstProject.mainContent;
+      }
       return { ...current, typstProject, typstUnits };
     },
 

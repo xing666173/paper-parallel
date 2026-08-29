@@ -5,8 +5,17 @@ import {
   runVisionFinalReview,
   VISION_FINAL_REVIEW_RENDER_SCALE,
 } from '../../src/core/vision/finalReview';
+import { buildVisionFinalReviewPrompt } from '../../src/core/vision/prompts';
 
 describe('vision: final PDF review', () => {
+  it('treats a nearly empty interior page caused by forced pagination as a production defect', () => {
+    const prompt = buildVisionFinalReviewPrompt(8, [7, 8]);
+    expect(prompt).toContain('near-empty interior target page');
+    expect(prompt).toContain('severe layout_drift');
+    expect(prompt).toContain('duplicated figure, table, formula, or algorithm');
+    expect(prompt).toContain('scattered baseline text');
+  });
+
   it('renders dense academic pages above CSS-pixel resolution for legible inspection', () => {
     expect(VISION_FINAL_REVIEW_RENDER_SCALE).toBeGreaterThanOrEqual(1.5);
   });
@@ -31,6 +40,28 @@ describe('vision: final PDF review', () => {
         { type: 'asset_changed', severity: 'severe', bbox: [1, 1, 20, 20], confidence: 0.5, evidence: 'Uncertain.' },
       ],
     }, 1).pass).toBe(true);
+  });
+
+  it('blocks explicit garbled glyphs and high-confidence isolated rows instead of accepting a bad PDF', () => {
+    const unreadable = parseVisionFinalPageReport({
+      target_page: 1,
+      issues: [{
+        type: 'unreadable_glyphs', severity: 'warning', bbox: [1, 1, 20, 20],
+        confidence: 0.7, evidence: '顶部公式符号显示为乱码',
+      }],
+    }, 0);
+    const isolated = parseVisionFinalPageReport({
+      target_page: 1,
+      issues: [{
+        type: 'layout_drift', severity: 'warning', bbox: [1, 1, 20, 20],
+        confidence: 0.9, evidence: '页面中部出现孤立文本行',
+      }],
+    }, 0);
+
+    expect(unreadable.pass).toBe(false);
+    expect(unreadable.issues[0]?.severity).toBe('severe');
+    expect(isolated.pass).toBe(false);
+    expect(isolated.issues[0]?.severity).toBe('severe');
   });
 
   it('merges repeated findings with the same type and evidence', () => {
@@ -81,6 +112,14 @@ describe('vision: final PDF review', () => {
     expect(issue?.evidence).toBe('overlap（模型未提供说明）');
   });
 
+  it('accepts a valid JSON object wrapped in incidental model prose', () => {
+    const report = parseVisionFinalPageReport(
+      'Here is the requested result:\n```json\n{"target_page":1,"issues":[]}\n```\nDone.',
+      0,
+    );
+    expect(report).toEqual({ targetPageIndex: 0, pass: true, issues: [] });
+  });
+
   it('keeps a finding and uses a conservative full-page box when Vision returns invalid coordinates', () => {
     const issue = parseVisionFinalPageReport({
       target_page: 1,
@@ -94,7 +133,7 @@ describe('vision: final PDF review', () => {
     expect(issue?.severity).toBe('severe');
   });
 
-  it('maps naturally repaginated target pages to the single dominant aligned source page', () => {
+  it('maps naturally repaginated target pages to the two dominant aligned source pages', () => {
     const mapping = buildTargetSourcePageMap({
       units: [
         { source: [{ page: 0, rects: [{}] }], target: [{ page: 0, rects: [{}] }] },
@@ -102,7 +141,7 @@ describe('vision: final PDF review', () => {
         { source: [{ page: 2, rects: [{}] }], target: [{ page: 1, rects: [{}] }] },
       ],
     } as any, 2, 3);
-    expect(mapping).toEqual([[1], [2]]);
+    expect(mapping).toEqual([[1, 0], [2]]);
   });
 
   it('reviews source/target images with Vision Exp, thinking disabled and original detail', async () => {
@@ -127,9 +166,10 @@ describe('vision: final PDF review', () => {
     });
     const images = requests[0].messages[0].content.filter((part: any) => part.type === 'image_url');
     expect(images).toEqual([
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,source-0', detail: 'original' } },
       { type: 'image_url', image_url: { url: 'data:image/png;base64,target-0', detail: 'original' } },
     ]);
-    expect(renderPage).not.toHaveBeenCalledWith(expect.anything(), 'source', expect.anything());
+    expect(renderPage).toHaveBeenCalledWith(expect.anything(), 'source', 0);
     expect(requests[0].messages[0].content[0].text).toContain(
       'Do not report small or fine English labels inside verified immutable assets as unreadable merely because they are dense',
     );
@@ -217,6 +257,34 @@ describe('vision: final PDF review', () => {
     expect(report.pass).toBe(true);
     expect(requests).toHaveLength(2);
     expect(requests[1].messages[0].content[0].text).toContain('at most 3 severe issues');
+  });
+
+  it('retries a malformed visual JSON report once with the compact request', async () => {
+    const requests: any[] = [];
+    const invalidReasons: string[] = [];
+    const phases: string[] = [];
+    const page = { getViewport: () => ({ width: 1, height: 1 }), render: () => ({ promise: Promise.resolve() }) };
+    const report = await runVisionFinalReview({
+      sourcePdf: { numPages: 1, getPage: async () => page },
+      targetPdf: { numPages: 1, getPage: async () => page },
+      manifest: { units: [] } as any,
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test',
+      renderPage: async () => 'data:image/png;base64,page',
+      onPageInvalid: ({ reason }) => invalidReasons.push(reason),
+      onPagePhase: ({ phase }) => phases.push(phase),
+      complete: async (request: any) => {
+        requests.push(request);
+        return requests.length === 1
+          ? { content: '{not-json', usage: { promptTokens: 1, completionTokens: 1 } }
+          : { content: '{"target_page":1,"issues":[]}', usage: { promptTokens: 1, completionTokens: 1 } };
+      },
+    });
+
+    expect(report.pass).toBe(true);
+    expect(requests).toHaveLength(2);
+    expect(requests[1].messages[0].content[0].text).toContain('at most 3 severe issues');
+    expect(invalidReasons).toEqual(['Vision 成品质检 JSON 无法解析']);
+    expect(phases).toContain('retrying');
   });
 
   it('reviews heavy multimodal pages sequentially, reports starts immediately, and preserves page order', async () => {

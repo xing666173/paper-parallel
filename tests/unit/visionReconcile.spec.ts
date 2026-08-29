@@ -133,6 +133,78 @@ describe('vision: deterministic layout reconciliation', () => {
       .toBeGreaterThan(139);
   });
 
+  it('keeps natural-language table cells and trims only the prose after the table', () => {
+    const doc = fixtureDoc();
+    const lines = [
+      { y: 100, text: 'Implementations Platform Supported Operations' },
+      { y: 114, text: 'cuZK GPU Groth BLS12-381' },
+      { y: 128, text: 'Bellperson GPU Groth BLS12-381' },
+      { y: 142, text: 'Hardcaml FPGA MSM NTT BLS12-377' },
+      { y: 180, text: 'The following paragraph resumes the technical discussion.' },
+    ];
+    let sourceIndex = 0;
+    doc.blocks.push({
+      id: 'natural-table-text', docId: 'en', type: 'paragraph', pageIndex: 0,
+      rect: { x: 55, y: 100, w: 500, h: 90 }, order: 2,
+      text: lines.map((line) => line.text).join('\n'), splitAllowed: true, widthMode: 'span',
+      characterRects: lines.flatMap((line) => {
+        const chars = [...line.text];
+        const result = chars.map((ch, index) => ({
+          ch, sourceIndex: sourceIndex + index, pageIndex: 0,
+          rect: { x: 58 + index * 4.4, y: line.y, w: 4.2, h: 8 },
+        }));
+        sourceIndex += chars.length + 1;
+        return result;
+      }),
+    });
+
+    const result = reconcileVisionLayout(doc, [{
+      pageIndex: 0, layout: 'single', regions: [{
+        type: 'table', bbox: [80, 110, 840, 150], column: 'full', confidence: 0.99,
+      }],
+    }]);
+
+    expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions[0]!.rect.y + result.assetRegions[0]!.rect.h).toBeGreaterThan(148);
+    expect(result.assetRegions[0]!.rect.y + result.assetRegions[0]!.rect.h).toBeLessThan(180);
+  });
+
+  it('trims ordinary prose below a complete algorithm crop at the first large line gap', () => {
+    const doc = fixtureDoc();
+    const lines = [
+      { y: 100, text: 'Algorithm 1 The Pippenger Algorithm' },
+      { y: 114, text: 'Require: A scalar vector and window size.' },
+      { y: 128, text: '1: for j to 1 do // Convert task into subtasks.' },
+      { y: 142, text: '18: return Q' },
+      { y: 184, text: 'The following paragraph resumes the ordinary technical discussion.' },
+    ];
+    let sourceIndex = 0;
+    doc.blocks.push({
+      id: 'algorithm-text', docId: 'en', type: 'paragraph', pageIndex: 0,
+      rect: { x: 55, y: 100, w: 500, h: 95 }, order: 2,
+      text: lines.map((line) => line.text).join('\n'), splitAllowed: true, widthMode: 'span',
+      characterRects: lines.flatMap((line) => {
+        const chars = [...line.text];
+        const result = chars.map((ch, index) => ({
+          ch, sourceIndex: sourceIndex + index, pageIndex: 0,
+          rect: { x: 58 + index * 4.4, y: line.y, w: 4.2, h: 8 },
+        }));
+        sourceIndex += chars.length + 1;
+        return result;
+      }),
+    });
+
+    const result = reconcileVisionLayout(doc, [{
+      pageIndex: 0, layout: 'single', regions: [{
+        type: 'code', bbox: [80, 110, 840, 150], column: 'full', confidence: 0.99,
+      }],
+    }]);
+
+    expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions[0]!.rect.y + result.assetRegions[0]!.rect.h).toBeLessThan(180);
+    expect(result.assetRegions[0]!.rect.y + result.assetRegions[0]!.rect.h).toBeGreaterThan(145);
+  });
+
   it('keeps raster clearance between a table crop and a caption immediately above it', () => {
     const doc = fixtureDoc();
     const caption = doc.blocks.find((block) => block.id === 'caption-1')!;
@@ -210,6 +282,23 @@ describe('vision: deterministic layout reconciliation', () => {
     expect(result.assetRegions[0]?.captionUnitId).toBe('caption-1');
   });
 
+  it('drops a formula box that is actually a label nested inside a larger figure', () => {
+    const result = reconcileVisionLayout(fixtureDoc(), [{
+      pageIndex: 0, layout: 'mixed', regions: [
+        {
+          type: 'display_formula', bbox: [200, 220, 400, 70], column: 'full', confidence: 0.98,
+        },
+        {
+          type: 'figure', bbox: [180, 230, 440, 260], column: 'full', confidence: 0.99,
+        },
+      ],
+    }]);
+
+    expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions).toHaveLength(1);
+    expect(result.assetRegions[0]?.kind).toBe('figure');
+  });
+
   it('fails closed for low confidence and page-edge assets', () => {
     const result = reconcileVisionLayout(fixtureDoc(), [{
       pageIndex: 0, layout: 'double', regions: [
@@ -222,6 +311,73 @@ describe('vision: deterministic layout reconciliation', () => {
     expect(result.unresolved.map((item) => item.reason)).toEqual([
       'low-confidence', 'page-edge-touch',
     ]);
+  });
+
+  it('rejects a repeated stack of thin full-width formula boxes hallucinated from body text lines', () => {
+    const result = reconcileVisionLayout(fixtureDoc(), [{
+      pageIndex: 0,
+      layout: 'single',
+      regions: Array.from({ length: 8 }, (_, index) => ({
+        type: 'display_formula' as const,
+        bbox: [110, 300 + index * 18, 780, 16] as [number, number, number, number],
+        column: 'full' as const,
+        confidence: 0.95,
+      })),
+    }]);
+
+    expect(result.assetRegions).toEqual([]);
+    expect(result.unresolved).toHaveLength(8);
+    expect(result.unresolved.every((item) => item.reason === 'implausible-formula-cluster')).toBe(true);
+  });
+
+  it('rejects one thin full-width text line mislabeled as a display formula', () => {
+    const result = reconcileVisionLayout(fixtureDoc(), [{
+      pageIndex: 0, layout: 'single', regions: [{
+        type: 'display_formula', bbox: [110, 300, 780, 16], column: 'full', confidence: 0.98,
+      }],
+    }]);
+
+    expect(result.assetRegions).toEqual([]);
+    expect(result.unresolved).toEqual([expect.objectContaining({ reason: 'implausible-formula-cluster' })]);
+  });
+
+  it('keeps a single-column display formula away from adjacent prose and includes its equation number', () => {
+    const doc = fixtureDoc();
+    doc.layoutMode = 'single';
+    doc.layoutRegions = [{
+      id: 'region-1', mode: 'full-width', sourcePage: 0,
+      bounds: { x: 100, y: 70, w: 412, h: 650 }, orderedUnitIds: ['before', 'after'],
+    }];
+    const before = 'The preceding paragraph contains enough natural language words to be treated as ordinary body prose.';
+    const after = 'The following paragraph also contains enough natural language words to be treated as ordinary body prose.';
+    doc.blocks = [
+      {
+        id: 'before', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 100, y: 150, w: 412, h: 40 }, order: 0, text: before,
+        splitAllowed: true, widthMode: 'span',
+      },
+      {
+        id: 'after', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 100, y: 244, w: 412, h: 30 }, order: 1, text: after,
+        splitAllowed: true, widthMode: 'span',
+        characterRects: [...after].map((ch, index) => ({
+          ch, sourceIndex: index, pageIndex: 0,
+          rect: { x: 100 + index * 4, y: 244, w: 3.8, h: 9 },
+        })),
+      },
+    ];
+
+    const result = reconcileVisionLayout(doc, [{
+      pageIndex: 0, layout: 'single', regions: [{
+        type: 'display_formula', bbox: [340, 250, 320, 50], column: 'full', confidence: 0.99,
+      }],
+    }]);
+
+    expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions[0]).toMatchObject({
+      rect: { x: 100, w: 412 }, widthMode: 'span',
+    });
+    expect(result.assetRegions[0]!.rect.y + result.assetRegions[0]!.rect.h).toBeLessThanOrEqual(242);
   });
 
   it('ignores body text annotations and rejects missing or duplicate page analyses', () => {

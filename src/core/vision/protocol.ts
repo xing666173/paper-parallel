@@ -89,6 +89,38 @@ export function parseNormalizedVisionBox(value: unknown, path: string): Normaliz
   return [x, y, width, height];
 }
 
+function parseLayoutVisionBox(value: unknown, path: string): NormalizedVisionBox {
+  const parsed = parseNormalizedVisionBox(value, path);
+  const raw = Array.isArray(value)
+    ? value
+    : value && typeof value === 'object'
+      ? [
+          (value as Record<string, unknown>).x,
+          (value as Record<string, unknown>).y,
+          (value as Record<string, unknown>).width,
+          (value as Record<string, unknown>).height,
+        ]
+      : [];
+  if (raw.length !== 4 || raw.some((item) => typeof item !== 'number' || !Number.isFinite(item))) return parsed;
+  let [x, y, third, fourth] = raw as number[];
+  if ([x, y, third, fourth].every((item) => item >= 0 && item <= 1)) {
+    [x, y, third, fourth] = [x * 1000, y * 1000, third * 1000, fourth * 1000];
+  }
+  // Vision models occasionally return x1/y1/x2/y2 while naming the final
+  // fields width/height.  When that tuple is also technically valid xywh, a
+  // right/bottom edge landing exactly on 1000 is the reliable tell: immutable
+  // paper assets are requested as tight ink crops and should not touch a page
+  // edge.  Repair the complete tuple so tables are not widened and lengthened.
+  const repaired: NormalizedVisionBox = [...parsed];
+  if (x >= 20 && third > x && third <= 1000 && x + third >= 995) {
+    repaired[2] = third - x;
+  }
+  if (y >= 20 && fourth > y && fourth <= 1000 && y + fourth >= 995) {
+    repaired[3] = fourth - y;
+  }
+  return repaired;
+}
+
 function normalizedColumn(value: unknown, bbox: NormalizedVisionBox): VisionColumn {
   if (value === 'left' || value === 'right' || value === 'full') return value;
   const normalized = typeof value === 'string' ? value.toLowerCase().replace(/[ _]/g, '-') : '';
@@ -114,7 +146,7 @@ export function parseVisionPageAnalysis(value: unknown, expectedPageIndex: numbe
       throw new VisionProtocolError(`Vision JSON regions[${index}].confidence 必须在 0..1`);
     }
     const captionValue = item.caption_bbox ?? item.captionBBox;
-    const bbox = parseNormalizedVisionBox(item.bbox, `regions[${index}].bbox`);
+    const bbox = parseLayoutVisionBox(item.bbox, `regions[${index}].bbox`);
     return {
       type: enumValue(item.type, [
         'figure', 'table', 'display_formula', 'code', 'caption', 'header', 'footer', 'body_text',

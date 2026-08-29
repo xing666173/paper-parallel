@@ -89,15 +89,14 @@ export async function buildTypstProject(input: TypstProjectInput): Promise<Typst
 
   const markerIds: string[] = [];
   const regionBodies: string[] = [];
-  let previousSourcePage: number | undefined;
   for (const region of input.regions) {
-    if (previousSourcePage !== undefined && region.sourcePage > previousSourcePage) {
-      regionBodies.push('#pagebreak(weak: true)');
-    }
-    previousSourcePage = region.sourcePage;
     const segments: Array<{
       mode: LayoutRegion['mode'];
-      rendered: Array<{ content: string; sourceColumn?: TypstSemanticUnit['sourceColumn'] }>;
+      rendered: Array<{
+        content: string;
+        sourceColumn?: TypstSemanticUnit['sourceColumn'];
+        forceColumnBreakBefore?: boolean;
+      }>;
     }> = [];
     const spanCaptionIds = new Set(input.assets
       .filter((asset) => asset.widthMode === 'span' && asset.captionUnitId)
@@ -122,16 +121,21 @@ export async function buildTypstProject(input: TypstProjectInput): Promise<Typst
       mode: LayoutRegion['mode'],
       content: string,
       sourceColumn?: TypstSemanticUnit['sourceColumn'],
+      forceColumnBreakBefore = false,
     ) => {
       const current = segments.at(-1);
       const segment = current?.mode === mode
         ? current
         : (() => {
-          const created = { mode, rendered: [] as Array<{ content: string; sourceColumn?: TypstSemanticUnit['sourceColumn'] }> };
+          const created = { mode, rendered: [] as Array<{
+            content: string;
+            sourceColumn?: TypstSemanticUnit['sourceColumn'];
+            forceColumnBreakBefore?: boolean;
+          }> };
           segments.push(created);
           return created;
         })();
-      segment.rendered.push({ content, sourceColumn });
+      segment.rendered.push({ content, sourceColumn, forceColumnBreakBefore });
     };
     const renderAsset = (unit: TypstSemanticUnit, asset: ImmutableAsset, rowSize = 1) => {
       markerIds.push(unit.id);
@@ -166,13 +170,22 @@ export async function buildTypstProject(input: TypstProjectInput): Promise<Typst
           : assetCodes[0]!;
         const captionContent = renderTextUnit(caption, markerIds);
         const tableOnly = groupedAssets.every((member) => member.kind === 'table');
-        const content = `#pp-asset-group[\n${tableOnly ? `${captionContent}\n${assetsContent}` : `${assetsContent}\n${captionContent}`}\n]`;
         const groupMode: LayoutRegion['mode'] = region.mode === 'double'
           && (groupedAssets.length > 1 || groupedAssets.some((member) => member.widthMode === 'span'))
           ? 'full-width'
           : region.mode;
+        const pageBoundary = groupMode !== 'double'
+          && groupedAssets.some((member) => member.widthMode === 'span')
+          ? '#pagebreak(weak: true)\n'
+          : '';
+        const content = `${pageBoundary}#pp-asset-group[\n${tableOnly ? `${captionContent}\n${assetsContent}` : `${assetsContent}\n${captionContent}`}\n]`;
         const columns = new Set(memberIds.map((id) => unitsById.get(id)?.sourceColumn).filter(Boolean));
-        pushRendered(groupMode, content, columns.size === 1 ? [...columns][0] : 'span');
+        pushRendered(
+          groupMode,
+          content,
+          columns.size === 1 ? [...columns][0] : 'span',
+          groupMode === 'double',
+        );
         continue;
       }
 
@@ -181,7 +194,17 @@ export async function buildTypstProject(input: TypstProjectInput): Promise<Typst
         : region.mode;
       if (unit.assetId) {
         if (!asset) throw new Error(`Unit ${unit.id} references missing asset ${unit.assetId}`);
-        pushRendered(unitMode, renderAsset(unit, asset, horizontalCellCount), unit.sourceColumn);
+        const pageBoundary = unitMode !== 'double'
+          && asset.widthMode === 'span'
+          && asset.kind !== 'formula'
+          ? '#pagebreak(weak: true)\n'
+          : '';
+        pushRendered(
+          unitMode,
+          `${pageBoundary}${renderAsset(unit, asset, horizontalCellCount)}`,
+          unit.sourceColumn,
+          unitMode === 'double' && asset.kind !== 'formula',
+        );
       } else {
         pushRendered(unitMode, renderTextUnit(unit, markerIds), unit.sourceColumn);
       }
@@ -189,7 +212,7 @@ export async function buildTypstProject(input: TypstProjectInput): Promise<Typst
     if (region.presentation === 'horizontal') {
       const cells = segments.flatMap((segment) => segment.rendered.map((item) => item.content));
       if (cells.length) {
-        regionBodies.push(`#pp-full-width[\n#grid(columns: ${cells.length}, gutter: 6pt, ${cells.map((cell) => `[${cell}]`).join(', ')})\n]`);
+        regionBodies.push(`#pagebreak(weak: true)\n#pp-asset-group[\n#grid(columns: ${cells.length}, gutter: 6pt, ${cells.map((cell) => `[${cell}]`).join(', ')})\n]`);
       }
       continue;
     }
@@ -198,15 +221,29 @@ export async function buildTypstProject(input: TypstProjectInput): Promise<Typst
         ? 'pp-double'
         : segment.mode === 'full-width' ? 'pp-full-width' : 'pp-single';
       const rendered: string[] = [];
+      const pageBoundary = segment.mode === 'double'
+        && segment.rendered[0]?.forceColumnBreakBefore
+        ? '#pagebreak(weak: true)\n'
+        : '';
       let previousColumn: TypstSemanticUnit['sourceColumn'];
       for (const item of segment.rendered) {
-        if (segment.mode === 'double' && previousColumn === 'left' && item.sourceColumn === 'right') {
+        if (segment.mode === 'double' && rendered.length > 0 && (
+          item.forceColumnBreakBefore
+          || (previousColumn === 'left' && item.sourceColumn === 'right')
+        )) {
           rendered.push('#colbreak()');
         }
         rendered.push(item.content);
         if (item.sourceColumn && item.sourceColumn !== 'span') previousColumn = item.sourceColumn;
       }
-      regionBodies.push(`#${wrapper}[\n${rendered.join('\n\n')}\n]`);
+      // Keep single/full-width flow at the document root. Wrapping a long
+      // region in a breakable block makes nested unbreakable image groups
+      // unaware of the real page boundary, so Typst can slice them at the
+      // footer instead of moving the complete figure/table to the next page.
+      // Two-column flow still requires its columns container.
+      regionBodies.push(segment.mode === 'double'
+        ? `${pageBoundary}#${wrapper}[\n${rendered.join('\n\n')}\n]`
+        : rendered.join('\n\n'));
     }
   }
 

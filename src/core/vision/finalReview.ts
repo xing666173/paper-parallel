@@ -35,8 +35,25 @@ function rootObject(value: unknown): Record<string, unknown> {
   let parsed = value;
   if (typeof value === 'string') {
     const trimmed = value.trim();
-    const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-    try { parsed = JSON.parse(fenced ? fenced[1] : trimmed); } catch { throw new Error('Vision 成品质检 JSON 无法解析'); }
+    const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+    const objectStart = trimmed.indexOf('{');
+    const objectEnd = trimmed.lastIndexOf('}');
+    const candidates = [
+      fenced?.[1],
+      trimmed,
+      objectStart >= 0 && objectEnd > objectStart ? trimmed.slice(objectStart, objectEnd + 1) : undefined,
+    ].filter((candidate): candidate is string => Boolean(candidate));
+    let parsedCandidate: unknown;
+    let parsedOk = false;
+    for (const candidate of candidates) {
+      try {
+        parsedCandidate = JSON.parse(candidate);
+        parsedOk = true;
+        break;
+      } catch { /* try the next safely bounded JSON candidate */ }
+    }
+    if (!parsedOk) throw new Error('Vision 成品质检 JSON 无法解析');
+    parsed = parsedCandidate;
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Vision 成品质检 JSON 必须为对象');
   return parsed as Record<string, unknown>;
@@ -46,6 +63,33 @@ const ISSUE_TYPES: readonly VisionFinalIssueType[] = [
   'missing_text', 'clipped_text', 'overlap', 'unreadable_glyphs', 'untranslated_body',
   'layout_collapse', 'layout_drift', 'asset_changed', 'asset_missing', 'formula_changed', 'table_changed',
 ];
+
+function calibratedSeverity(
+  type: VisionFinalIssueType,
+  severity: VisionFinalIssue['severity'],
+  confidence: number,
+  evidence: string,
+): VisionFinalIssue['severity'] {
+  if (type === 'asset_missing') return 'warning';
+  if (severity === 'severe') return severity;
+  if (confidence >= 0.8
+    && (type === 'asset_changed' || type === 'formula_changed' || type === 'table_changed')) return 'severe';
+  if (type === 'unreadable_glyphs' && confidence >= 0.6
+    && /(?:garbled|乱码|unclear symbols?|corrupt(?:ed)? glyph)/i.test(evidence)) return 'severe';
+  if (confidence < 0.85) return severity;
+  if (type === 'unreadable_glyphs') return 'severe';
+  if (type === 'layout_drift'
+    && /(?:isolated|orphan|scattered|stray|garbled|孤立|散落|乱码|游离)/i.test(evidence)) return 'severe';
+  return severity;
+}
+
+function isBlockingIssue(issue: VisionFinalIssue): boolean {
+  if (issue.severity !== 'severe') return false;
+  if (issue.confidence >= 0.8) return true;
+  return issue.type === 'unreadable_glyphs'
+    && issue.confidence >= 0.6
+    && /(?:garbled|乱码|unclear symbols?|corrupt(?:ed)? glyph)/i.test(issue.evidence);
+}
 
 export function parseVisionFinalPageReport(value: unknown, expectedTargetPageIndex: number): VisionFinalPageReport {
   const root = rootObject(value);
@@ -78,8 +122,15 @@ export function parseVisionFinalPageReport(value: unknown, expectedTargetPageInd
       // Asset markers and source hashes are checked deterministically before
       // this page review. With natural repagination, a source-page asset can
       // legitimately appear on an adjacent target page, so a page-local
-      // "missing" guess must not veto the whole document.
-      severity: item.type === 'asset_missing' ? 'warning' : item.severity,
+      // "missing" guess must not veto the whole document. Conversely,
+      // high-confidence unreadable or visibly orphaned glyphs are production
+      // defects even when the model undersells them as a warning.
+      severity: calibratedSeverity(
+        item.type as VisionFinalIssueType,
+        item.severity,
+        item.confidence,
+        evidence,
+      ),
       bbox,
       confidence: item.confidence,
       evidence,
@@ -94,7 +145,7 @@ export function parseVisionFinalPageReport(value: unknown, expectedTargetPageInd
   });
   return {
     targetPageIndex: expectedTargetPageIndex,
-    pass: !issues.some((issue) => issue.severity === 'severe' && issue.confidence >= 0.8),
+    pass: !issues.some(isBlockingIssue),
     issues,
   };
 }
@@ -116,7 +167,11 @@ export function buildTargetSourcePageMap(
     const ranked = [...scores.entries()]
       .filter(([page]) => page >= 0 && page < sourcePageCount)
       .sort((left, right) => right[1] - left[1] || left[0] - right[0])
-      .slice(0, 1)
+      // Natural Chinese repagination frequently combines the tail of one
+      // source page with a figure/table from the next. Send the two dominant
+      // source pages so Vision can detect a partially visible immutable asset
+      // instead of comparing only the surrounding prose page.
+      .slice(0, 2)
       .map(([page]) => page);
     if (ranked.length) return ranked;
     return [Math.min(sourcePageCount - 1, Math.floor(targetPageIndex / Math.max(1, targetPageCount) * sourcePageCount))];
@@ -201,6 +256,11 @@ export async function runVisionFinalReview(options: RunVisionFinalReviewOptions)
   const renderPage = options.renderPage
     ?? ((page) => renderPdfPageAsPng(page, { scale: VISION_FINAL_REVIEW_RENDER_SCALE }));
   const pageIssues: VisionFinalIssue[][] = Array.from({ length: options.targetPdf.numPages }, () => []);
+  const sourcePageMap = buildTargetSourcePageMap(
+    options.manifest,
+    options.targetPdf.numPages,
+    options.sourcePdf.numPages,
+  );
   const runController = new AbortController();
   const onOuterAbort = () => runController.abort();
   if (options.signal?.aborted) runController.abort();
@@ -209,13 +269,19 @@ export async function runVisionFinalReview(options: RunVisionFinalReviewOptions)
   const performPageReview = async (targetPageIndex: number, pageSignal: AbortSignal): Promise<void> => {
     if (pageSignal.aborted) throw new DOMException('已停止', 'AbortError');
     options.onPageStart?.({ targetPageIndex, totalPages: options.targetPdf.numPages });
-    // Cross-page source/target image pairs are ambiguous after natural Chinese
-    // repagination. Immutable assets are checked by hash and alignment markers;
-    // this pass inspects the rendered target page for visible production defects.
-    const sourcePageIndices: number[] = [];
+    const sourcePageIndices = sourcePageMap[targetPageIndex] ?? [];
     const content: NonNullable<ChatCompletionOptions['messages'][number]['content']> extends infer _T ? any[] : never = [
       { type: 'text', text: buildVisionFinalReviewPrompt(targetPageIndex + 1, sourcePageIndices.map((page) => page + 1)) },
     ];
+    for (const sourcePageIndex of sourcePageIndices) {
+      const sourceImage = await renderPage(
+        await options.sourcePdf.getPage(sourcePageIndex + 1),
+        'source',
+        sourcePageIndex,
+      );
+      content.push({ type: 'text', text: `SOURCE PAGE ${sourcePageIndex + 1}` });
+      content.push({ type: 'image_url', image_url: { url: sourceImage, detail: 'original' } });
+    }
     const targetImage = await renderPage(await options.targetPdf.getPage(targetPageIndex + 1), 'target', targetPageIndex);
     options.onPagePhase?.({ targetPageIndex, totalPages: options.targetPdf.numPages, phase: 'rendered' });
     content.push({ type: 'text', text: `TARGET PAGE ${targetPageIndex + 1}` });
@@ -271,11 +337,24 @@ export async function runVisionFinalReview(options: RunVisionFinalReviewOptions)
         totalPages: options.targetPdf.numPages,
         reason: error instanceof Error ? error.message : '未知响应格式错误',
       });
-      throw error;
+      // JSON mode still occasionally returns a prose wrapper or malformed
+      // object. This is a recoverable model-format failure, so request one
+      // compact severe-only report before failing the completed document.
+      options.onPagePhase?.({ targetPageIndex, totalPages: options.targetPdf.numPages, phase: 'retrying' });
+      completion = await requestReview(true);
+      options.onPagePhase?.({ targetPageIndex, totalPages: options.targetPdf.numPages, phase: 'returned' });
+      try {
+        pageReport = parseVisionFinalPageReport(completion.content, targetPageIndex);
+      } catch (retryError) {
+        options.onPageInvalid?.({
+          targetPageIndex,
+          totalPages: options.targetPdf.numPages,
+          reason: retryError instanceof Error ? retryError.message : '未知响应格式错误',
+        });
+        throw retryError;
+      }
     }
-    const severeCandidates = pageReport.issues.filter(
-      (issue) => issue.severity === 'severe' && issue.confidence >= 0.8,
-    );
+    const severeCandidates = pageReport.issues.filter(isBlockingIssue);
     if (severeCandidates.length) {
       let contentReported = false;
       const confirmation = await complete({
@@ -371,7 +450,7 @@ export async function runVisionFinalReview(options: RunVisionFinalReviewOptions)
     throw new DOMException('已停止', 'AbortError');
   }
   return {
-    pass: !issues.some((issue) => issue.severity === 'severe' && issue.confidence >= 0.8),
+    pass: !issues.some(isBlockingIssue),
     issues,
     reviewedPages: options.targetPdf.numPages,
   };

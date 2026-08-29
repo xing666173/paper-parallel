@@ -64,7 +64,10 @@ export function validateImmutableRegion(
 
   if (captionRect && intersectionArea(rect, captionRect) > 0) issues.push('caption-overlap');
 
-  if (region.kind !== 'table') {
+  // Tables and algorithm/code environments legitimately contain dense natural-language
+  // labels and comments. Their page-bounds and coverage checks still protect against an
+  // accidentally oversized crop; prose-density is only meaningful for figures/formulas.
+  if (region.kind !== 'table' && region.kind !== 'code') {
     const longProse = intersectingBlocks.map((block) => ({
       block,
       characterCount: proseCharacterCount(block, rect),

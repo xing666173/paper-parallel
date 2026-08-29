@@ -53,6 +53,23 @@ describe('vision: page analysis protocol', () => {
     }, 0).regions[0].bbox).toEqual([80, 180, 840, 30]);
   });
 
+  it('repairs an ambiguous xyxy asset box that otherwise lands exactly on the page edge', () => {
+    expect(parseVisionPageAnalysis({
+      page: 1,
+      layout: 'mixed',
+      regions: [{
+        type: 'table',
+        bbox: { x: 214, y: 304, width: 786, height: 266 },
+        column: 'full',
+        caption_bbox: { x: 330, y: 286, width: 554, height: 14 },
+        confidence: 0.95,
+      }],
+    }, 0).regions[0]).toMatchObject({
+      bbox: [214, 304, 572, 266],
+      captionBBox: [330, 286, 554, 14],
+    });
+  });
+
   it('infers a recoverable column label from validated normalized geometry', () => {
     const regions = parseVisionPageAnalysis({
       page: 1, layout: 'mixed', regions: [

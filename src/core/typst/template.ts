@@ -23,9 +23,9 @@ export function buildAcademicTemplate(options: AcademicTemplateOptions): string 
 #set par(justify: true, leading: 0.65em)
 #set heading(numbering: "1.1")
 
-#let pp-full-width(body) = block(width: 100%)[#body]
+#let pp-full-width(body) = body
 #let pp-double(body) = columns(2, gutter: ${points(gutter)})[#body]
-#let pp-single(body) = block(width: 100%)[#body]
+#let pp-single(body) = body
 #let pp-unit(id, body) = link("https://paper-parallel.invalid/unit/" + id)[#body]
 #let pp-title(body) = block(above: 4pt, below: 8pt)[#align(center)[#text(size: 16pt, weight: "bold")[#body]]]
 #let pp-author(body) = block(below: 3pt)[#align(center)[#text(size: 10pt)[#body]]]
@@ -34,7 +34,7 @@ export function buildAcademicTemplate(options: AcademicTemplateOptions): string 
 #let pp-reference(body) = text(size: 9pt)[#body]
 #let pp-asset-group(body) = block(breakable: false, width: 100%, above: 2pt, below: 4pt)[#body]
 #let pp-asset(id, path, source-width, span: false) = {
-  let body = block(width: 100%)[#align(center)[#pp-unit(id)[#image(path, width: source-width)]]]
+  let body = block(breakable: false, width: 100%)[#align(center)[#pp-unit(id)[#image(path, width: source-width)]]]
   if span { pp-full-width(body) } else { body }
 }
 `;

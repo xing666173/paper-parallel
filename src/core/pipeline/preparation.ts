@@ -1,6 +1,7 @@
 import type {
   Doc,
   LayoutRegion,
+  Rect,
   SemanticUnit,
   SemanticUnitKind,
 } from '../../types/models';
@@ -140,6 +141,8 @@ export interface PreparedImmutableStructure {
 export interface PrepareImmutableOptions {
   /** Vision regions after protocol, confidence, coordinate and geometry reconciliation. */
   verifiedAssetRegions?: readonly DetectedAssetRegion[];
+  /** Vision page layout is authoritative when the parser is confused by formula/figure text fragments. */
+  pageLayouts?: ReadonlyMap<number, 'single' | 'double' | 'mixed'>;
 }
 
 function intersectionArea(left: { x: number; y: number; w: number; h: number }, right: { x: number; y: number; w: number; h: number }): number {
@@ -148,11 +151,11 @@ function intersectionArea(left: { x: number; y: number; w: number; h: number }, 
 }
 
 function materiallyCovered(block: Doc['blocks'][number], asset: DetectedAssetRegion): boolean {
-  if (block.pageIndex !== asset.pageIndex) return false;
   if (block.characterRects?.length) {
     const visible = block.characterRects.filter((character) => character.ch.trim().length > 0);
     if (visible.length) {
       const covered = visible.filter((character) => {
+        if (character.pageIndex !== asset.pageIndex) return false;
         const center = {
           x: character.rect.x + character.rect.w / 2,
           y: character.rect.y + character.rect.h / 2,
@@ -163,7 +166,142 @@ function materiallyCovered(block: Doc['blocks'][number], asset: DetectedAssetReg
       return covered / visible.length >= 0.8;
     }
   }
+  if (block.pageIndex !== asset.pageIndex) return false;
   return intersectionArea(block.rect, asset.rect) / Math.max(1, block.rect.w * block.rect.h) >= 0.5;
+}
+
+function unionRects(rects: readonly Rect[]): Rect | undefined {
+  if (!rects.length) return undefined;
+  const left = Math.min(...rects.map((rect) => rect.x));
+  const top = Math.min(...rects.map((rect) => rect.y));
+  const right = Math.max(...rects.map((rect) => rect.x + rect.w));
+  const bottom = Math.max(...rects.map((rect) => rect.y + rect.h));
+  return { x: left, y: top, w: right - left, h: bottom - top };
+}
+
+function physicalRectOnPage(block: Doc['blocks'][number], pageIndex: number): Rect | undefined {
+  const characters = (block.characterRects ?? []).filter((character) => (
+    character.pageIndex === pageIndex && character.ch.trim().length > 0
+  ));
+  const characterRect = unionRects(characters.map((character) => character.rect));
+  if (characterRect) return characterRect;
+  const fragments = (block.fragments ?? []).filter((fragment) => fragment.pageIndex === pageIndex);
+  const fragmentRect = unionRects(fragments.map((fragment) => fragment.rect));
+  if (fragmentRect) return fragmentRect;
+  return block.pageIndex === pageIndex ? block.rect : undefined;
+}
+
+function physicalPages(block: Doc['blocks'][number]): number[] {
+  return [...new Set([
+    block.pageIndex,
+    ...(block.fragments ?? []).map((fragment) => fragment.pageIndex),
+    ...(block.characterRects ?? []).map((character) => character.pageIndex),
+  ])];
+}
+
+function normalizedFragmentText(value: string): string {
+  return value.toLocaleLowerCase().replace(/\s+/g, '').replace(/[.,;:()[\]{}]/g, '');
+}
+
+function nestedPdfFragmentIds(doc: Doc): Set<string> {
+  const result = new Set<string>();
+  for (const candidate of doc.blocks) {
+    const text = candidate.text?.trim() ?? '';
+    const naturalWords = text.match(/[A-Za-z]{3,}/g)?.length ?? 0;
+    const fragmentLike = naturalWords <= 2
+      && (text.length <= 16 || /[=+\-*/∑∫√≤≥≈≠⌈⌉λ𝑎-𝑧𝛼-𝜔α-ωΑ-Ω\d]/u.test(text));
+    if (!fragmentLike) continue;
+    const candidateText = normalizedFragmentText(text);
+    const nested = physicalPages(candidate).some((pageIndex) => {
+      const physicalCandidateRect = physicalRectOnPage(candidate, pageIndex);
+      const candidateRects = [
+        physicalCandidateRect,
+        candidate.pageIndex === pageIndex ? candidate.rect : undefined,
+      ].filter((rect): rect is Rect => Boolean(rect));
+      if (!candidateRects.length) return false;
+      return doc.blocks.some((other) => {
+        if (other.id === candidate.id) return false;
+        const otherRects = [
+          physicalRectOnPage(other, pageIndex),
+          other.pageIndex === pageIndex ? other.rect : undefined,
+        ].filter((rect): rect is Rect => Boolean(rect));
+        if (!otherRects.length) return false;
+        const otherText = other.text ?? '';
+        const otherWords = otherText.match(/[A-Za-z]{3,}/g)?.length ?? 0;
+        if (otherWords < 3) return false;
+        if (candidate.type === 'equation') {
+          const otherHasMath = /[=+\-*/∑∫√≤≥≈≠⌈⌉λ𝑎-𝑧𝛼-𝜔α-ωΑ-Ω]/u.test(otherText);
+          const otherContainsCandidate = candidateText.length >= 2
+            && normalizedFragmentText(otherText).includes(candidateText);
+          if (!otherHasMath && !otherContainsCandidate) return false;
+        }
+        return candidateRects.some((candidateRect) => {
+          const area = Math.max(1, candidateRect.w * candidateRect.h);
+          return otherRects.some((otherRect) => (
+            otherRect.w * otherRect.h >= area * 2
+            && intersectionArea(candidateRect, otherRect) / area >= 0.65
+          ));
+        });
+      });
+    });
+    if (nested) result.add(candidate.id);
+  }
+  return result;
+}
+
+function withoutScatteredMathLines(source: string): string {
+  const lines = source.split(/\r?\n/).map((line) => line.replace(/[ \t]+/g, ' ').trim());
+  const naturalWordCount = (line: string) => line.match(/[A-Za-z]{3,}/g)?.length ?? 0;
+  if (!lines.some((line) => naturalWordCount(line) >= 2)) return source.trim();
+  const cleaned = lines
+    .filter((line) => {
+      if (!line) return false;
+      if (naturalWordCount(line) >= 2) return true;
+      if (line.length > 40) return true;
+      return !(/[=+\-*/∑∫√≤≥≈≠⌈⌉λ𝑎-𝑧𝛼-𝜔α-ωΑ-Ω\d]/u.test(line)
+        || /^(?:[A-Za-z]\s*){1,4}$/u.test(line));
+    })
+    .map((line) => {
+      const firstWord = line.match(/[A-Za-z]{3,}/);
+      if (!firstWord?.index) return line;
+      const prefix = line.slice(0, firstWord.index);
+      if (prefix.length > 20 || /^\s*\d+[.)]\s*$/.test(prefix)) return line;
+      const fragmentPrefix = prefix.trim();
+      if (!fragmentPrefix || /[A-Za-z]{3,}/.test(fragmentPrefix)) return line;
+      return line.slice(firstWord.index);
+    });
+  return cleaned.join('\n').trim();
+}
+
+function nearVerifiedFormula(
+  block: Doc['blocks'][number],
+  assets: readonly DetectedAssetRegion[],
+): boolean {
+  return assets.some((asset) => {
+    if (asset.kind !== 'formula') return false;
+    const rect = physicalRectOnPage(block, asset.pageIndex);
+    if (!rect) return false;
+    const horizontalOverlap = Math.max(0, Math.min(
+      rect.x + rect.w,
+      asset.rect.x + asset.rect.w,
+    ) - Math.max(rect.x, asset.rect.x));
+    const verticalGap = Math.max(
+      0,
+      rect.y - (asset.rect.y + asset.rect.h),
+      asset.rect.y - (rect.y + rect.h),
+    );
+    return horizontalOverlap >= Math.min(rect.w, asset.rect.w) * 0.1 && verticalGap <= 48;
+  });
+}
+
+function isFormulaExtractionFragment(block: Doc['blocks'][number], asset: DetectedAssetRegion): boolean {
+  if (asset.kind !== 'formula') return false;
+  const rect = physicalRectOnPage(block, asset.pageIndex);
+  if (!rect) return false;
+  const text = block.text?.trim() ?? '';
+  const naturalWords = text.match(/[A-Za-z]{3,}/g)?.length ?? 0;
+  if (naturalWords > 2 || !/[=+\-*/∑∫√≤≥≈≠⌈⌉λ𝑎-𝑧𝛼-𝜔α-ωΑ-Ω\d]/u.test(text)) return false;
+  return intersectionArea(rect, asset.rect) / Math.max(1, rect.w * rect.h) >= 0.05;
 }
 
 function withoutAssetTextLines(
@@ -172,6 +310,38 @@ function withoutAssetTextLines(
   assets: readonly DetectedAssetRegion[],
 ): string {
   if (!block.characterRects?.length || !assets.length) return source;
+  const blockText = block.text ?? '';
+  const sourceOffset = blockText.indexOf(source);
+  if (sourceOffset >= 0) {
+    const masked = new Uint8Array(source.length);
+    for (const character of block.characterRects) {
+      const centerX = character.rect.x + character.rect.w / 2;
+      const centerY = character.rect.y + character.rect.h / 2;
+      const insideAsset = assets.some((asset) => (
+        character.pageIndex === asset.pageIndex
+        && centerX >= asset.rect.x && centerX <= asset.rect.x + asset.rect.w
+        && centerY >= asset.rect.y && centerY <= asset.rect.y + asset.rect.h
+      ));
+      if (!insideAsset) continue;
+      const localStart = character.sourceIndex - sourceOffset;
+      const localEnd = localStart + character.ch.length;
+      for (let index = Math.max(0, localStart); index < Math.min(source.length, localEnd); index += 1) {
+        masked[index] = 1;
+      }
+    }
+    if (masked.some((value) => value === 1)) {
+      let cleaned = '';
+      for (let index = 0; index < source.length; index += 1) {
+        cleaned += masked[index] ? ' ' : source[index];
+      }
+      return cleaned
+        .split(/\r?\n/)
+        .map((line) => line.replace(/[ \t]+/g, ' ').trim())
+        .filter(Boolean)
+        .join('\n')
+        .trim();
+    }
+  }
   let offset = 0;
   const kept: string[] = [];
   for (const line of source.split(/\r?\n/)) {
@@ -188,6 +358,7 @@ function withoutAssetTextLines(
       continue;
     }
     const inside = characters.filter((character) => assets.some((asset) => {
+      if (character.pageIndex !== asset.pageIndex) return false;
       const centerX = character.rect.x + character.rect.w / 2;
       const centerY = character.rect.y + character.rect.h / 2;
       return centerX >= asset.rect.x && centerX <= asset.rect.x + asset.rect.w
@@ -356,6 +527,7 @@ function unionRect(left: Doc['blocks'][number]['rect'], right: Doc['blocks'][num
 function formulaContinuation(anchor: Doc['blocks'][number], candidate: Doc['blocks'][number]): boolean {
   if (candidate.id === anchor.id || candidate.pageIndex !== anchor.pageIndex) return false;
   if (candidate.type !== 'paragraph') return false;
+  if (candidate.rect.h > Math.max(36, anchor.rect.h * 4)) return false;
   const text = candidate.text?.trim() ?? '';
   if (!text || text.length > 120 || (text.match(/[A-Za-z]{3,}/g)?.length ?? 0) > 4) return false;
   if (!/[=+\-*/∑∫√≤≥≈≠𝑎-𝑧𝛼-𝜔α-ωΑ-Ω]/u.test(text)) return false;
@@ -385,6 +557,36 @@ function withoutTrailingFormulaFragment(source: string): string {
     containsMath ||= mathLike;
   }
   return containsMath ? lines.slice(0, cut).join('\n').trim() : source.trim();
+}
+
+function isNaturalLanguageFormulaBlock(source: string | undefined): boolean {
+  const text = source?.replace(/\s+/g, ' ').trim() ?? '';
+  if (text.length < 45) return false;
+  const words = text.match(/[A-Za-z]{3,}/g) ?? [];
+  const functionWords = text.match(/\b(?:the|a|an|and|or|of|to|in|for|with|that|this|is|are|was|were|as|by|from|on|at)\b/gi) ?? [];
+  return words.length >= 5 && functionWords.length >= 2;
+}
+
+const MAX_TRANSLATION_UNIT_CHARACTERS = 1_800;
+
+function splitOversizedSourceText(source: string): string[] {
+  const parts: string[] = [];
+  let remaining = source.trim();
+  while (remaining.length > MAX_TRANSLATION_UNIT_CHARACTERS) {
+    const window = remaining.slice(0, MAX_TRANSLATION_UNIT_CHARACTERS + 1);
+    let cut = -1;
+    const boundary = /(?:[.!?。！？](?:["')\]]*)\s+|\n+)/g;
+    for (const match of window.matchAll(boundary)) {
+      const end = (match.index ?? 0) + match[0].length;
+      if (end >= MAX_TRANSLATION_UNIT_CHARACTERS * 0.5) cut = end;
+    }
+    if (cut < 0) cut = window.lastIndexOf(' ', MAX_TRANSLATION_UNIT_CHARACTERS);
+    if (cut < MAX_TRANSLATION_UNIT_CHARACTERS * 0.5) cut = MAX_TRANSLATION_UNIT_CHARACTERS;
+    parts.push(remaining.slice(0, cut).trim());
+    remaining = remaining.slice(cut).trim();
+  }
+  if (remaining) parts.push(remaining);
+  return parts;
 }
 
 function trailingFormulaRect(
@@ -483,8 +685,29 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
   const verifiedAssetRegions = (options.verifiedAssetRegions ?? []).map((asset) => ({
     ...asset, rect: { ...asset.rect },
   }));
+  for (const region of regions) {
+    const visionLayout = options.pageLayouts?.get(region.sourcePage);
+    if (visionLayout === 'single') region.mode = 'single';
+    else if (visionLayout === 'double' && region.mode !== 'full-width') region.mode = 'double';
+  }
   const furnitureIds = detectedPageFurnitureIds(doc);
   const repeatedFurnitureLines = repeatedEmbeddedFurnitureLines(doc);
+  const nestedFragmentIds = nestedPdfFragmentIds(doc);
+  if (nestedFragmentIds.size) {
+    units = units.filter((unit) => !nestedFragmentIds.has(unit.id));
+    for (const region of regions) {
+      region.orderedUnitIds = region.orderedUnitIds.filter((unitId) => !nestedFragmentIds.has(unitId));
+    }
+  }
+  const formulaFragmentIds = new Set(doc.blocks
+    .filter((block) => verifiedAssetRegions.some((asset) => isFormulaExtractionFragment(block, asset)))
+    .map((block) => block.id));
+  if (formulaFragmentIds.size) {
+    units = units.filter((unit) => !formulaFragmentIds.has(unit.id));
+    for (const region of regions) {
+      region.orderedUnitIds = region.orderedUnitIds.filter((unitId) => !formulaFragmentIds.has(unitId));
+    }
+  }
   if (furnitureIds.size) {
     units = units.filter((unit) => !furnitureIds.has(unit.id));
     for (const region of regions) {
@@ -500,7 +723,17 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
     if (!block) continue;
     const geometryCleaned = withoutEmbeddedMarginFurniture(doc, block, unit.sourceText);
     const labelsCleaned = withoutTrailingVisualLabelCluster(geometryCleaned);
-    const cleaned = withoutRepeatedEmbeddedFurniture(doc, block, labelsCleaned, repeatedFurnitureLines);
+    const crossesPages = new Set((block.fragments ?? []).map((fragment) => fragment.pageIndex)).size > 1;
+    // A numbered heading can sit next to a display formula, but its leading
+    // section number is structural content rather than a scattered math
+    // fragment (for example, `2.4 Sparse Matrix`). Never run the heuristic
+    // formula-line scrubber over headings, otherwise the number is silently
+    // removed before it can be protected and translated.
+    const fragmentsCleaned = unit.kind !== 'heading'
+      && (crossesPages || block.rect.h <= 24 || nearVerifiedFormula(block, verifiedAssetRegions))
+      ? withoutScatteredMathLines(labelsCleaned)
+      : labelsCleaned;
+    const cleaned = withoutRepeatedEmbeddedFurniture(doc, block, fragmentsCleaned, repeatedFurnitureLines);
     if (cleaned !== unit.sourceText) {
       unit.sourceText = cleaned;
       unit.protectedTokens = extractProtectedTokens(cleaned);
@@ -621,24 +854,27 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
     const block = blocks.get(unit.id);
     if (!block) throw new Error(`不可变资产 ${unit.id} 缺少源坐标`);
     if (verifiedAssetRegions.some((asset) => materiallyCovered(block, asset))) continue;
+    if (unit.kind === 'formula' && isNaturalLanguageFormulaBlock(unit.sourceText)) {
+      unit.kind = 'paragraph';
+      delete unit.assetId;
+      continue;
+    }
     let rect = unit.kind === 'formula'
       ? doc.blocks
         .filter((candidate) => formulaContinuation(block, candidate))
         .reduce((combined, candidate) => unionRect(combined, candidate.rect), { ...block.rect })
       : { ...block.rect };
-    assetRegions.push({
-      id: unit.assetId ?? unit.id,
-      kind: unit.kind,
-      pageIndex: block.pageIndex,
-      rect,
-      widthMode: block.widthMode,
-    });
+    let previousToClean: SemanticUnit | undefined;
+    let cleanedPrevious: string | undefined;
     if (unit.kind === 'formula') {
+      const pageWidth = doc.pages[block.pageIndex]?.width ?? doc.meta.paperWidth;
       const previousBlock = doc.blocks
         .filter((candidate) => (
           candidate.id !== block.id
           && candidate.pageIndex === block.pageIndex
+          && sameVisualColumn(candidate, block, pageWidth)
           && candidate.rect.y + candidate.rect.h <= block.rect.y + 2
+          && block.rect.y - (candidate.rect.y + candidate.rect.h) <= 24
         ))
         .sort((left, right) => (
           right.rect.y + right.rect.h - (left.rect.y + left.rect.h)
@@ -651,13 +887,37 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
         const formulaTail = cleaned.length < previous.sourceText.trim().length
           ? trailingFormulaRect(previousBlock, cleaned.length)
           : undefined;
-        if (formulaTail) {
-          rect = unionRect(rect, formulaTail);
-          assetRegions[assetRegions.length - 1]!.rect = rect;
-        }
-        previous.sourceText = cleaned;
+        if (formulaTail) rect = unionRect(rect, formulaTail);
+        previousToClean = previous;
+        cleanedPrevious = cleaned;
       }
     }
+    const candidateAsset: DetectedAssetRegion = {
+      id: unit.assetId ?? unit.id,
+      kind: unit.kind,
+      pageIndex: block.pageIndex,
+      rect,
+      widthMode: block.widthMode,
+    };
+    if (unit.kind === 'formula') {
+      const page = doc.pages[block.pageIndex];
+      if (!page) throw new Error(`不可变资产 ${unit.id} 缺少页面尺寸`);
+      const intersecting = doc.blocks.filter((candidate) => (
+        candidate.pageIndex === block.pageIndex
+        && candidate.rect.x < rect.x + rect.w
+        && candidate.rect.x + candidate.rect.w > rect.x
+        && candidate.rect.y < rect.y + rect.h
+        && candidate.rect.y + candidate.rect.h > rect.y
+      ));
+      const geometry = validateImmutableRegion(candidateAsset, page, intersecting);
+      if (geometry.issues.includes('body-prose-density')) {
+        unit.kind = 'paragraph';
+        delete unit.assetId;
+        continue;
+      }
+    }
+    assetRegions.push(candidateAsset);
+    if (previousToClean && cleanedPrevious !== undefined) previousToClean.sourceText = cleanedPrevious;
   }
 
   for (const caption of units.filter((unit) => (
@@ -820,21 +1080,50 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
     const memberPageRegion = regions.find((candidate) => candidate.orderedUnitIds.some((unitId) => (
       blocks.get(unitId)?.pageIndex === asset.pageIndex
     )));
+    const spatialRegion = regions
+      .filter((candidate) => (
+        candidate.sourcePage === asset.pageIndex
+        && centerX >= candidate.bounds.x - 8
+        && centerX <= candidate.bounds.x + candidate.bounds.w + 8
+        && centerY >= candidate.bounds.y - 24
+        && centerY <= candidate.bounds.y + candidate.bounds.h + 24
+      ))
+      .sort((left, right) => (
+        right.bounds.w * right.bounds.h - left.bounds.w * left.bounds.h
+      ))[0];
     const region = (caption ? regions.find((candidate) => candidate.id === caption.layoutRegionId) : undefined)
+      ?? (asset.kind === 'formula' ? spatialRegion : undefined)
       ?? coveredRegion
       ?? memberPageRegion
-      ?? regions.find((candidate) => (
-        candidate.sourcePage === asset.pageIndex
-        && centerX >= candidate.bounds.x && centerX <= candidate.bounds.x + candidate.bounds.w
-        && centerY >= candidate.bounds.y && centerY <= candidate.bounds.y + candidate.bounds.h
-      ))
+      ?? spatialRegion
       ?? regions.find((candidate) => candidate.sourcePage === asset.pageIndex);
     if (!region) throw new Error(`Vision 资产 ${asset.id} 缺少版式区域`);
 
     const coveredOrder = coveredUnits.length ? Math.min(...coveredUnits.map((unit) => unit.order)) : undefined;
+    const regionPhysicalUnits = region.orderedUnitIds.flatMap((unitId) => {
+      const unit = units.find((candidate) => candidate.id === unitId);
+      const block = blocks.get(unitId);
+      const rect = block ? physicalRectOnPage(block, asset.pageIndex) : undefined;
+      return unit && rect ? [{ unit, rect }] : [];
+    });
+    const previous = regionPhysicalUnits
+      .filter((candidate) => candidate.rect.y + candidate.rect.h <= asset.rect.y + 2)
+      .sort((left, right) => right.rect.y + right.rect.h - (left.rect.y + left.rect.h))[0];
+    const next = regionPhysicalUnits
+      .filter((candidate) => candidate.rect.y >= asset.rect.y + asset.rect.h - 2)
+      .sort((left, right) => left.rect.y - right.rect.y)[0];
+    const physicalOrder = asset.kind !== 'formula'
+      ? undefined
+      : previous && next
+        ? (previous.unit.order + next.unit.order) / 2
+        : previous
+          ? previous.unit.order + 0.1
+          : next
+            ? next.unit.order - 0.1
+            : undefined;
     const order = caption
       ? caption.order + (asset.kind === 'figure' ? -0.1 : 0.1)
-      : coveredOrder ?? Math.max(0, ...units.map((unit) => unit.order)) + 0.1;
+      : physicalOrder ?? coveredOrder ?? Math.max(0, ...units.map((unit) => unit.order)) + 0.1;
     units.push({
       id: asset.id, kind: asset.kind, protectedTokens: [], assetId: asset.id,
       layoutRegionId: region.id, order,
@@ -857,8 +1146,12 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
     if (!unit.sourceText || unit.kind === 'caption' || unit.kind === 'table-title') continue;
     const block = blocks.get(unit.id);
     if (!block) continue;
+    const representedPages = new Set([
+      block.pageIndex,
+      ...(block.characterRects ?? []).map((character) => character.pageIndex),
+    ]);
     const pageAssets = assetRegions.filter((asset) => (
-      asset.pageIndex === block.pageIndex && asset.id !== unit.id
+      representedPages.has(asset.pageIndex) && asset.id !== unit.id
     ));
     if (!pageAssets.length) continue;
     unit.sourceText = withoutAssetTextLines(block, unit.sourceText, pageAssets);
@@ -975,6 +1268,27 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
     }
     for (let index = regions.length - 1; index >= 0; index -= 1) {
       if (!regions[index]!.orderedUnitIds.length) regions.splice(index, 1);
+    }
+  }
+
+  for (const unit of [...units]) {
+    if (!unit.sourceText || !['paragraph', 'abstract', 'list-item'].includes(unit.kind)) continue;
+    const parts = splitOversizedSourceText(unit.sourceText);
+    if (parts.length < 2) continue;
+    const children = parts.map((sourceText, index): SemanticUnit => ({
+      ...unit,
+      id: `${unit.id}-part-${index + 1}`,
+      parentId: unit.id,
+      sourceText,
+      protectedTokens: extractProtectedTokens(sourceText),
+      order: unit.order + (index + 1) / (parts.length + 1) / 1_000,
+    }));
+    const unitIndex = units.indexOf(unit);
+    units.splice(unitIndex, 1, ...children);
+    const region = regions.find((candidate) => candidate.id === unit.layoutRegionId);
+    const regionIndex = region?.orderedUnitIds.indexOf(unit.id) ?? -1;
+    if (region && regionIndex >= 0) {
+      region.orderedUnitIds.splice(regionIndex, 1, ...children.map((child) => child.id));
     }
   }
 

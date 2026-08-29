@@ -9,4 +9,11 @@ describe('vision layout prompt', () => {
     expect(prompt).not.toContain('body_text');
     expect(prompt).not.toContain('header|footer');
   });
+
+  it('requires an exhaustive top-to-bottom scan for formulas and complete algorithms', () => {
+    const prompt = buildVisionLayoutPrompt(6);
+    expect(prompt).toContain('Scan the page from top to bottom');
+    expect(prompt).toContain('every display formula');
+    expect(prompt).toContain('complete algorithm or pseudocode environment');
+  });
 });

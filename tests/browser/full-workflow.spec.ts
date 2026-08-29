@@ -162,8 +162,8 @@ test('uploads a mixed-layout PDF and reaches the synchronized dual-PDF reader', 
   await expect(page.getByRole('status')).toContainText('翻译排版完成');
   await expect(page.getByLabel('英文 PDF 控制')).toContainText('英文 1 / 1');
   await expect(page.getByLabel('中文 PDF 控制')).toContainText(/中文 1 \/ [1-9]\d*/);
-  await expect(page.locator('[data-pdf-side="en"] canvas')).toBeVisible();
-  await expect(page.locator('[data-pdf-side="zh"] canvas')).toBeVisible();
+  await expect(page.locator('[data-pdf-side="en"] canvas').first()).toBeVisible();
+  await expect(page.locator('[data-pdf-side="zh"] canvas').first()).toBeVisible();
   await expect(page.getByLabel('英文 PDF 控制')).toContainText('100%');
   await expect(page.getByLabel('中文 PDF 控制')).toContainText('100%');
   await expect(page.getByLabel('英文 PDF 控制').getByRole('button', { name: '上一页' })).toBeDisabled();

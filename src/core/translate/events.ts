@@ -4,7 +4,8 @@ export type AiLogEvent =
   | {
       type: 'vision-layout-fallback'; at: number; page: number; region: number;
       reason: 'low-confidence' | 'caption-unmatched' | 'page-edge-touch'
-        | 'page-coverage-excessive' | 'caption-overlap' | 'body-prose-density';
+        | 'page-coverage-excessive' | 'caption-overlap' | 'body-prose-density'
+        | 'implausible-formula-cluster';
     }
   | { type: 'vision-review-page-started'; at: number; page: number; totalPages: number }
   | {

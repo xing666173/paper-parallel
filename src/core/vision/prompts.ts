@@ -1,4 +1,4 @@
-export const VISION_LAYOUT_PROMPT_VERSION = 'vision-layout-v4';
+export const VISION_LAYOUT_PROMPT_VERSION = 'vision-layout-v5';
 
 export function buildVisionLayoutPrompt(pageNumber: number): string {
   return [
@@ -7,6 +7,7 @@ export function buildVisionLayoutPrompt(pageNumber: number): string {
     'Identify the page layout and only visual assets that must remain pixel-identical in the translated paper.',
     'Set layout=mixed whenever full-width title/abstract/figure regions coexist with two-column body text; do not call such a page single.',
     'Immutable regions are: figures, table bodies, display formulas, and code. Do not include a figure/table caption inside its immutable bbox.',
+    'Scan the page from top to bottom and return every display formula plus every complete algorithm or pseudocode environment; these are not optional or representative samples.',
     'Return one region per numbered Figure/Table, never a second region for an internal panel or subdiagram.',
     'bbox must be tight around visible asset ink. Exclude all surrounding prose, headers, whitespace, and the complete caption line.',
     'column describes the asset itself: use left/right for a one-column asset and full only when the asset physically spans both columns.',
@@ -19,7 +20,7 @@ export function buildVisionLayoutPrompt(pageNumber: number): string {
   ].join('\n');
 }
 
-export const VISION_FINAL_REVIEW_PROMPT_VERSION = 'vision-final-review-v4';
+export const VISION_FINAL_REVIEW_PROMPT_VERSION = 'vision-final-review-v6';
 
 export function buildVisionFinalReviewPrompt(
   targetPageNumber: number,
@@ -36,6 +37,10 @@ export function buildVisionFinalReviewPrompt(
     'Figures, table bodies, display formulas, code, variables, symbols, and internal figure labels must be visibly intact. Captions may be translated.',
     'Do not report small or fine English labels inside verified immutable assets as unreadable merely because they are dense. Report unreadable_glyphs only for visible corruption such as missing, clipped, overlapped, block, or replacement glyphs; ordinary small source labels are not defects.',
     'Report only visible production defects: missing/clipped/overlapping text, unreadable glyphs, untranslated body prose, collapsed columns, or changed/missing immutable assets.',
+    'A near-empty interior target page that contains only an isolated formula, heading, or a few lines while the paper continues is a forced-pagination defect; report it as severe layout_drift.',
+    'A visibly duplicated figure, table, formula, or algorithm is a severe asset_changed defect even when both copies are individually intact.',
+    'A formula or algorithm degraded into scattered baseline text, disconnected symbols, or mixed prose fragments is a severe formula_changed or unreadable_glyphs defect.',
+    'When a source reference visibly contains a ruled or columnar table, the target must preserve that table body as a table image. If the rows or columns became ordinary prose, a loose list, or disconnected text columns, report severe table_changed.',
     'Return at most 6 representative issues. Merge repeated instances of the same visible defect and keep evidence under 12 words. Never transcribe page text.',
     'Do not judge translation style or wording. Do not report harmless spacing or natural page extension as severe.',
     'A source reference page may contain assets that naturally moved to adjacent target pages. Never report a source-only asset as missing unless its translated caption is visibly present on this target page without the asset.',
@@ -60,6 +65,7 @@ export function buildVisionFinalConfirmationPrompt(
     `Candidates: ${JSON.stringify(candidates)}`,
     'For clipped_text, confirm only when glyph strokes are visibly cut by a page, column, crop, or overlapping object boundary. A complete heading or first line near the top margin is not clipped.',
     'For overlap, confirm only when two visible content objects actually cover one another. Small dense labels inside immutable figures are not defects.',
+    'Confirm duplicated assets and formulas degraded into scattered baseline text whenever those defects are plainly visible; they are not harmless repagination.',
     'Return an empty issues array when every candidate is false. Do not add unrelated new issues in this confirmation pass.',
     'Every box must be an object {"x":number,"y":number,"width":number,"height":number} in normalized 0..1000 target-page coordinates.',
     'Return exactly one JSON object:',

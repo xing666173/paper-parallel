@@ -8,6 +8,15 @@ const API_KEY = process.env.PP_DEEPSEEK_API_KEY ?? '';
 const TRANSLATION_MODEL = process.env.PP_TRANSLATION_MODEL ?? 'deepseek-v4-flash';
 const SOURCE_PDF = process.env.PP_SOURCE_PDF
   ?? 'C:/Users/axezt/Desktop/文献/导师文章/18：ZK-Tracer：A High-Performance Heterogeneous Accelerator for Zero-Knowledge VM Trace Generation.pdf';
+const REPORT_SLUG = process.env.PP_REPORT_SLUG?.trim()
+  || path.basename(SOURCE_PDF, path.extname(SOURCE_PDF))
+    .normalize('NFKD')
+    .replace(/[^a-zA-Z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .toLowerCase()
+  || 'paper';
+const OUTPUT_DIRECTORY = path.resolve('reports', 'real-api', TRANSLATION_MODEL, REPORT_SLUG);
+const PROFILE_DIRECTORY = path.resolve('reports', 'real-api', '.profiles', TRANSLATION_MODEL, REPORT_SLUG);
 
 async function connectWithRetry(page: import('@playwright/test').Page): Promise<void> {
   let failure = 'unknown network failure';
@@ -47,7 +56,7 @@ async function waitForPipelineTerminal(page: import('@playwright/test').Page): P
 }
 
 async function saveFailureDiagnostics(page: import('@playwright/test').Page): Promise<void> {
-  const outputDirectory = path.resolve('reports', 'real-api', TRANSLATION_MODEL);
+  const outputDirectory = OUTPUT_DIRECTORY;
   await mkdir(outputDirectory, { recursive: true });
   const hasDiagnosticPdf = await page.evaluate(() => Boolean(
     (globalThis as typeof globalThis & { __PP_DIAGNOSTIC_PDF_URL__?: string }).__PP_DIAGNOSTIC_PDF_URL__,
@@ -83,6 +92,12 @@ async function saveFailureDiagnostics(page: import('@playwright/test').Page): Pr
     path.join(outputDirectory, 'diagnostic-layout.json'),
     JSON.stringify(layout, null, 2),
   );
+  const typstSource = await page.evaluate(() => (
+    globalThis as typeof globalThis & { __PP_DIAGNOSTIC_TYPST_SOURCE__?: string }
+  ).__PP_DIAGNOSTIC_TYPST_SOURCE__ ?? '');
+  if (typstSource) {
+    await writeFile(path.join(outputDirectory, 'diagnostic-main.typ'), typstSource);
+  }
 }
 
 test('real API exact-paper PDF quality acceptance', async () => {
@@ -90,7 +105,7 @@ test('real API exact-paper PDF quality acceptance', async () => {
   test.skip(!existsSync(SOURCE_PDF), 'The local exact-paper fixture is unavailable');
   test.setTimeout(45 * 60_000);
 
-  const profileDirectory = path.resolve('reports', 'real-api', '.profiles', TRANSLATION_MODEL);
+  const profileDirectory = PROFILE_DIRECTORY;
   await mkdir(profileDirectory, { recursive: true });
   const context = await chromium.launchPersistentContext(profileDirectory, {
     headless: true,
@@ -125,8 +140,32 @@ test('real API exact-paper PDF quality acceptance', async () => {
 
     await waitForPipelineTerminal(page);
 
-    const outputDirectory = path.resolve('reports', 'real-api', TRANSLATION_MODEL);
+    const outputDirectory = OUTPUT_DIRECTORY;
     await mkdir(outputDirectory, { recursive: true });
+    const successfulDiagnostics = await page.evaluate(() => {
+      const debugGlobal = globalThis as typeof globalThis & {
+        __PP_DIAGNOSTIC_LAYOUT__?: unknown;
+        __PP_DIAGNOSTIC_VISUAL_REPORT__?: unknown;
+        __PP_DIAGNOSTIC_TYPST_SOURCE__?: string;
+      };
+      return {
+        layout: debugGlobal.__PP_DIAGNOSTIC_LAYOUT__ ?? null,
+        visualReport: debugGlobal.__PP_DIAGNOSTIC_VISUAL_REPORT__ ?? null,
+        typstSource: debugGlobal.__PP_DIAGNOSTIC_TYPST_SOURCE__ ?? '',
+      };
+    });
+    await writeFile(
+      path.join(outputDirectory, 'successful-layout.json'),
+      JSON.stringify(successfulDiagnostics.layout, null, 2),
+    );
+    await writeFile(
+      path.join(outputDirectory, 'successful-visual-report.json'),
+      JSON.stringify(successfulDiagnostics.visualReport, null, 2),
+    );
+    await writeFile(
+      path.join(outputDirectory, 'successful-main.typ'),
+      successfulDiagnostics.typstSource,
+    );
 
     const downloadPromise = page.waitForEvent('download');
     await page.getByRole('button', { name: '下载中文 PDF' }).click();
@@ -155,6 +194,7 @@ test('real API exact-paper PDF quality acceptance', async () => {
     await expect(page.getByText(/Vision Exp 成品质检：第 \d+\/\d+ 页已完成/).last()).toBeVisible();
 
     await writeFile(path.join(outputDirectory, 'acceptance.json'), JSON.stringify({
+      reportSlug: REPORT_SLUG,
       translationModel: TRANSLATION_MODEL,
       visionModel: 'deepseek-v4-flash-vision-exp',
       thinkingMode: 'disabled',
