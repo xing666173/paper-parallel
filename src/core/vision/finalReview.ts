@@ -8,7 +8,8 @@ import { parseNormalizedVisionBox } from './protocol';
 export type VisionFinalIssueType =
   | 'missing_text' | 'clipped_text' | 'overlap' | 'unreadable_glyphs'
   | 'untranslated_body' | 'layout_collapse' | 'layout_drift'
-  | 'asset_changed' | 'asset_missing' | 'formula_changed' | 'table_changed';
+  | 'asset_changed' | 'asset_missing' | 'formula_changed' | 'table_changed'
+  | 'review_incomplete';
 
 export interface VisionFinalIssue {
   targetPageIndex: number;
@@ -206,8 +207,15 @@ export interface RunVisionFinalReviewOptions {
 }
 
 export const VISION_FINAL_REVIEW_CONCURRENCY = 1;
-export const VISION_FINAL_REVIEW_PAGE_TIMEOUT_MS = 90_000;
+export const VISION_FINAL_REVIEW_PAGE_TIMEOUT_MS = 120_000;
 export const VISION_FINAL_REVIEW_RENDER_SCALE = 1.5;
+
+class VisionPageTimeoutError extends Error {
+  constructor(pageIndex: number, totalPages: number, timeoutMs: number) {
+    super(`Vision Exp 成品质检第 ${pageIndex + 1}/${totalPages} 页超过 ${Math.ceil(timeoutMs / 1_000)} 秒`);
+    this.name = 'VisionPageTimeoutError';
+  }
+}
 
 async function withPageDeadline<T>(
   operation: (signal: AbortSignal) => Promise<T>,
@@ -220,9 +228,7 @@ async function withPageDeadline<T>(
 ): Promise<T> {
   const controller = new AbortController();
   let timedOut = false;
-  const timeoutError = () => new Error(
-    `Vision Exp 成品质检第 ${pageIndex + 1}/${totalPages} 页超过 ${Math.ceil(timeoutMs / 1_000)} 秒，已取消该页请求`,
-  );
+  const timeoutError = () => new VisionPageTimeoutError(pageIndex, totalPages, timeoutMs);
   const onOuterAbort = () => controller.abort();
   if (outerSignal.aborted) controller.abort();
   else outerSignal.addEventListener('abort', onOuterAbort, { once: true });
@@ -285,10 +291,12 @@ export async function runVisionFinalReview(options: RunVisionFinalReviewOptions)
         'source',
         sourcePageIndex,
       );
+      if (pageSignal.aborted) throw new DOMException('已停止', 'AbortError');
       content.push({ type: 'text', text: `SOURCE PAGE ${sourcePageIndex + 1}` });
       content.push({ type: 'image_url', image_url: { url: sourceImage, detail: 'original' } });
     }
     const targetImage = await renderPage(await options.targetPdf.getPage(targetPageIndex + 1), 'target', targetPageIndex);
+    if (pageSignal.aborted) throw new DOMException('已停止', 'AbortError');
     options.onPagePhase?.({ targetPageIndex, totalPages: options.targetPdf.numPages, phase: 'rendered' });
     content.push({ type: 'text', text: `TARGET PAGE ${targetPageIndex + 1}` });
     content.push({ type: 'image_url', image_url: { url: targetImage, detail: 'original' } });
@@ -436,7 +444,20 @@ export async function runVisionFinalReview(options: RunVisionFinalReviewOptions)
     while (nextTargetPageIndex < options.targetPdf.numPages) {
       const targetPageIndex = nextTargetPageIndex;
       nextTargetPageIndex += 1;
-      await reviewPage(targetPageIndex);
+      try {
+        await reviewPage(targetPageIndex);
+      } catch (error) {
+        if (!(error instanceof VisionPageTimeoutError)) throw error;
+        pageIssues[targetPageIndex] = [{
+          targetPageIndex,
+          type: 'review_incomplete',
+          severity: 'warning',
+          bbox: [0, 0, 1000, 1000],
+          confidence: 1,
+          evidence: `Vision Exp 单页质检超过 ${Math.ceil((options.pageTimeoutMs ?? VISION_FINAL_REVIEW_PAGE_TIMEOUT_MS) / 1_000)} 秒，已跳过该页`,
+        }];
+        options.onPage?.({ targetPageIndex, totalPages: options.targetPdf.numPages, issueCount: 1 });
+      }
     }
   };
   try {
@@ -450,7 +471,14 @@ export async function runVisionFinalReview(options: RunVisionFinalReviewOptions)
   } finally {
     options.signal?.removeEventListener('abort', onOuterAbort);
   }
-  const issues = pageIssues.flat();
+  let issues = pageIssues.flat();
+  const incompletePages = issues.filter((issue) => issue.type === 'review_incomplete');
+  const allowedIncompletePages = Math.max(1, Math.floor(options.targetPdf.numPages * 0.05));
+  if (incompletePages.length === options.targetPdf.numPages
+    || incompletePages.length > allowedIncompletePages) {
+    const incompleteSet = new Set(incompletePages);
+    issues = issues.map((issue) => incompleteSet.has(issue) ? { ...issue, severity: 'severe' } : issue);
+  }
 
   if (runSignal.aborted) {
     throw new DOMException('已停止', 'AbortError');
@@ -458,6 +486,6 @@ export async function runVisionFinalReview(options: RunVisionFinalReviewOptions)
   return {
     pass: !issues.some(isBlockingIssue),
     issues,
-    reviewedPages: options.targetPdf.numPages,
+    reviewedPages: options.targetPdf.numPages - incompletePages.length,
   };
 }

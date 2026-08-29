@@ -350,9 +350,9 @@ describe('vision: final PDF review', () => {
     expect(report.issues.map((issue) => issue.evidence)).toEqual(['page-1', 'page-2', 'page-3']);
   });
 
-  it('enforces a hard total deadline for each reviewed page', async () => {
+  it('marks an entirely unreviewed document as failed after its page deadline', async () => {
     const page = { getViewport: () => ({ width: 1, height: 1 }), render: () => ({ promise: Promise.resolve() }) };
-    await expect(runVisionFinalReview({
+    const report = await runVisionFinalReview({
       sourcePdf: { numPages: 1, getPage: async () => page },
       targetPdf: { numPages: 1, getPage: async () => page },
       manifest: { units: [] } as any,
@@ -361,6 +361,38 @@ describe('vision: final PDF review', () => {
       renderPage: async () => 'data:image/png;base64,page',
       onPageTimeout: () => { throw new Error('diagnostic callback failed'); },
       complete: async () => new Promise(() => undefined),
-    })).rejects.toThrow('第 1/1 页超过 1 秒');
+    });
+
+    expect(report).toMatchObject({ pass: false, reviewedPages: 0 });
+    expect(report.issues).toEqual([expect.objectContaining({
+      type: 'review_incomplete', severity: 'severe', targetPageIndex: 0,
+    })]);
+  });
+
+  it('continues after one timed-out page when the rest of the document is reviewed', async () => {
+    const page = { getViewport: () => ({ width: 1, height: 1 }), render: () => ({ promise: Promise.resolve() }) };
+    let calls = 0;
+    const report = await runVisionFinalReview({
+      sourcePdf: { numPages: 3, getPage: async () => page },
+      targetPdf: { numPages: 3, getPage: async () => page },
+      manifest: { units: [] } as any,
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test',
+      pageTimeoutMs: 20,
+      renderPage: async () => 'data:image/png;base64,page',
+      complete: async (request: any) => {
+        calls += 1;
+        if (calls === 1) return new Promise(() => undefined);
+        const targetPage = Number(request.messages[0].content[0].text.match(/translated target page (\d+)/)?.[1] ?? '0');
+        return {
+          content: JSON.stringify({ target_page: targetPage, issues: [] }),
+          usage: { promptTokens: 1, completionTokens: 1 },
+        };
+      },
+    });
+
+    expect(report).toMatchObject({ pass: true, reviewedPages: 2 });
+    expect(report.issues).toEqual([expect.objectContaining({
+      type: 'review_incomplete', severity: 'warning', targetPageIndex: 0,
+    })]);
   });
 });

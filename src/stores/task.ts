@@ -48,11 +48,11 @@ function projectAiMessage(event: AiLogEvent): string {
     case 'vision-review-page-waiting':
       return `Vision Exp 成品质检：第 ${event.page}/${event.totalPages} 页仍在等待（${Math.floor(event.elapsedMs / 1_000)} 秒）`;
     case 'vision-review-page-timeout':
-      return `Vision Exp 成品质检：第 ${event.page}/${event.totalPages} 页超过 ${Math.ceil(event.timeoutMs / 1_000)} 秒，已取消`;
+      return `Vision Exp 成品质检：第 ${event.page}/${event.totalPages} 页超过 ${Math.ceil(event.timeoutMs / 1_000)} 秒，已跳过该页并继续`;
     case 'vision-review-page':
       return `Vision Exp 成品质检：第 ${event.page}/${event.totalPages} 页已完成，发现 ${event.issueCount} 个可见问题`;
     case 'vision-review-completed':
-      return `Vision Exp 成品质检：${event.reviewedPages} 页全部返回，共发现 ${event.issueCount} 个可见问题`;
+      return `Vision Exp 成品质检：已返回 ${event.reviewedPages} 页，共发现 ${event.issueCount} 个可见问题`;
     case 'quality-finalizing':
       return event.visualPass
         ? '质量门通过，正在保存中文 PDF 与对齐数据'

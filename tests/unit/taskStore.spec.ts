@@ -92,7 +92,7 @@ describe('project task store', () => {
     const { store } = setupStore();
     store.recordAiEvent({ type: 'vision-review-page-timeout', at: 12, page: 3, totalPages: 11, timeoutMs: 90_000 });
 
-    expect(store.aiLog.at(-1)?.message).toBe('Vision Exp 成品质检：第 3/11 页超过 90 秒，已取消');
+    expect(store.aiLog.at(-1)?.message).toBe('Vision Exp 成品质检：第 3/11 页超过 90 秒，已跳过该页并继续');
     expect(store.lastResponseAt).toBe(12);
   });
 
@@ -108,7 +108,7 @@ describe('project task store', () => {
     const { store } = setupStore();
     store.recordAiEvent({ type: 'vision-review-completed', at: 14, reviewedPages: 11, issueCount: 3 });
 
-    expect(store.aiLog.at(-1)?.message).toBe('Vision Exp 成品质检：11 页全部返回，共发现 3 个可见问题');
+    expect(store.aiLog.at(-1)?.message).toBe('Vision Exp 成品质检：已返回 11 页，共发现 3 个可见问题');
     expect(store.lastResponseAt).toBe(14);
   });
 
