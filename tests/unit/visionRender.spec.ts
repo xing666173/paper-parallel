@@ -10,9 +10,11 @@ describe('vision: PDF page rendering', () => {
       toDataURL: vi.fn(() => 'data:image/png;base64,PAGE'),
     };
     const render = vi.fn(() => ({ promise: Promise.resolve() }));
+    const cleanup = vi.fn();
     const page = {
       getViewport: vi.fn(({ scale }: { scale: number }) => ({ width: 612 * scale, height: 792 * scale })),
       render,
+      cleanup,
     };
 
     await expect(renderPdfPageAsPng(page, {
@@ -20,9 +22,10 @@ describe('vision: PDF page rendering', () => {
       createCanvas: () => canvas,
     })).resolves.toBe('data:image/png;base64,PAGE');
 
-    expect(canvas).toMatchObject({ width: 1224, height: 1584 });
+    expect(canvas).toMatchObject({ width: 0, height: 0 });
     expect(context.fillStyle).toBe('#ffffff');
     expect(context.fillRect).toHaveBeenCalledWith(0, 0, 1224, 1584);
     expect(render).toHaveBeenCalledWith(expect.objectContaining({ canvasContext: context }));
+    expect(cleanup).toHaveBeenCalledOnce();
   });
 });

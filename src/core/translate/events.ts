@@ -10,7 +10,7 @@ export type AiLogEvent =
   | { type: 'vision-review-page-started'; at: number; page: number; totalPages: number }
   | {
       type: 'vision-review-page-phase'; at: number; page: number; totalPages: number;
-      phase: 'rendered' | 'connected' | 'content' | 'retrying' | 'returned';
+      phase: 'render-retrying' | 'rendered' | 'connected' | 'content' | 'retrying' | 'returned';
     }
   | { type: 'vision-review-page-invalid'; at: number; page: number; totalPages: number; reason: string }
   | { type: 'vision-review-page-waiting'; at: number; page: number; totalPages: number; elapsedMs: number }

@@ -1,7 +1,11 @@
 import type { AlignmentManifest } from '../align/manifest';
 import { chatCompletion, type ChatCompletionOptions, type ChatCompletionResult } from '../translate/client';
 import { buildVisionFinalConfirmationPrompt, buildVisionFinalReviewPrompt } from './prompts';
-import { renderPdfPageAsPng, type PdfPageForVision } from './render';
+import {
+  PdfPageRenderTimeoutError,
+  renderPdfPageAsPng,
+  type PdfPageForVision,
+} from './render';
 import { VISION_LAYOUT_MODEL, type PdfDocumentForVision } from './analyze';
 import { parseNormalizedVisionBox } from './protocol';
 
@@ -194,11 +198,16 @@ export interface RunVisionFinalReviewOptions {
   signal?: AbortSignal;
   pageTimeoutMs?: number;
   complete?: (options: ChatCompletionOptions) => Promise<ChatCompletionResult>;
-  renderPage?: (page: PdfPageForVision, role: 'source' | 'target', pageIndex: number) => Promise<string>;
+  renderPage?: (
+    page: PdfPageForVision,
+    role: 'source' | 'target',
+    pageIndex: number,
+    options?: { signal: AbortSignal; scale: number; timeoutMs: number },
+  ) => Promise<string>;
   onPageStart?(event: { targetPageIndex: number; totalPages: number }): void;
   onPagePhase?(event: {
     targetPageIndex: number; totalPages: number;
-    phase: 'rendered' | 'connected' | 'content' | 'retrying' | 'returned';
+    phase: 'render-retrying' | 'rendered' | 'connected' | 'content' | 'retrying' | 'returned';
   }): void;
   onPageInvalid?(event: { targetPageIndex: number; totalPages: number; reason: string }): void;
   onPageWait?(event: { targetPageIndex: number; totalPages: number; elapsedMs: number }): void;
@@ -207,8 +216,10 @@ export interface RunVisionFinalReviewOptions {
 }
 
 export const VISION_FINAL_REVIEW_CONCURRENCY = 1;
-export const VISION_FINAL_REVIEW_PAGE_TIMEOUT_MS = 120_000;
+export const VISION_FINAL_REVIEW_PAGE_TIMEOUT_MS = 210_000;
 export const VISION_FINAL_REVIEW_RENDER_SCALE = 1.5;
+export const VISION_FINAL_REVIEW_FALLBACK_RENDER_SCALE = 1;
+export const VISION_FINAL_REVIEW_RENDER_TIMEOUT_MS = 30_000;
 
 class VisionPageTimeoutError extends Error {
   constructor(pageIndex: number, totalPages: number, timeoutMs: number) {
@@ -266,7 +277,11 @@ export async function runVisionFinalReview(options: RunVisionFinalReviewOptions)
   if (!options.apiKey.trim()) throw new Error('Vision Exp 成品质检需要 DeepSeek API Key');
   const complete = options.complete ?? chatCompletion;
   const renderPage = options.renderPage
-    ?? ((page) => renderPdfPageAsPng(page, { scale: VISION_FINAL_REVIEW_RENDER_SCALE }));
+    ?? ((page, _role, _pageIndex, renderOptions) => renderPdfPageAsPng(page, {
+      scale: renderOptions?.scale ?? VISION_FINAL_REVIEW_RENDER_SCALE,
+      signal: renderOptions?.signal,
+      timeoutMs: renderOptions?.timeoutMs ?? VISION_FINAL_REVIEW_RENDER_TIMEOUT_MS,
+    }));
   const pageIssues: VisionFinalIssue[][] = Array.from({ length: options.targetPdf.numPages }, () => []);
   const sourcePageMap = buildTargetSourcePageMap(
     options.manifest,
@@ -282,20 +297,60 @@ export async function runVisionFinalReview(options: RunVisionFinalReviewOptions)
     if (pageSignal.aborted) throw new DOMException('已停止', 'AbortError');
     options.onPageStart?.({ targetPageIndex, totalPages: options.targetPdf.numPages });
     const sourcePageIndices = sourcePageMap[targetPageIndex] ?? [];
+    const renderReviewPage = async (
+      document: PdfDocumentForVision,
+      pageNumber: number,
+      role: 'source' | 'target',
+      pageIndex: number,
+    ): Promise<string> => {
+      const renderAttempt = async (scale: number): Promise<string> => {
+        const page = await document.getPage(pageNumber);
+        try {
+          return await renderPage(page, role, pageIndex, {
+            signal: pageSignal,
+            scale,
+            timeoutMs: VISION_FINAL_REVIEW_RENDER_TIMEOUT_MS,
+          });
+        } finally {
+          try { page.cleanup?.(); } catch { /* release is best-effort */ }
+        }
+      };
+      try {
+        return await renderAttempt(VISION_FINAL_REVIEW_RENDER_SCALE);
+      } catch (error) {
+        if (!(error instanceof PdfPageRenderTimeoutError) || pageSignal.aborted) throw error;
+        options.onPagePhase?.({
+          targetPageIndex, totalPages: options.targetPdf.numPages, phase: 'render-retrying',
+        });
+        try {
+          return await renderAttempt(VISION_FINAL_REVIEW_FALLBACK_RENDER_SCALE);
+        } catch (retryError) {
+          if (retryError instanceof PdfPageRenderTimeoutError) {
+            options.onPageTimeout?.({
+              targetPageIndex,
+              totalPages: options.targetPdf.numPages,
+              timeoutMs: VISION_FINAL_REVIEW_RENDER_TIMEOUT_MS * 2,
+            });
+            throw new VisionPageTimeoutError(
+              targetPageIndex,
+              options.targetPdf.numPages,
+              VISION_FINAL_REVIEW_RENDER_TIMEOUT_MS * 2,
+            );
+          }
+          throw retryError;
+        }
+      }
+    };
     const content: NonNullable<ChatCompletionOptions['messages'][number]['content']> extends infer _T ? any[] : never = [
       { type: 'text', text: buildVisionFinalReviewPrompt(targetPageIndex + 1, sourcePageIndices.map((page) => page + 1)) },
     ];
     for (const sourcePageIndex of sourcePageIndices) {
-      const sourceImage = await renderPage(
-        await options.sourcePdf.getPage(sourcePageIndex + 1),
-        'source',
-        sourcePageIndex,
-      );
+      const sourceImage = await renderReviewPage(options.sourcePdf, sourcePageIndex + 1, 'source', sourcePageIndex);
       if (pageSignal.aborted) throw new DOMException('已停止', 'AbortError');
       content.push({ type: 'text', text: `SOURCE PAGE ${sourcePageIndex + 1}` });
       content.push({ type: 'image_url', image_url: { url: sourceImage, detail: 'original' } });
     }
-    const targetImage = await renderPage(await options.targetPdf.getPage(targetPageIndex + 1), 'target', targetPageIndex);
+    const targetImage = await renderReviewPage(options.targetPdf, targetPageIndex + 1, 'target', targetPageIndex);
     if (pageSignal.aborted) throw new DOMException('已停止', 'AbortError');
     options.onPagePhase?.({ targetPageIndex, totalPages: options.targetPdf.numPages, phase: 'rendered' });
     content.push({ type: 'text', text: `TARGET PAGE ${targetPageIndex + 1}` });
@@ -419,6 +474,7 @@ export async function runVisionFinalReview(options: RunVisionFinalReviewOptions)
     }
     pageIssues[targetPageIndex] = pageReport.issues;
     options.onPage?.({ targetPageIndex, totalPages: options.targetPdf.numPages, issueCount: pageReport.issues.length });
+    content.length = 0;
   };
 
   const reviewPage = (targetPageIndex: number): Promise<void> => withPageDeadline(

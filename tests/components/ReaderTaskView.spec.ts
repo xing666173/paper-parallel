@@ -82,5 +82,8 @@ function readerRepository(): ProjectRepository {
     clearProjectDerivedData: vi.fn(),
     listProjectTranslations: vi.fn(async () => []),
     listProjectArtifacts: vi.fn(async () => [...artifacts.values()]),
+    saveAiLog: vi.fn(async () => undefined),
+    loadAiLog: vi.fn(async () => []),
+    clearAiLog: vi.fn(async () => undefined),
   } as ProjectRepository;
 }

@@ -485,7 +485,7 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
       const targetLoading = getDocument({ data: compiled.pdf.slice() });
       const targetPdf = await targetLoading.promise;
       let visualReport: VisionFinalReport;
-      {
+      try {
         visualReport = await runVisionFinalReview({
           sourcePdf,
           targetPdf: targetPdf as any,
@@ -526,6 +526,11 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
           type: 'vision-review-completed', at: Date.now(), reviewedPages: visualReport.reviewedPages,
           issueCount: visualReport.issues.length,
         });
+      } finally {
+        await Promise.allSettled([
+          targetPdf.destroy(),
+          (sourcePdf as typeof sourcePdf & { destroy?: () => Promise<unknown> }).destroy?.(),
+        ]);
       }
       const severeVisualIssues = visualReport.issues.filter((issue) => (
         issue.severity === 'severe' && issue.confidence >= 0.8

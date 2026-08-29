@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import type { TaskSnapshot } from '../../types/models';
+import type { AiLogEntry } from '../../stores/task';
 
 const props = defineProps<{
   task: TaskSnapshot;
+  aiLogEntries: readonly AiLogEntry[];
   estimatedRemainingMs: number | null;
   lastResponseAt: number | null;
 }>();
@@ -21,12 +23,76 @@ onBeforeUnmount(() => {
   if (heartbeat) clearInterval(heartbeat);
 });
 
+const processingStages = [
+  'parsing', 'analyzing-layout', 'building-glossary', 'translating',
+  'composing', 'compiling', 'aligning', 'validating',
+] as const;
+const stageLabels: Record<(typeof processingStages)[number], string> = {
+  parsing: '解析论文',
+  'analyzing-layout': '识别版式',
+  'building-glossary': '建立术语表',
+  translating: '翻译正文',
+  composing: '生成中文排版',
+  compiling: '编译 PDF',
+  aligning: '建立对齐映射',
+  validating: '最终质量检查',
+};
+
+function latestEntry(types: AiLogEntry['type'][]): AiLogEntry | undefined {
+  return [...props.aiLogEntries].reverse().find((entry) => types.includes(entry.type));
+}
+
+const currentStageFraction = computed(() => {
+  if (props.task.stage === 'translating') {
+    if (props.task.progress.total === 0) return 0;
+    return Math.min(1, props.task.progress.completed / props.task.progress.total);
+  }
+  if (props.task.stage === 'analyzing-layout') {
+    const entry = latestEntry(['vision-layout-page', 'vision-layout-page-started']);
+    if (!entry?.page || !entry.totalPages) return 0;
+    const completed = entry.type === 'vision-layout-page' ? entry.page : entry.page - 1;
+    return Math.min(0.99, Math.max(0, completed / entry.totalPages));
+  }
+  if (props.task.stage === 'validating') {
+    if (latestEntry(['quality-persisted'])) return 0.99;
+    if (latestEntry(['quality-finalizing'])) return 0.96;
+    if (latestEntry(['vision-review-completed'])) return 0.94;
+    const entry = latestEntry([
+      'vision-review-page', 'vision-review-page-timeout', 'vision-review-page-phase',
+      'vision-review-page-waiting', 'vision-review-page-started',
+    ]);
+    if (!entry?.page || !entry.totalPages) return 0;
+    const completed = entry.type === 'vision-review-page' ? entry.page : entry.page - 1;
+    return Math.min(0.92, Math.max(0, completed / entry.totalPages) * 0.92);
+  }
+  return 0;
+});
+
 const percentage = computed(() => {
   if (props.task.status === 'completed') return 100;
-  if (props.task.progress.total === 0) return 0;
-  return Math.min(100, Math.round(
-    (props.task.progress.completed / props.task.progress.total) * 100,
-  ));
+  const stageIndex = processingStages.indexOf(props.task.stage as (typeof processingStages)[number]);
+  if (stageIndex < 0) return 0;
+  const overall = Math.floor(((stageIndex + currentStageFraction.value) / processingStages.length) * 100);
+  return Math.min(99, props.task.status === 'running' ? Math.max(1, overall) : Math.max(0, overall));
+});
+
+const progressDetail = computed(() => {
+  if (props.task.stage === 'completed') return '全部阶段已完成';
+  if (props.task.stage === 'translating') {
+    return `翻译文本块 ${props.task.progress.completed} / ${props.task.progress.total}`;
+  }
+  if (props.task.stage === 'validating') {
+    const completed = latestEntry(['vision-review-completed']);
+    const pageEntry = latestEntry([
+      'vision-review-page', 'vision-review-page-timeout', 'vision-review-page-phase',
+      'vision-review-page-waiting', 'vision-review-page-started',
+    ]);
+    if (completed && pageEntry?.totalPages) {
+      return `视觉质检已返回 ${completed.reviewedPages ?? 0} / ${pageEntry.totalPages} 页`;
+    }
+    if (pageEntry?.page && pageEntry.totalPages) return `视觉质检第 ${pageEntry.page} / ${pageEntry.totalPages} 页`;
+  }
+  return `当前：${stageLabels[props.task.stage as keyof typeof stageLabels] ?? '准备处理'}`;
 });
 
 const statusLabel = computed(() => ({
@@ -77,7 +143,7 @@ const lastResponse = computed(() => (
       <span class="task-status" :class="`status-${task.status}`">{{ statusLabel }}</span>
     </div>
     <div class="progress-number-row">
-      <strong>{{ percentage }}%</strong><span>{{ task.progress.completed }} / {{ task.progress.total }} 个文本块</span>
+      <strong>{{ percentage }}%</strong><span>{{ progressDetail }}</span>
     </div>
     <div class="progress-track" role="progressbar" :aria-valuenow="percentage" aria-valuemin="0" aria-valuemax="100">
       <span :style="{ width: `${percentage}%` }" />
@@ -86,7 +152,7 @@ const lastResponse = computed(() => (
       <div><dt>已用时间</dt><dd>{{ elapsed }}</dd></div>
       <div><dt>预计剩余时间</dt><dd>{{ remaining }}</dd></div>
       <div><dt>最近响应</dt><dd>{{ lastResponse }}</dd></div>
-      <div><dt>已通过</dt><dd>{{ task.progress.completed }}</dd></div>
+      <div><dt>译文已通过</dt><dd>{{ task.progress.completed }}</dd></div>
       <div><dt>重试</dt><dd>{{ task.progress.retries }}</dd></div>
       <div><dt>失败</dt><dd>{{ task.progress.failed }}</dd></div>
     </dl>

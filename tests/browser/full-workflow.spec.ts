@@ -179,8 +179,14 @@ test('uploads a mixed-layout PDF and reaches the synchronized dual-PDF reader', 
 
   await page.getByRole('button', { name: '返回翻译任务' }).click();
   await expect(page.getByRole('heading', { name: '总体进度' })).toBeVisible();
-  await expect(page.locator('.progress-number-row')).toContainText(/([1-9]\d*) \/ \1 个文本块/);
+  await expect(page.locator('.progress-number-row')).toContainText('全部阶段已完成');
+  await expect(page.locator('.task-metrics')).toContainText(/译文已通过\s*[1-9]\d*/);
   await expect(page.getByText(/单块未通过校验，已切换无思考修复请求/).first()).toBeVisible();
+
+  await page.reload();
+  await expect(page.getByRole('heading', { name: '总体进度' })).toBeVisible();
+  await expect(page.getByText(/单块未通过校验，已切换无思考修复请求/).first()).toBeVisible();
+  await expect(page.getByText('最近 200 条任务事件，刷新后保留；不显示思维过程')).toBeVisible();
 
   expect(deepSeek.translatedBatches()).toBeGreaterThan(0);
   const ordinaryRequests = deepSeek.translationRequests().filter((request) => request.thinking === 'enabled');

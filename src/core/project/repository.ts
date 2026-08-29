@@ -2,6 +2,7 @@ import type { TaskSnapshot } from '../../types/models';
 import type { AlignmentManifest } from '../align/manifest';
 import {
   PaperParallelDb,
+  type ProjectAiLogEntry,
   type ProjectArtifactRecord,
   type TranslationCacheRecord,
 } from './db';
@@ -19,6 +20,9 @@ export interface ProjectRepository {
   clearProjectDerivedData(projectId: string): Promise<void>;
   listProjectTranslations(projectId: string): Promise<TranslationCacheRecord[]>;
   listProjectArtifacts(projectId: string): Promise<ProjectArtifactRecord[]>;
+  saveAiLog(projectId: string, entries: ProjectAiLogEntry[]): Promise<void>;
+  loadAiLog(projectId: string): Promise<ProjectAiLogEntry[]>;
+  clearAiLog(projectId: string): Promise<void>;
 }
 
 export function createProjectRepository(name = 'paper-parallel'): ProjectRepository {
@@ -80,8 +84,9 @@ export function createProjectRepository(name = 'paper-parallel'): ProjectReposit
     },
 
     async clearProjectDerivedData(projectId) {
-      await db.transaction('rw', db.translations, db.artifacts, async () => {
+      await db.transaction('rw', db.translations, db.artifacts, db.aiLogs, async () => {
         await db.translations.where('projectId').equals(projectId).delete();
+        await db.aiLogs.delete(projectId);
         const artifacts = await db.artifacts.where('projectId').equals(projectId).toArray();
         const derivedKeys = artifacts
           .filter((artifact) => artifact.kind !== 'english-pdf')
@@ -96,6 +101,23 @@ export function createProjectRepository(name = 'paper-parallel'): ProjectReposit
 
     async listProjectArtifacts(projectId) {
       return db.artifacts.where('projectId').equals(projectId).sortBy('kind');
+    },
+
+    async saveAiLog(projectId, entries) {
+      await db.aiLogs.put({
+        projectId,
+        entries: entries.map((entry) => ({ ...entry })),
+        updatedAt: Date.now(),
+      });
+    },
+
+    async loadAiLog(projectId) {
+      const record = await db.aiLogs.get(projectId);
+      return record?.entries.map((entry) => ({ ...entry })) ?? [];
+    },
+
+    async clearAiLog(projectId) {
+      await db.aiLogs.delete(projectId);
     },
   };
 }

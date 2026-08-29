@@ -10,7 +10,9 @@ const copied = ref(false);
 watch(() => props.entries.length, async () => {
   if (!autoScroll.value) return;
   await nextTick();
-  logList.value?.scrollTo({ top: logList.value.scrollHeight });
+  if (typeof logList.value?.scrollTo === 'function') {
+    logList.value.scrollTo({ top: logList.value.scrollHeight });
+  }
 });
 
 function formatTime(at: number): string {
@@ -28,7 +30,7 @@ async function copyLog(): Promise<void> {
 <template>
   <section class="ai-log-card" aria-labelledby="ai-log-title">
     <div class="panel-heading log-heading">
-      <div><h2 id="ai-log-title">AI 日志</h2><p>仅显示任务事件，不显示思维过程</p></div>
+      <div><h2 id="ai-log-title">AI 日志</h2><p>最近 200 条任务事件，刷新后保留；不显示思维过程</p></div>
       <button class="text-button" type="button" @click="copyLog">{{ copied ? '已复制' : '复制' }}</button>
     </div>
     <div ref="logList" class="ai-log-list" aria-live="polite">

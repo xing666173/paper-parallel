@@ -73,6 +73,21 @@ describe('project repository', () => {
     expect(await repo.findArtifact('missing')).toBeUndefined();
   });
 
+  it('persists and restores the AI task log independently for each project', async () => {
+    const repo = createTestRepository();
+    await repo.saveAiLog('a', [{
+      at: 10, type: 'vision-review-page', page: 3, totalPages: 8,
+      message: 'Vision Exp 成品质检：第 3/8 页已完成，发现 0 个可见问题',
+    }]);
+
+    expect(await repo.loadAiLog('a')).toEqual([expect.objectContaining({
+      page: 3, totalPages: 8,
+    })]);
+    expect(await repo.loadAiLog('b')).toEqual([]);
+    await repo.clearAiLog('a');
+    expect(await repo.loadAiLog('a')).toEqual([]);
+  });
+
   it('清除当前项目派生数据时保留英文 PDF 并隔离其他项目', async () => {
     const repo = createTestRepository();
     for (const [projectId, kind] of [

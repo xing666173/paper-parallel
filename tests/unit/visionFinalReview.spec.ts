@@ -6,6 +6,7 @@ import {
   VISION_FINAL_REVIEW_RENDER_SCALE,
 } from '../../src/core/vision/finalReview';
 import { buildVisionFinalReviewPrompt } from '../../src/core/vision/prompts';
+import { PdfPageRenderTimeoutError } from '../../src/core/vision/render';
 
 describe('vision: final PDF review', () => {
   it('allows sparse natural pagination while keeping visible corruption blocking', () => {
@@ -182,10 +183,51 @@ describe('vision: final PDF review', () => {
       { type: 'image_url', image_url: { url: 'data:image/png;base64,source-0', detail: 'original' } },
       { type: 'image_url', image_url: { url: 'data:image/png;base64,target-0', detail: 'original' } },
     ]);
-    expect(renderPage).toHaveBeenCalledWith(expect.anything(), 'source', 0);
+    expect(renderPage).toHaveBeenCalledWith(expect.anything(), 'source', 0, expect.objectContaining({
+      scale: 1.5, timeoutMs: 30_000,
+    }));
     expect(requests[0].messages[0].content[0].text).toContain(
       'Do not report small or fine English labels inside verified immutable assets as unreadable merely because they are dense',
     );
+  });
+
+  it('releases a stalled page render and retries it at a lower scale before calling Vision', async () => {
+    const page = {
+      getViewport: () => ({ width: 1, height: 1 }),
+      render: () => ({ promise: Promise.resolve() }),
+      cleanup: vi.fn(),
+    };
+    const scales: number[] = [];
+    const phases: string[] = [];
+    const renderPage = vi.fn(async (
+      _page: unknown,
+      _role: string,
+      _index: number,
+      renderOptions?: { scale: number },
+    ) => {
+      scales.push(renderOptions?.scale ?? 0);
+      if (scales.length === 1) throw new PdfPageRenderTimeoutError(30_000);
+      return 'data:image/png;base64,page';
+    });
+
+    const report = await runVisionFinalReview({
+      sourcePdf: { numPages: 1, getPage: async () => page },
+      targetPdf: { numPages: 1, getPage: async () => page },
+      manifest: { units: [] } as any,
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test',
+      renderPage,
+      onPagePhase: (event) => phases.push(event.phase),
+      complete: async () => ({
+        content: '{"target_page":1,"issues":[]}',
+        usage: { promptTokens: 1, completionTokens: 1 },
+      }),
+    });
+
+    expect(report).toMatchObject({ pass: true, reviewedPages: 1 });
+    expect(scales).toEqual([1.5, 1, 1.5]);
+    expect(phases).toContain('render-retrying');
+    expect(phases).toContain('rendered');
+    expect(page.cleanup).toHaveBeenCalled();
   });
 
   it('requires a focused second review before a severe visual guess can block the PDF', async () => {

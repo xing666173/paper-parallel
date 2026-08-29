@@ -7,17 +7,13 @@ import { reduceTaskEvent } from '../core/task/stateMachine';
 import type { AiLogEvent } from '../core/translate/events';
 import type { TaskSnapshot } from '../types/models';
 import { safeErrorMessage } from '../core/security/errors';
+import type { ProjectAiLogEntry } from '../core/project/db';
 
 export interface TaskStoreDependencies {
   repository: ProjectRepository;
 }
 
-export interface AiLogEntry {
-  at: number;
-  type: AiLogEvent['type'];
-  batchId?: string;
-  message: string;
-}
+export interface AiLogEntry extends ProjectAiLogEntry {}
 
 export type TaskRunner = (signal: AbortSignal) => Promise<void>;
 
@@ -32,7 +28,9 @@ function projectAiMessage(event: AiLogEvent): string {
     case 'vision-review-page-started':
       return `Vision Exp 成品质检：开始检查第 ${event.page}/${event.totalPages} 页`;
     case 'vision-review-page-phase': {
-      const phase = event.phase === 'rendered'
+      const phase = event.phase === 'render-retrying'
+        ? '首次渲染超时，正在释放资源并以低分辨率重试'
+        : event.phase === 'rendered'
         ? '已渲染，正在连接 API'
         : event.phase === 'connected'
           ? 'API 已连接，等待模型输出'
@@ -100,12 +98,42 @@ export function createTaskStore(dependencies: TaskStoreDependencies, id = 'task'
     const completionSummary = ref<CompletionSummary | null>(null);
     let runningPromise: Promise<void> | null = null;
     let activeRunToken: symbol | null = null;
+    let aiLogProjectId: string | null = null;
+    let aiLogPersistence = Promise.resolve();
+
+    function queueAiLogPersistence(): void {
+      const projectId = current.value?.projectId;
+      if (!projectId) return;
+      aiLogProjectId = projectId;
+      const entries = aiLog.value.map((entry) => ({ ...entry }));
+      aiLogPersistence = aiLogPersistence
+        .then(() => dependencies.repository.saveAiLog(projectId, entries))
+        .catch(() => undefined);
+    }
+
+    async function restoreAiLog(projectId: string): Promise<void> {
+      if (aiLogProjectId === projectId && aiLog.value.length > 0) return;
+      await aiLogPersistence;
+      const entries = await dependencies.repository.loadAiLog(projectId);
+      aiLog.value = entries.slice(-200);
+      aiLogProjectId = projectId;
+      lastResponseAt.value = aiLog.value.at(-1)?.at ?? null;
+    }
+
+    async function flushAiLogPersistence(): Promise<void> {
+      await aiLogPersistence;
+    }
 
     function recordAiEvent(event: AiLogEvent): void {
       const entry: AiLogEntry = {
         at: event.at,
         type: event.type,
         ...('batchId' in event ? { batchId: event.batchId } : {}),
+        ...('page' in event ? {
+          page: event.page,
+          ...('totalPages' in event ? { totalPages: event.totalPages } : {}),
+        } : {}),
+        ...('reviewedPages' in event ? { reviewedPages: event.reviewedPages } : {}),
         message: projectAiMessage(event),
       };
       if (event.type === 'batch-progress') {
@@ -119,6 +147,7 @@ export function createTaskStore(dependencies: TaskStoreDependencies, id = 'task'
       }
       aiLog.value.push(entry);
       if (aiLog.value.length > 200) aiLog.value.splice(0, aiLog.value.length - 200);
+      queueAiLogPersistence();
       if (
         event.type === 'batch-received'
         || event.type === 'batch-progress'
@@ -174,6 +203,10 @@ export function createTaskStore(dependencies: TaskStoreDependencies, id = 'task'
     }
 
     function start(snapshot: TaskSnapshot, runner: TaskRunner): Promise<void> {
+      if (aiLogProjectId !== snapshot.projectId) {
+        aiLog.value = [];
+        aiLogProjectId = snapshot.projectId;
+      }
       current.value = snapshot;
       return launch(runner);
     }
@@ -225,6 +258,8 @@ export function createTaskStore(dependencies: TaskStoreDependencies, id = 'task'
       recoverInterruptedStop,
       clearTranslationCache,
       recordAiEvent,
+      restoreAiLog,
+      flushAiLogPersistence,
     };
   });
 }

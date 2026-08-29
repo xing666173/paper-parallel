@@ -31,7 +31,7 @@ const task = computed(() => (
 ));
 
 const estimatedRemainingMs = computed(() => {
-  if (!task.value || task.value.progress.completed <= 0) return null;
+  if (!task.value || task.value.stage !== 'translating' || task.value.progress.completed <= 0) return null;
   const remainingBlocks = Math.max(0, task.value.progress.total - task.value.progress.completed);
   const sampledTokens = store.throughputSamples.reduce((sum, sample) => sum + sample.tokens, 0);
   if (sampledTokens === 0) return null;
@@ -84,6 +84,7 @@ onMounted(async () => {
   try {
     if (!task.value) store.current = await repository.loadTask(projectId.value) ?? null;
     if (store.current?.status === 'stopping') await store.recoverInterruptedStop();
+    if (store.current) await store.restoreAiLog(projectId.value);
     const artifact = await repository.findArtifact(`${projectId.value}:english-pdf`);
     if (artifact?.blob instanceof Blob && typeof URL.createObjectURL === 'function') {
       sourceUrl.value = URL.createObjectURL(artifact.blob);
@@ -126,6 +127,7 @@ onBeforeRouteLeave(() => {
     <template v-else>
       <ProgressSummary
         :task="task"
+        :ai-log-entries="store.aiLog"
         :estimated-remaining-ms="estimatedRemainingMs"
         :last-response-at="store.lastResponseAt"
         @stop="store.safeStop()"

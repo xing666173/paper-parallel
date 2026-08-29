@@ -95,6 +95,7 @@ async function startTask(): Promise<void> {
         sourceFileHash: fileHash,
       },
     });
+    await repository.clearAiLog(projectId);
     await router.push({ name: 'process', params: { projectId } });
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : String(error);

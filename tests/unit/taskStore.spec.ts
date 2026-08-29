@@ -183,6 +183,28 @@ describe('project task store', () => {
     expect(store.aiLog.at(-1)?.message).toContain('已接收 64 个字符');
   });
 
+  it('restores the current project AI log after a page reload', async () => {
+    const { store, repository } = setupStore();
+    store.current = runningTranslationTask('persisted-log');
+    store.recordAiEvent({
+      type: 'vision-review-page', at: 100, page: 7, totalPages: 24, issueCount: 0,
+    });
+    await store.flushAiLogPersistence();
+
+    sequence += 1;
+    const reloadedStore = createTaskStore(
+      { repository },
+      `task-reloaded-${sequence}`,
+    )();
+    await reloadedStore.restoreAiLog('persisted-log');
+
+    expect(reloadedStore.aiLog).toEqual([expect.objectContaining({
+      at: 100, page: 7, totalPages: 24,
+      message: 'Vision Exp 成品质检：第 7/24 页已完成，发现 0 个可见问题',
+    })]);
+    expect(reloadedStore.lastResponseAt).toBe(100);
+  });
+
   it('safely stops active work, preserves validated progress, and persists stopped state', async () => {
     const { store, repository } = setupStore();
     const task = reduceTaskEvent(runningTranslationTask(), {

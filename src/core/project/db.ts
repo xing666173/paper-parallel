@@ -1,5 +1,22 @@
 import Dexie, { type EntityTable } from 'dexie';
 import type { TaskSnapshot } from '../../types/models';
+import type { AiLogEvent } from '../translate/events';
+
+export interface ProjectAiLogEntry {
+  at: number;
+  type: AiLogEvent['type'];
+  batchId?: string;
+  page?: number;
+  totalPages?: number;
+  reviewedPages?: number;
+  message: string;
+}
+
+export interface ProjectAiLogRecord {
+  projectId: string;
+  entries: ProjectAiLogEntry[];
+  updatedAt: number;
+}
 
 export interface TranslationAlignmentGroupRecord {
   sourceSentenceIds: string[];
@@ -36,6 +53,7 @@ export class PaperParallelDb extends Dexie {
   tasks!: EntityTable<TaskSnapshot, 'projectId'>;
   translations!: EntityTable<TranslationCacheRecord, 'key'>;
   artifacts!: EntityTable<ProjectArtifactRecord, 'key'>;
+  aiLogs!: EntityTable<ProjectAiLogRecord, 'projectId'>;
 
   constructor(name = 'paper-parallel') {
     super(name);
@@ -43,6 +61,12 @@ export class PaperParallelDb extends Dexie {
       tasks: 'projectId,updatedAt',
       translations: 'key,projectId,blockId',
       artifacts: 'key,projectId,kind',
+    });
+    this.version(2).stores({
+      tasks: 'projectId,updatedAt',
+      translations: 'key,projectId,blockId',
+      artifacts: 'key,projectId,kind',
+      aiLogs: 'projectId,updatedAt',
     });
   }
 }
