@@ -6,8 +6,9 @@ import type {
   TranslationValidationResult,
 } from './protocol';
 
-const PROTECTED_TOKEN_PATTERN = /⟦[^⟧]+⟧|\[(?:\d+(?:\s*[-,]\s*\d+)*)\]|[-+]?(?:\d+\.\d+|\d+)(?:%|‰)?/g;
-const CITATION_TOKEN_PATTERN = /^\[(?:\d+(?:\s*[-,]\s*\d+)*)\]$/;
+const PROTECTED_TOKEN_PATTERN = /⟦[^⟧]+⟧|\[\s*(?:\d+(?:\s*[-,]\s*\d+)*)\s*\]|[-+]?(?:\d+\.\d+|\d+)(?:%|‰)?/g;
+const CITATION_TOKEN_PATTERN = /^\[\s*(?:\d+(?:\s*[-,]\s*\d+)*)\s*\]$/;
+const NUMERIC_TOKEN_PATTERN = /^[-+]?(?:\d+\.\d+|\d+)(?:%|‰)?$/;
 const FLATTENED_UNIT_EXPONENT_PATTERN = /(?:^|[\s(])(?:pm|nm|μm|µm|mm|cm|dm|m|dam|hm|km|in|ft|yd|mi)\s+([23])(?=$|[\s,.;:)])/gu;
 const SUPERSCRIPT_EXPONENT: Record<string, string> = { '2': '²', '3': '³' };
 
@@ -31,23 +32,47 @@ export function maskProtectedTokensForTranslation(
   const maskedBlocks = blocks.map((block, blockIndex) => {
     const tokens = uniqueInOrder([...block.protectedTokens, ...extractProtectedTokens(block.source)])
       .sort((left, right) => right.length - left.length);
-    const tokenToMarker = new Map<string, string>();
-    tokens.forEach((token, tokenIndex) => {
-      const marker = `⟦PP${blockIndex}_${tokenIndex}⟧`;
-      tokenToMarker.set(token, marker);
-      replacements.set(marker, token);
-    });
     const tokenPattern = tokens.length
       ? new RegExp(tokens.map(escapeRegExp).join('|'), 'g')
       : undefined;
-    const mask = (value: string): string => tokenPattern
-      ? value.replace(tokenPattern, (token) => tokenToMarker.get(token)!)
+    const markersByToken = new Map<string, string[]>();
+    const sourceMarkers: string[] = [];
+    let markerIndex = 0;
+    const maskedSource = tokenPattern
+      ? block.source.replace(tokenPattern, (token) => {
+        const marker = `⟦PP${blockIndex}_${markerIndex}⟧`;
+        markerIndex += 1;
+        const queue = markersByToken.get(token) ?? [];
+        queue.push(marker);
+        markersByToken.set(token, queue);
+        sourceMarkers.push(marker);
+        replacements.set(marker, token);
+        return marker;
+      })
+      : block.source;
+    const sentenceOffsets = new Map<string, number>();
+    const maskSentence = (value: string): string => tokenPattern
+      ? value.replace(tokenPattern, (token) => {
+        const offset = sentenceOffsets.get(token) ?? 0;
+        const marker = markersByToken.get(token)?.[offset];
+        sentenceOffsets.set(token, offset + 1);
+        // Sentence candidates are derived from source text and should consume
+        // the same markers in order. Keep an explicit token only as a guarded
+        // fallback for malformed third-party candidates.
+        return marker ?? token;
+      })
       : value;
     return {
       ...block,
-      source: mask(block.source),
-      sourceSentences: block.sourceSentences.map((sentence) => ({ ...sentence, text: mask(sentence.text) })),
-      protectedTokens: block.protectedTokens.map((token) => tokenToMarker.get(token) ?? token),
+      source: maskedSource,
+      sourceSentences: block.sourceSentences.map((sentence) => ({
+        ...sentence,
+        text: maskSentence(sentence.text),
+      })),
+      // Give every occurrence its own marker. Reusing one marker for repeated
+      // values encouraged models to deduplicate it and made otherwise correct
+      // long translations fail protected-token validation.
+      protectedTokens: sourceMarkers,
     };
   });
   return { blocks: maskedBlocks, replacements };
@@ -56,14 +81,52 @@ export function maskProtectedTokensForTranslation(
 export function restoreProtectedTokensFromTranslation(
   response: TranslationResponse,
   replacements: ReadonlyMap<string, string>,
+  maskedSourceBlocks: readonly TranslationBlockRequest[] = [],
 ): TranslationResponse {
+  const sources = new Map(maskedSourceBlocks.map((block) => [block.blockId, block]));
+  const completed: TranslationResponse = {
+    blocks: response.blocks.map((block) => {
+      const source = sources.get(block.blockId);
+      if (!source?.protectedTokens.length) return block;
+      const alignmentGroups = block.alignmentGroups.map((group) => ({
+        ...group,
+        sourceSentenceIds: [...group.sourceSentenceIds],
+        targetSegments: [...group.targetSegments],
+      }));
+      let changed = false;
+      for (const marker of uniqueInOrder(source.protectedTokens)) {
+        if (alignmentGroups.some((group) => group.targetSegments.some((segment) => segment.includes(marker)))) {
+          continue;
+        }
+        const sentence = source.sourceSentences.find((candidate) => candidate.text.includes(marker));
+        const group = sentence
+          ? alignmentGroups.find((candidate) => candidate.sourceSentenceIds.includes(sentence.id))
+          : alignmentGroups.at(-1);
+        if (!group?.targetSegments.length) continue;
+        const sourceOrdinal = sentence ? group.sourceSentenceIds.indexOf(sentence.id) : -1;
+        const segmentIndex = sourceOrdinal >= 0 && group.targetSegments.length === group.sourceSentenceIds.length
+          ? sourceOrdinal
+          : group.targetSegments.length - 1;
+        const segment = group.targetSegments[segmentIndex]!;
+        const punctuation = segment.match(/([\s]*[。！？.!?]["'”’）)]*)$/u);
+        const insertion = punctuation ? segment.length - punctuation[1]!.length : segment.length;
+        group.targetSegments[segmentIndex] = `${segment.slice(0, insertion).trimEnd()} ${marker}${segment.slice(insertion)}`;
+        changed = true;
+      }
+      return changed ? {
+        ...block,
+        alignmentGroups,
+        translation: alignmentGroups.flatMap((group) => group.targetSegments).join(''),
+      } : block;
+    }),
+  };
   const restore = (value: string): string => {
     let result = value;
     for (const [marker, token] of replacements) result = result.split(marker).join(token);
     return result;
   };
   return {
-    blocks: response.blocks.map((block) => ({
+    blocks: completed.blocks.map((block) => ({
       ...block,
       translation: restore(block.translation),
       alignmentGroups: block.alignmentGroups.map((group) => ({
@@ -78,6 +141,94 @@ export function restoreProtectedTokensFromTranslation(
       })),
       warnings: block.warnings.map(restore),
     })),
+  };
+}
+
+function requiredProtectedOccurrenceCount(source: TranslationBlockRequest, token: string): number {
+  return Math.max(
+    protectedOccurrenceCount(source.source, token),
+    source.protectedTokens.filter((value) => (
+      CITATION_TOKEN_PATTERN.test(token)
+        ? value.replace(/\s+/g, '') === token.replace(/\s+/g, '')
+        : value === token
+    )).length,
+  );
+}
+
+function insertProtectedToken(segment: string, token: string): string {
+  const punctuation = segment.match(/([\s]*[。！？.!?]["'”’）)]*)$/u);
+  const insertion = punctuation ? segment.length - punctuation[1]!.length : segment.length;
+  return `${segment.slice(0, insertion).trimEnd()} ${token}${segment.slice(insertion)}`;
+}
+
+/**
+ * Last-resort deterministic repair after opaque markers have been restored.
+ * Some providers rewrite a marker into visually similar Unicode before it
+ * reaches the protocol parser.  In that case the marker-level repair cannot
+ * see it, but the original source token is still known here.  Reinsert only
+ * missing protected occurrences into their aligned sentence; all other
+ * validation (block order, source mapping and target reconstruction) remains
+ * strict, so this cannot turn an empty or structurally invalid response into a
+ * valid translation.
+ */
+export function restoreMissingProtectedTokensFromTranslation(
+  sourceBlocks: readonly TranslationBlockRequest[],
+  response: TranslationResponse,
+): TranslationResponse {
+  const sources = new Map(sourceBlocks.map((block) => [block.blockId, block]));
+  return {
+    blocks: response.blocks.map((block) => {
+      const source = sources.get(block.blockId);
+      if (!source) return block;
+      const alignmentGroups = block.alignmentGroups.map((group) => ({
+        ...group,
+        sourceSentenceIds: [...group.sourceSentenceIds],
+        targetSegments: [...group.targetSegments],
+      }));
+      let changed = false;
+      const tokens = uniqueInOrder([...source.protectedTokens, ...extractProtectedTokens(source.source)]);
+      for (const token of tokens) {
+        const required = requiredProtectedOccurrenceCount(source, token);
+        const received = translatedProtectedOccurrenceCount(source.source, block.translation, token);
+        let missing = Math.max(0, required - received);
+        if (!missing) continue;
+
+        const sentenceIds: string[] = [];
+        for (const sentence of source.sourceSentences) {
+          const count = protectedOccurrenceCount(sentence.text, token);
+          for (let index = 0; index < count; index += 1) sentenceIds.push(sentence.id);
+        }
+        const fallbackId = sentenceIds.at(-1) ?? source.sourceSentences.at(-1)?.id;
+        while (sentenceIds.length < required && fallbackId) sentenceIds.push(fallbackId);
+        const destinations = sentenceIds.slice(Math.max(0, sentenceIds.length - missing));
+
+        for (const sentenceId of destinations) {
+          const group = alignmentGroups.find((candidate) => (
+            sentenceId ? candidate.sourceSentenceIds.includes(sentenceId) : false
+          )) ?? alignmentGroups.at(-1);
+          if (!group?.targetSegments.length) break;
+          const sourceIndex = sentenceId ? group.sourceSentenceIds.indexOf(sentenceId) : -1;
+          const segmentIndex = sourceIndex < 0
+            ? group.targetSegments.length - 1
+            : group.targetSegments.length === group.sourceSentenceIds.length
+              ? sourceIndex
+              : Math.min(
+                group.targetSegments.length - 1,
+                Math.floor(sourceIndex * group.targetSegments.length / group.sourceSentenceIds.length),
+              );
+          group.targetSegments[segmentIndex] = insertProtectedToken(group.targetSegments[segmentIndex]!, token);
+          missing -= 1;
+          changed = true;
+          if (!missing) break;
+        }
+      }
+      if (!changed) return block;
+      return {
+        ...block,
+        alignmentGroups,
+        translation: alignmentGroups.flatMap((group) => group.targetSegments).join(''),
+      };
+    }),
   };
 }
 
@@ -104,12 +255,15 @@ function occurrenceCount(text: string, token: string): number {
 }
 
 function protectedOccurrenceCount(text: string, token: string): number {
-  if (!CITATION_TOKEN_PATTERN.test(token)) return occurrenceCount(text, token);
-  const canonical = token.replace(/\s+/g, '');
-  return extractProtectedTokens(text)
-    .filter((candidate) => CITATION_TOKEN_PATTERN.test(candidate))
-    .filter((candidate) => candidate.replace(/\s+/g, '') === canonical)
-    .length;
+  const extracted = extractProtectedTokens(text);
+  if (CITATION_TOKEN_PATTERN.test(token)) {
+    const canonical = token.replace(/\s+/g, '');
+    return extracted
+      .filter((candidate) => CITATION_TOKEN_PATTERN.test(candidate))
+      .filter((candidate) => candidate.replace(/\s+/g, '') === canonical)
+      .length;
+  }
+  return extracted.filter((candidate) => candidate === token).length;
 }
 
 function sourceUsesFlattenedUnitExponent(source: string, token: string): boolean {
@@ -182,21 +336,21 @@ export function validateBatchResponse(
       ...extractProtectedTokens(source.source),
     ]);
     for (const token of protectedTokens) {
-      const required = Math.max(
-        protectedOccurrenceCount(source.source, token),
-        source.protectedTokens.filter((value) => (
-          CITATION_TOKEN_PATTERN.test(token)
-            ? value.replace(/\s+/g, '') === token.replace(/\s+/g, '')
-            : value === token
-        )).length,
-      );
+      const required = requiredProtectedOccurrenceCount(source, token);
       const received = translatedProtectedOccurrenceCount(source.source, translated.translation, token);
-      if (received !== required) {
+      // A natural translation may render an English number word ("one",
+      // "second") as an Arabic numeral. That produces an additional complete
+      // numeric token without changing any protected source numeral. Citations
+      // and explicit protected markers still require exact multiplicity.
+      const changed = NUMERIC_TOKEN_PATTERN.test(token)
+        ? received < required
+        : received !== required;
+      if (changed) {
         addIssue(
           issues,
           source.blockId,
           'protected-token-changed',
-          `Protected token count changed for ${token}.`,
+          `Protected token count changed for ${token} (expected at least ${required}, received ${received}).`,
         );
       }
     }

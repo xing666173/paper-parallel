@@ -43,12 +43,16 @@ class TranslationValidationError extends Error {
   constructor(issues: TranslationValidationIssue[]) {
     const codes = issues.map((issue) => issue.code);
     const blockIds = [...new Set(issues.map((issue) => issue.blockId).filter((id) => id !== '*'))];
-    super(`Translation validation failed for ${blockIds.join(', ') || 'unknown blocks'}: ${codes.join(', ')}`);
+    const details = [...new Set(issues.map((issue) => issue.message))];
+    super([
+      `Translation validation failed for ${blockIds.join(', ') || 'unknown blocks'}: ${codes.join(', ')}`,
+      ...details,
+    ].join('; '));
     this.name = 'TranslationValidationError';
     this.issues = issues;
     this.codes = codes;
     this.blockIds = blockIds;
-    this.details = [...new Set(issues.map((issue) => issue.message))];
+    this.details = details;
   }
 }
 
@@ -257,7 +261,10 @@ export async function runTranslationTask(
             type: 'retry', at: now(), batchId: batch.id, attempt: retryCount,
             reason: recovery.reason === 'output-limit'
               ? '单块响应仍过长，已切换无思考修复请求'
-              : `单块未通过校验，已切换无思考修复请求（${recovery.validationCodes?.join(', ') ?? 'validation'}）`,
+              : [
+                `单块未通过校验，已切换无思考分片修复请求（${recovery.validationCodes?.join(', ') ?? 'validation'}）`,
+                ...(recovery.validationDetails?.slice(0, 3) ?? []),
+              ].join('：'),
           });
           continue;
         }

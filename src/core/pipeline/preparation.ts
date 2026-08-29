@@ -206,6 +206,10 @@ function normalizedFragmentText(value: string): string {
 function nestedPdfFragmentIds(doc: Doc): Set<string> {
   const result = new Set<string>();
   for (const candidate of doc.blocks) {
+    // A short caption such as "TABLE IV" can geometrically sit inside a
+    // larger PDF text aggregate for the table body.  It is still structural
+    // content and may be the only stable caption anchor returned by Vision.
+    if (candidate.type === 'caption') continue;
     const text = candidate.text?.trim() ?? '';
     const naturalWords = text.match(/[A-Za-z]{3,}/g)?.length ?? 0;
     const fragmentLike = naturalWords <= 2
@@ -341,6 +345,11 @@ function withoutAssetTextLines(
         .join('\n')
         .trim();
     }
+    // The source can be a cleaned suffix of the raw block.  When its exact
+    // offset is known and no character in that suffix intersects an asset,
+    // the coordinate mask is complete; falling through would compare local
+    // line offsets with raw-block indexes and could delete valid prose.
+    return source;
   }
   let offset = 0;
   const kept: string[] = [];
@@ -494,6 +503,27 @@ function withoutRepeatedEmbeddedFurniture(
 
 function withoutTrailingVisualLabelCluster(source: string): string {
   const lines = source.split(/\r?\n/);
+  // Symbol-font text embedded in figures is occasionally decoded by PDF.js as
+  // Syriac/Arabic-extension or Indic glyphs.  Once such a line appears near
+  // the end of an otherwise English prose block, remove it together with the
+  // immediately preceding short diagram labels.  The pixels remain available
+  // through the immutable figure asset; only the duplicate text layer is
+  // discarded here.
+  const suspiciousGlyph = /[\u0700-\u08ff\u0a80-\u0bff]/u;
+  const firstSuspicious = lines.findIndex((line) => suspiciousGlyph.test(line));
+  if (firstSuspicious > 0) {
+    const diagramLabel = (value: string): boolean => {
+      const line = value.trim();
+      if (!line || line.length > 64 || /[.!?;:]\s*$/.test(line)) return false;
+      if (/^(?:def\s+\w+\s*\(|return\b|pre-?processing\b)/i.test(line)) return true;
+      if (/^(?:[A-Z][A-Z0-9-]*)(?:\s+[A-Z][A-Z0-9-]*){0,5}$/.test(line)) return true;
+      return /^(?:POLY|MSM|INTT|NTT|PMULT|PADD|PDBL|MUX)(?:\s+.*)?$/i.test(line);
+    };
+    let cut = firstSuspicious;
+    while (cut > 0 && diagramLabel(lines[cut - 1]!)) cut -= 1;
+    return lines.slice(0, cut).join('\n').trim();
+  }
+
   if (lines.length < 7) return source;
   let start = lines.length;
   for (let index = lines.length - 1; index > 0; index -= 1) {
@@ -543,6 +573,91 @@ function formulaContinuation(anchor: Doc['blocks'][number], candidate: Doc['bloc
   return verticalGap <= 18 && horizontalOverlap > 0;
 }
 
+interface FormulaGlyphCluster {
+  rect: Rect;
+  fragmentIds: Set<string>;
+}
+
+function formulaGlyphCluster(
+  doc: Doc,
+  anchor: Doc['blocks'][number],
+  unitIds: ReadonlySet<string>,
+): FormulaGlyphCluster | undefined {
+  if (!anchor.characterRects?.length) return undefined;
+  const verticalPad = Math.max(18, anchor.rect.h * 1.8);
+  const bandTop = anchor.rect.y - verticalPad;
+  const bandBottom = anchor.rect.y + anchor.rect.h + verticalPad;
+  const candidates = doc.blocks.flatMap((candidate) => {
+    if (
+      candidate.pageIndex !== anchor.pageIndex
+      || !['paragraph', 'equation'].includes(candidate.type)
+    ) return [];
+    const text = candidate.text?.trim() ?? '';
+    const naturalWords = text.match(/[A-Za-z]{3,}/g) ?? [];
+    if (!text || text.length > 500 || naturalWords.length > 4) return [];
+    if (!/[=+\-*/∑∫√≤≥≈≠𝑎-𝑧𝛼-𝜔α-ωΑ-Ω]/u.test(text)) return [];
+    const characters = (candidate.characterRects ?? []).filter((character) => (
+      character.pageIndex === anchor.pageIndex
+      && character.ch.trim().length > 0
+      && character.rect.y < bandBottom
+      && character.rect.y + character.rect.h > bandTop
+    ));
+    const characterRect = unionRects(characters.map((character) => character.rect));
+    const clipped = characterRect ?? (
+      candidate.rect.y < bandBottom && candidate.rect.y + candidate.rect.h > bandTop
+        ? {
+            x: candidate.rect.x,
+            y: Math.max(candidate.rect.y, bandTop),
+            w: candidate.rect.w,
+            h: Math.min(candidate.rect.y + candidate.rect.h, bandBottom) - Math.max(candidate.rect.y, bandTop),
+          }
+        : undefined
+    );
+    return clipped ? [{ block: candidate, rect: clipped }] : [];
+  });
+  if (candidates.length < 2) return undefined;
+
+  let combined = { ...anchor.rect };
+  const fragmentIds = new Set<string>();
+  const remaining = [...candidates];
+  let expanded = true;
+  while (expanded) {
+    expanded = false;
+    for (let index = remaining.length - 1; index >= 0; index -= 1) {
+      const candidate = remaining[index]!;
+      const horizontalGap = Math.max(
+        0,
+        candidate.rect.x - (combined.x + combined.w),
+        combined.x - (candidate.rect.x + candidate.rect.w),
+      );
+      const verticalGap = Math.max(
+        0,
+        candidate.rect.y - (combined.y + combined.h),
+        combined.y - (candidate.rect.y + candidate.rect.h),
+      );
+      if (horizontalGap > 36 || verticalGap > 18) continue;
+      combined = unionRect(combined, candidate.rect);
+      if (candidate.block.id !== anchor.id && unitIds.has(candidate.block.id)) {
+        fragmentIds.add(candidate.block.id);
+      }
+      remaining.splice(index, 1);
+      expanded = true;
+    }
+  }
+  if (!fragmentIds.size || combined.w > doc.pages[anchor.pageIndex]!.width * 0.8 || combined.h > 64) {
+    return undefined;
+  }
+  return {
+    rect: {
+      x: Math.max(0, combined.x - 3),
+      y: Math.max(0, combined.y - 2),
+      w: combined.w + 6,
+      h: combined.h + 4,
+    },
+    fragmentIds,
+  };
+}
+
 function withoutTrailingFormulaFragment(source: string): string {
   const lines = source.split(/\r?\n/);
   let cut = lines.length;
@@ -565,6 +680,56 @@ function isNaturalLanguageFormulaBlock(source: string | undefined): boolean {
   const words = text.match(/[A-Za-z]{3,}/g) ?? [];
   const functionWords = text.match(/\b(?:the|a|an|and|or|of|to|in|for|with|that|this|is|are|was|were|as|by|from|on|at)\b/gi) ?? [];
   return words.length >= 5 && functionWords.length >= 2;
+}
+
+interface InlineFormulaFragment {
+  before: string;
+  after: string;
+  rect: Rect;
+}
+
+function inlineFormulaFragment(
+  block: Doc['blocks'][number],
+  source: string,
+): InlineFormulaFragment | undefined {
+  if (!block.characterRects?.length) return undefined;
+  const equalsIndex = source.indexOf('=');
+  if (equalsIndex < 1) return undefined;
+  const left = source.slice(0, equalsIndex).match(/([A-Za-z][A-Za-z0-9_]*)\s*$/);
+  if (!left?.index && left?.index !== 0) return undefined;
+  const formulaStart = left.index;
+  const delimiter = source.slice(equalsIndex + 1).match(/\s*[,;]\s*(?=(?:where|with|which|for|respectively)\b)/i);
+  if (!delimiter?.index && delimiter?.index !== 0) return undefined;
+  const formulaEnd = equalsIndex + 1 + delimiter.index;
+  const formulaText = source.slice(formulaStart, formulaEnd).trim();
+  if (formulaText.length < 5 || formulaText.length > 100) return undefined;
+  const sourceOffset = (block.text ?? '').indexOf(source);
+  if (sourceOffset < 0) return undefined;
+  const characters = block.characterRects.filter((character) => (
+    character.sourceIndex >= sourceOffset + formulaStart
+    && character.sourceIndex < sourceOffset + formulaEnd
+    && character.ch.trim().length > 0
+  ));
+  const physical = unionRects(characters.map((character) => character.rect));
+  if (!physical) return undefined;
+  const page = physicalPages(block).includes(block.pageIndex) ? block.pageIndex : characters[0]?.pageIndex;
+  if (page === undefined || characters.some((character) => character.pageIndex !== page)) return undefined;
+  return {
+    before: source.slice(0, formulaStart).trim().replace(/[,;:]\s*$/, ''),
+    after: source.slice(formulaEnd).trim().replace(/^[,;:]\s*/, ''),
+    // Subscripts and large operators can be assigned to a neighbouring PDF
+    // text block even when their visible ink belongs to this equation line.
+    // Do not add an upper pad: the preceding prose baseline is often only one
+    // line above and even two PDF points can capture its descenders.
+    // Most detached mathematical glyphs (limits/subscripts) sit below the main
+    // formula baseline, so reserve the larger allowance on the bottom instead.
+    rect: {
+      x: Math.max(0, physical.x - 3),
+      y: Math.max(0, physical.y),
+      w: physical.w + 6,
+      h: physical.h + 7,
+    },
+  };
 }
 
 const MAX_TRANSLATION_UNIT_CHARACTERS = 1_800;
@@ -721,7 +886,11 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
     if (!unit.sourceText) continue;
     const block = blocks.get(unit.id);
     if (!block) continue;
-    const geometryCleaned = withoutEmbeddedMarginFurniture(doc, block, unit.sourceText);
+    // Apply the coordinate mask while source offsets still refer to the raw
+    // PDF text.  Later cleaners can remove or rearrange lines, after which a
+    // sourceIndex can no longer be mapped back reliably.
+    const assetCleaned = withoutAssetTextLines(block, unit.sourceText, verifiedAssetRegions);
+    const geometryCleaned = withoutEmbeddedMarginFurniture(doc, block, assetCleaned);
     const labelsCleaned = withoutTrailingVisualLabelCluster(geometryCleaned);
     const crossesPages = new Set((block.fragments ?? []).map((fragment) => fragment.pageIndex)).size > 1;
     // A numbered heading can sit next to a display formula, but its leading
@@ -849,8 +1018,87 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
     };
   }
 
+  // A PDF text line can contain translatable prose around a nontrivial inline
+  // formula.  When the parser has already classified that line as an equation,
+  // preserve only the mathematical expression as pixels and keep the prose as
+  // two independent translation units around it.
+  for (const unit of [...units]) {
+    if (unit.kind !== 'formula' || !isNaturalLanguageFormulaBlock(unit.sourceText)) continue;
+    const block = blocks.get(unit.id);
+    if (!block || block.type !== 'equation' || !unit.sourceText) continue;
+    const fragment = inlineFormulaFragment(block, unit.sourceText);
+    if (!fragment || (!fragment.before && !fragment.after)) continue;
+    const assetId = `${unit.id}-inline-formula`;
+    const replacementUnits: SemanticUnit[] = [];
+    if (fragment.before) replacementUnits.push({
+      ...unit,
+      id: `${unit.id}-inline-before`,
+      kind: 'paragraph',
+      sourceText: fragment.before,
+      protectedTokens: extractProtectedTokens(fragment.before),
+      order: unit.order - 0.001,
+      assetId: undefined,
+    });
+    replacementUnits.push({
+      ...unit,
+      id: assetId,
+      kind: 'formula',
+      sourceText: undefined,
+      protectedTokens: [],
+      assetId,
+      order: unit.order,
+    });
+    if (fragment.after) replacementUnits.push({
+      ...unit,
+      id: `${unit.id}-inline-after`,
+      kind: 'paragraph',
+      sourceText: fragment.after,
+      protectedTokens: extractProtectedTokens(fragment.after),
+      order: unit.order + 0.001,
+      assetId: undefined,
+    });
+    const unitIndex = units.indexOf(unit);
+    units.splice(unitIndex, 1, ...replacementUnits);
+    const region = regions.find((candidate) => candidate.id === unit.layoutRegionId);
+    const regionIndex = region?.orderedUnitIds.indexOf(unit.id) ?? -1;
+    if (region && regionIndex >= 0) {
+      region.orderedUnitIds.splice(regionIndex, 1, ...replacementUnits.map((candidate) => candidate.id));
+    }
+    assetRegions.push({
+      id: assetId,
+      kind: 'formula',
+      pageIndex: block.pageIndex,
+      rect: fragment.rect,
+      widthMode: block.widthMode,
+    });
+  }
+
+  // Display formulas are often emitted by PDF.js as one small equation anchor
+  // plus several late, out-of-order text blocks for limits and subscripts.
+  // Reconstruct the visual row from character geometry and remove those
+  // duplicate text-layer fragments before pagination.
+  const clusteredFormulaRects = new Map<string, Rect>();
+  const clusteredFormulaFragmentIds = new Set<string>();
+  const currentUnitIds = new Set(units.map((unit) => unit.id));
+  for (const unit of units) {
+    if (unit.kind !== 'formula' || clusteredFormulaFragmentIds.has(unit.id)) continue;
+    const block = blocks.get(unit.id);
+    if (!block || verifiedAssetRegions.some((asset) => materiallyCovered(block, asset))) continue;
+    const cluster = formulaGlyphCluster(doc, block, currentUnitIds);
+    if (!cluster) continue;
+    clusteredFormulaRects.set(unit.id, cluster.rect);
+    cluster.fragmentIds.forEach((id) => clusteredFormulaFragmentIds.add(id));
+  }
+  if (clusteredFormulaFragmentIds.size) {
+    units = units.filter((unit) => !clusteredFormulaFragmentIds.has(unit.id));
+    for (const region of regions) {
+      region.orderedUnitIds = region.orderedUnitIds.filter((id) => !clusteredFormulaFragmentIds.has(id));
+    }
+  }
+
   for (const unit of units) {
     if (unit.kind !== 'formula' && unit.kind !== 'code' && unit.kind !== 'page-furniture') continue;
+    if (unit.assetId && assetRegions.some((asset) => asset.id === unit.assetId)) continue;
     const block = blocks.get(unit.id);
     if (!block) throw new Error(`不可变资产 ${unit.id} 缺少源坐标`);
     if (verifiedAssetRegions.some((asset) => materiallyCovered(block, asset))) continue;
@@ -860,7 +1108,7 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
       continue;
     }
     let rect = unit.kind === 'formula'
-      ? doc.blocks
+      ? clusteredFormulaRects.get(unit.id) ?? doc.blocks
         .filter((candidate) => formulaContinuation(block, candidate))
         .reduce((combined, candidate) => unionRect(combined, candidate.rect), { ...block.rect })
       : { ...block.rect };

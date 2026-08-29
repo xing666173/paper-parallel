@@ -370,8 +370,8 @@ describe('cancellable translation coordinator', () => {
 
     expect(attempts).toBe(3);
     expect(repairDetails).toEqual([
-      ['Protected token count changed for 96%.'],
-      ['Protected token count changed for 96%.'],
+      ['Protected token count changed for 96% (expected at least 1, received 0).'],
+      ['Protected token count changed for 96% (expected at least 1, received 0).'],
     ]);
     expect(result.completedBlockIds).toEqual(['b1']);
   });

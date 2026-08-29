@@ -78,6 +78,12 @@ describe('project task store', () => {
 
     expect(store.aiLog.at(-1)?.message).toBe('Vision Exp 版式识别：开始分析第 1/8 页');
     expect(store.lastResponseAt).toBe(10);
+
+    store.recordAiEvent({
+      type: 'vision-layout-page-phase', at: 11, page: 5, totalPages: 8, phase: 'render-retrying',
+    });
+    expect(store.aiLog.at(-1)?.message).toContain('第 5/8 页首次渲染超时');
+    expect(store.lastResponseAt).toBe(11);
   });
 
   it('shows page-level progress as soon as final visual review starts', () => {

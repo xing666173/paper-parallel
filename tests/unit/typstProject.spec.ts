@@ -219,6 +219,8 @@ describe('Typst project generation', () => {
 
     expect(project.mainContent).toContain('#grid(columns: 3, gutter: 6pt');
     expect(project.mainContent).toContain('155.2pt');
+    expect(project.mainContent).not.toContain('[#pagebreak(weak: true)');
+    expect(project.mainContent.match(/#pagebreak\(weak: true\)/g)).toHaveLength(1);
   });
 
   it('escapes Typst syntax without changing ordinary protected text', () => {

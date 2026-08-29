@@ -1,4 +1,4 @@
-export const VISION_LAYOUT_PROMPT_VERSION = 'vision-layout-v5';
+export const VISION_LAYOUT_PROMPT_VERSION = 'vision-layout-v6';
 
 export function buildVisionLayoutPrompt(pageNumber: number): string {
   return [
@@ -6,13 +6,15 @@ export function buildVisionLayoutPrompt(pageNumber: number): string {
     `This is source page ${pageNumber}.`,
     'Identify the page layout and only visual assets that must remain pixel-identical in the translated paper.',
     'Set layout=mixed whenever full-width title/abstract/figure regions coexist with two-column body text; do not call such a page single.',
-    'Immutable regions are: figures, table bodies, display formulas, and code. Do not include a figure/table caption inside its immutable bbox.',
-    'Scan the page from top to bottom and return every display formula plus every complete algorithm or pseudocode environment; these are not optional or representative samples.',
+    'Immutable regions are: figures, table bodies, formulas, and code. Do not include a figure/table caption inside its immutable bbox.',
+    'Scan the page from top to bottom and return every display formula, every nontrivial inline formula containing a summation/product/fraction/matrix or multiple subscripted/superscripted symbols, plus every complete algorithm or pseudocode environment; these are not optional or representative samples.',
     'Return one region per numbered Figure/Table, never a second region for an internal panel or subdiagram.',
-    'bbox must be tight around visible asset ink. Exclude all surrounding prose, headers, whitespace, and the complete caption line.',
+    'A figure bbox must contain the complete numbered figure: every panel, diagram title, axis, legend, arrow, and label (including labels such as POLY/MSM above the main drawing). Never crop a figure at an internal row or panel boundary.',
+    'A formula bbox must be tight around only the visible formula ink. For an inline formula, exclude the surrounding sentence while preserving the entire mathematical expression.',
+    'bbox must otherwise be tight around visible asset ink. Exclude all surrounding prose, headers, whitespace, and the complete caption line.',
     'column describes the asset itself: use left/right for a one-column asset and full only when the asset physically spans both columns.',
     'Captions are translatable text: return their tight separate caption_bbox when associated with a figure or table.',
-    'Return at most 32 regions. Do not return body text, captions as standalone regions, headings, citations, inline math, headers, or footers.',
+    'Return at most 32 regions. Do not return body text, captions as standalone regions, headings, citations, trivial single-variable inline math, headers, or footers.',
     'Every box must be an object {"x":number,"y":number,"width":number,"height":number} in normalized 0..1000 page coordinates. Never return pixel coordinates or x1/y1/x2/y2.',
     'Return exactly one JSON object with this schema:',
     '{"page":1,"layout":"single|double|mixed","regions":[{"type":"figure|table|display_formula|code","bbox":{"x":0,"y":0,"width":1,"height":1},"column":"left|right|full","caption_bbox":{"x":0,"y":0,"width":1,"height":1},"confidence":0.0}]}',

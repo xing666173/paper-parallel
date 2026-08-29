@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import { analyzePdfLayoutWithVision } from '../../src/core/vision/analyze';
+import {
+  analyzePdfLayoutWithVision,
+  VISION_LAYOUT_FALLBACK_RENDER_SCALE,
+  VISION_LAYOUT_RENDER_SCALE,
+} from '../../src/core/vision/analyze';
+import { PdfPageRenderTimeoutError } from '../../src/core/vision/render';
 
 describe('vision: pre-layout analysis', () => {
   it('always uses Vision Exp with thinking disabled and original image detail', async () => {
@@ -73,5 +78,80 @@ describe('vision: pre-layout analysis', () => {
 
     expect((await run).map((analysis) => analysis.pageIndex)).toEqual([0, 1, 2]);
     expect(maxActive).toBe(2);
+  });
+
+  it('serializes PDF rasterization while Vision requests remain concurrent', async () => {
+    const page = { getViewport: () => ({ width: 1, height: 1 }), render: () => ({ promise: Promise.resolve() }) };
+    const renderResolvers: Array<() => void> = [];
+    const requestResolvers: Array<() => void> = [];
+    let activeRenders = 0;
+    let maxActiveRenders = 0;
+    let activeRequests = 0;
+    let maxActiveRequests = 0;
+    const run = analyzePdfLayoutWithVision({
+      pdf: { numPages: 2, getPage: async () => page },
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test', fileHash: 'sha256:serial-render',
+      renderPage: async () => {
+        activeRenders += 1;
+        maxActiveRenders = Math.max(maxActiveRenders, activeRenders);
+        await new Promise<void>((resolve) => renderResolvers.push(resolve));
+        activeRenders -= 1;
+        return 'data:image/png;base64,PAGE';
+      },
+      complete: async (request: any) => {
+        activeRequests += 1;
+        maxActiveRequests = Math.max(maxActiveRequests, activeRequests);
+        await new Promise<void>((resolve) => requestResolvers.push(resolve));
+        activeRequests -= 1;
+        const pageNumber = Number(request.messages[0].content[0].text.match(/source page (\d+)/)?.[1] ?? '0');
+        return {
+          content: JSON.stringify({ page: pageNumber, layout: 'single', regions: [] }),
+          usage: { promptTokens: 1, completionTokens: 1 },
+        };
+      },
+    });
+
+    await vi.waitFor(() => expect(renderResolvers).toHaveLength(1));
+    renderResolvers[0]!();
+    await vi.waitFor(() => expect(renderResolvers).toHaveLength(2));
+    renderResolvers[1]!();
+    await vi.waitFor(() => expect(requestResolvers).toHaveLength(2));
+    requestResolvers.forEach((resolve) => resolve());
+
+    await run;
+    expect(maxActiveRenders).toBe(1);
+    expect(maxActiveRequests).toBe(2);
+  });
+
+  it('releases and rerenders a page at lower resolution after a render timeout', async () => {
+    const cleanup = vi.fn();
+    const page = {
+      getViewport: () => ({ width: 1, height: 1 }),
+      render: () => ({ promise: Promise.resolve() }),
+      cleanup,
+    };
+    const scales: number[] = [];
+    const phases: string[] = [];
+    const result = await analyzePdfLayoutWithVision({
+      pdf: { numPages: 1, getPage: async () => page },
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test', fileHash: 'sha256:render-retry',
+      renderPage: async (_page, renderOptions) => {
+        scales.push(renderOptions?.scale ?? 0);
+        if (renderOptions?.scale === VISION_LAYOUT_RENDER_SCALE) {
+          throw new PdfPageRenderTimeoutError(30_000);
+        }
+        return 'data:image/png;base64,FALLBACK';
+      },
+      onPagePhase: ({ phase }) => phases.push(phase),
+      complete: async () => ({
+        content: '{"page":1,"layout":"double","regions":[]}',
+        usage: { promptTokens: 1, completionTokens: 1 },
+      }),
+    });
+
+    expect(result[0]?.layout).toBe('double');
+    expect(scales).toEqual([VISION_LAYOUT_RENDER_SCALE, VISION_LAYOUT_FALLBACK_RENDER_SCALE]);
+    expect(phases).toEqual(['render-retrying']);
+    expect(cleanup).toHaveBeenCalledTimes(2);
   });
 });

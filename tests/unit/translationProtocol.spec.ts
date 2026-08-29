@@ -8,6 +8,7 @@ import {
 import {
   extractProtectedTokens,
   maskProtectedTokensForTranslation,
+  restoreMissingProtectedTokensFromTranslation,
   restoreProtectedTokensFromTranslation,
   validateBatchResponse,
 } from '../../src/core/translate/protected';
@@ -42,8 +43,12 @@ describe('generic academic translation protocol', () => {
     };
     const masked = maskProtectedTokensForTranslation([source]);
     expect(masked.blocks[0]!.source)
-      .toBe('Figure ⟦PP0_2⟧ uses ⟦PP0_1⟧ × speedup ⟦PP0_0⟧, then ⟦PP0_1⟧ more steps.');
-    const maskedTranslation = '图 ⟦PP0_2⟧ 使用 ⟦PP0_1⟧ 倍加速 ⟦PP0_0⟧，随后再执行 ⟦PP0_1⟧ 步。';
+      .toBe('Figure ⟦PP0_0⟧ uses ⟦PP0_1⟧ × speedup ⟦PP0_2⟧, then ⟦PP0_3⟧ more steps.');
+    expect(masked.blocks[0]!.sourceSentences[0]!.text).toBe(masked.blocks[0]!.source);
+    expect(masked.blocks[0]!.protectedTokens).toEqual([
+      '⟦PP0_0⟧', '⟦PP0_1⟧', '⟦PP0_2⟧', '⟦PP0_3⟧',
+    ]);
+    const maskedTranslation = '图 ⟦PP0_0⟧ 使用 ⟦PP0_1⟧ 倍加速 ⟦PP0_2⟧，随后再执行 ⟦PP0_3⟧ 步。';
     const restored = restoreProtectedTokensFromTranslation({ blocks: [{
       blockId: 'p1', translation: maskedTranslation,
       alignmentGroups: [{ sourceSentenceIds: ['p1-s-1'], targetSegments: [maskedTranslation] }],
@@ -72,6 +77,74 @@ describe('generic academic translation protocol', () => {
       'Figure ⟦PP0_0⟧ compares RISC⟦PP0_1⟧ at ⟦PP0_2⟧ × speedup.',
     );
     expect([...masked.replacements.keys()]).toEqual(['⟦PP0_0⟧', '⟦PP0_1⟧', '⟦PP0_2⟧']);
+  });
+
+  it('restores an omitted opaque marker inside its aligned target sentence before validation', () => {
+    const source: TranslationBlockRequest = {
+      blockId: 'repeated-number', kind: 'paragraph',
+      source: 'The design uses 4 pipes. Table 4 reports 4 more results.',
+      alignmentMode: 'sentence-candidates',
+      sourceSentences: [
+        { id: 'repeated-number-s-1', text: 'The design uses 4 pipes.' },
+        { id: 'repeated-number-s-2', text: 'Table 4 reports 4 more results.' },
+      ],
+      protectedTokens: ['4', '4', '4'],
+    };
+    const masked = maskProtectedTokensForTranslation([source]);
+    const first = masked.blocks[0]!.protectedTokens[0]!;
+    const second = masked.blocks[0]!.protectedTokens[1]!;
+    const missing = masked.blocks[0]!.protectedTokens[2]!;
+    const restored = restoreProtectedTokensFromTranslation({ blocks: [{
+      blockId: source.blockId,
+      translation: `该设计使用 ${first} 条流水线。表 ${second} 报告了更多结果。`,
+      alignmentGroups: [
+        { sourceSentenceIds: ['repeated-number-s-1'], targetSegments: [`该设计使用 ${first} 条流水线。`] },
+        { sourceSentenceIds: ['repeated-number-s-2'], targetSegments: [`表 ${second} 报告了更多结果。`] },
+      ],
+      newTerms: [], warnings: [],
+    }] }, masked.replacements, masked.blocks);
+
+    expect(missing).not.toBe(first);
+    expect(restored.blocks[0]!.translation).toBe('该设计使用 4 条流水线。表 4 报告了更多结果 4。');
+    expect(restored.blocks[0]!.alignmentGroups.flatMap((group) => group.targetSegments).join(''))
+      .toBe(restored.blocks[0]!.translation);
+    expect(validateBatchResponse([source], restored).ok).toBe(true);
+  });
+
+  it('treats whitespace-padded citation lists as one protected token', () => {
+    expect(extractProtectedTokens('Prior work [ 1 , 3 , 8 , 13 ] established this result.'))
+      .toEqual(['[ 1 , 3 , 8 , 13 ]']);
+  });
+
+  it('deterministically restores original tokens still missing after provider marker rewriting', () => {
+    const source: TranslationBlockRequest = {
+      blockId: 'long-technical', kind: 'paragraph',
+      source: 'Figure 3 reports prior work [ 1 , 8 , 13 ]. The speedup is 80%.',
+      alignmentMode: 'sentence-candidates',
+      sourceSentences: [
+        { id: 'long-technical-s-1', text: 'Figure 3 reports prior work [ 1 , 8 , 13 ].' },
+        { id: 'long-technical-s-2', text: 'The speedup is 80%.' },
+      ],
+      protectedTokens: ['3', '[ 1 , 8 , 13 ]', '80%'],
+    };
+    const response: TranslationResponse = { blocks: [{
+      blockId: source.blockId,
+      translation: '图报告了已有工作。加速比为。',
+      alignmentGroups: [
+        { sourceSentenceIds: ['long-technical-s-1'], targetSegments: ['图报告了已有工作。'] },
+        { sourceSentenceIds: ['long-technical-s-2'], targetSegments: ['加速比为。'] },
+      ],
+      newTerms: [], warnings: [],
+    }] };
+
+    const restored = restoreMissingProtectedTokensFromTranslation([source], response);
+
+    expect(restored.blocks[0]!.translation).toContain('3');
+    expect(restored.blocks[0]!.translation).toContain('[ 1 , 8 , 13 ]');
+    expect(restored.blocks[0]!.translation).toContain('80%');
+    expect(restored.blocks[0]!.alignmentGroups.flatMap((group) => group.targetSegments).join(''))
+      .toBe(restored.blocks[0]!.translation);
+    expect(validateBatchResponse([source], restored).ok).toBe(true);
   });
   it('creates stable source candidates before any translation request', () => {
     expect(buildSourceSentenceCandidates('p1', 'First result. Second result!')).toEqual({
@@ -152,6 +225,28 @@ describe('generic academic translation protocol', () => {
     expect(result.issues.map((issue) => issue.code)).toEqual([
       'protected-token-changed', 'protected-token-changed',
     ]);
+  });
+
+  it('counts complete numeric tokens and permits extra numerals introduced from number words', () => {
+    const source: TranslationBlockRequest = {
+      blockId: 'numeric-words', kind: 'paragraph',
+      source: 'Step 1 uses 1024 entries, followed by one extra pass.',
+      alignmentMode: 'sentence-candidates',
+      sourceSentences: [{
+        id: 'numeric-words-s-1',
+        text: 'Step 1 uses 1024 entries, followed by one extra pass.',
+      }],
+      protectedTokens: ['1', '1024'],
+    };
+    const translation = '步骤 1 使用 1024 个条目，随后再执行 1 次。';
+    const response: TranslationResponse = { blocks: [{
+      blockId: source.blockId,
+      translation,
+      alignmentGroups: [{ sourceSentenceIds: ['numeric-words-s-1'], targetSegments: [translation] }],
+      newTerms: [], warnings: [],
+    }] };
+
+    expect(validateBatchResponse([source], response).ok).toBe(true);
   });
 
   it('treats PDF line wrapping as whitespace instead of sentence boundaries', () => {

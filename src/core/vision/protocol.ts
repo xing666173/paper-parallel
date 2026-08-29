@@ -130,6 +130,40 @@ function normalizedColumn(value: unknown, bbox: NormalizedVisionBox): VisionColu
   return x + width / 2 < 500 ? 'left' : 'right';
 }
 
+function normalizedConfidence(value: unknown): number | undefined {
+  let numeric: number;
+  if (typeof value === 'number') {
+    numeric = value;
+  } else if (Array.isArray(value) && value.length === 1) {
+    return normalizedConfidence(value[0]);
+  } else if (value && typeof value === 'object') {
+    const object = value as Record<string, unknown>;
+    return normalizedConfidence(
+      object.score ?? object.value ?? object.confidence ?? object.percent ?? object.percentage,
+    );
+  } else if (typeof value === 'string') {
+    const trimmed = value.trim();
+    const qualitative = trimmed.toLocaleLowerCase();
+    if (/^(?:very\s+high|high|strong|confident)$/.test(qualitative)) return 0.95;
+    if (/^(?:medium|moderate)$/.test(qualitative)) return 0.75;
+    if (/^(?:low|weak)$/.test(qualitative)) return 0.5;
+    const percentage = trimmed.endsWith('%');
+    const ratio = trimmed.match(/^\s*(\d+(?:\.\d+)?)\s*\/\s*100\s*$/);
+    if (ratio) return Number(ratio[1]) / 100;
+    const numericText = percentage
+      ? trimmed.slice(0, -1).trim()
+      : trimmed.match(/(?:^|\D)(\d+(?:\.\d+)?)(?:\D|$)/)?.[1] ?? trimmed;
+    const parsed = Number(numericText);
+    if (!Number.isFinite(parsed)) return undefined;
+    numeric = percentage ? parsed / 100 : parsed;
+  } else {
+    return undefined;
+  }
+  if (!Number.isFinite(numeric)) return undefined;
+  if (numeric > 1 && numeric <= 100) return numeric / 100;
+  return numeric;
+}
+
 export function parseVisionPageAnalysis(value: unknown, expectedPageIndex: number): VisionPageAnalysis {
   const root = record(parseJson(value), 'root');
   const page = root.page;
@@ -141,10 +175,15 @@ export function parseVisionPageAnalysis(value: unknown, expectedPageIndex: numbe
 
   const regions = root.regions.map((input, index): VisionRegion => {
     const item = record(input, `regions[${index}]`);
-    const confidence = item.confidence;
-    if (typeof confidence !== 'number' || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
-      throw new VisionProtocolError(`Vision JSON regions[${index}].confidence 必须在 0..1`);
-    }
+    const parsedConfidence = normalizedConfidence(item.confidence);
+    // Confidence is advisory metadata. Geometry and semantic-type gates below
+    // remain strict, but an unusual provider wrapper (for example
+    // {score: 95} or a prose label) must not abort an otherwise usable page.
+    // Use a conservative midpoint so local reconciliation can still fall back
+    // to the PDF text layer when the region is uncertain.
+    const confidence = parsedConfidence !== undefined && parsedConfidence >= 0 && parsedConfidence <= 1
+      ? parsedConfidence
+      : 0.5;
     const captionValue = item.caption_bbox ?? item.captionBBox;
     const bbox = parseLayoutVisionBox(item.bbox, `regions[${index}].bbox`);
     return {

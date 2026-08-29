@@ -70,6 +70,39 @@ describe('vision: page analysis protocol', () => {
     });
   });
 
+  it.each([
+    [95, 0.95],
+    ['95%', 0.95],
+    ['0.95', 0.95],
+    ['95/100', 0.95],
+    ['high', 0.95],
+    ['confidence: 0.95', 0.95],
+    [{ score: 95 }, 0.95],
+    [[0.95], 0.95],
+  ])('normalizes confidence %p returned by Vision Exp', (confidence, expected) => {
+    const analysis = parseVisionPageAnalysis({
+      page: 1,
+      layout: 'double',
+      regions: [{
+        type: 'figure', bbox: [100, 200, 400, 300], column: 'left', confidence,
+      }],
+    }, 0);
+
+    expect(analysis.regions[0]?.confidence).toBe(expected);
+  });
+
+  it('uses conservative confidence when the provider returns unusable advisory metadata', () => {
+    const analysis = parseVisionPageAnalysis({
+      page: 1,
+      layout: 'single',
+      regions: [{
+        type: 'figure', bbox: [100, 200, 400, 300], column: 'full', confidence: 'not reported',
+      }],
+    }, 0);
+
+    expect(analysis.regions[0]?.confidence).toBe(0.5);
+  });
+
   it('infers a recoverable column label from validated normalized geometry', () => {
     const regions = parseVisionPageAnalysis({
       page: 1, layout: 'mixed', regions: [

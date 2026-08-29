@@ -230,6 +230,37 @@ describe('production pipeline preparation', () => {
     expect(prepared.assetRegions.some((asset) => asset.id === 'eq1')).toBe(false);
   });
 
+  it('splits prose around a parser-confirmed inline formula and preserves the formula as pixels', () => {
+    const doc = fixtureDoc();
+    const source = 'The multi-scalar multiplication is defined as Q = n k P, where each P is a point on a predetermined curve.';
+    const formula = doc.blocks.find((block) => block.id === 'eq1')!;
+    formula.text = source;
+    formula.rect = { x: 330, y: 500, w: 230, h: 12 };
+    formula.characterRects = [...source].map((ch, index) => ({
+      ch, sourceIndex: index, pageIndex: 0,
+      rect: { x: 330 + index * 2.1, y: 500, w: 2, h: 9 },
+    }));
+    doc.semanticUnits.find((unit) => unit.id === 'eq1')!.sourceText = source;
+
+    const prepared = prepareImmutableStructure(doc);
+
+    expect(prepared.regions[0].orderedUnitIds).toEqual(expect.arrayContaining([
+      'eq1-inline-before', 'eq1-inline-formula', 'eq1-inline-after',
+    ]));
+    expect(prepared.units.find((unit) => unit.id === 'eq1-inline-before')?.sourceText)
+      .toBe('The multi-scalar multiplication is defined as');
+    expect(prepared.units.find((unit) => unit.id === 'eq1-inline-after')?.sourceText)
+      .toBe('where each P is a point on a predetermined curve.');
+    expect(prepared.units.find((unit) => unit.id === 'eq1-inline-formula')).toMatchObject({
+      kind: 'formula', assetId: 'eq1-inline-formula', sourceText: undefined,
+    });
+    expect(prepared.assetRegions.find((asset) => asset.id === 'eq1-inline-formula'))
+      .toMatchObject({
+        kind: 'formula', pageIndex: 0,
+        rect: { y: 500, h: 16 },
+      });
+  });
+
   it('expands a formula crop upward across numeric-only extracted lines using character geometry', () => {
     const doc = fixtureDoc();
     const preceding = doc.blocks.find((block) => block.id === 'p1')!;
@@ -305,6 +336,77 @@ describe('production pipeline preparation', () => {
 
     expect(prepared.units.find((unit) => unit.id === 'p1')?.sourceText)
       .toBe('The process reads all trace data back from DRAM.');
+  });
+
+  it('clusters out-of-order formula glyph blocks into one immutable crop', () => {
+    const doc = fixtureDoc();
+    const formula = doc.blocks.find((block) => block.id === 'eq1')!;
+    formula.text = 'M =';
+    formula.rect = { x: 225, y: 205, w: 24, h: 10 };
+    formula.characterRects = [
+      { ch: 'M', sourceIndex: 0, pageIndex: 0, rect: { x: 225, y: 205, w: 9, h: 10 } },
+      { ch: '=', sourceIndex: 2, pageIndex: 0, rect: { x: 240, y: 205, w: 7, h: 10 } },
+    ];
+    doc.semanticUnits.find((unit) => unit.id === 'eq1')!.sourceText = formula.text;
+    const fragments = [
+      {
+        id: 'math-wide-left', rect: { x: 150, y: 110, w: 160, h: 120 }, text: '∑ l = 1',
+        chars: [
+          { ch: '∑', sourceIndex: 0, pageIndex: 0, rect: { x: 180, y: 198, w: 14, h: 28 } },
+          { ch: '1', sourceIndex: 1, pageIndex: 0, rect: { x: 183, y: 221, w: 4, h: 6 } },
+        ],
+      },
+      {
+        id: 'math-wide-right', rect: { x: 285, y: 150, w: 200, h: 120 }, text: '∑ l B = G',
+        chars: [
+          { ch: '∑', sourceIndex: 0, pageIndex: 0, rect: { x: 270, y: 198, w: 14, h: 28 } },
+          { ch: 'B', sourceIndex: 1, pageIndex: 0, rect: { x: 292, y: 205, w: 8, h: 10 } },
+          { ch: 'G', sourceIndex: 2, pageIndex: 0, rect: { x: 330, y: 205, w: 8, h: 10 } },
+        ],
+      },
+    ];
+    for (const fragment of fragments) {
+      doc.blocks.push({
+        id: fragment.id, docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: fragment.rect, order: 20, text: fragment.text,
+        characterRects: fragment.chars, splitAllowed: true, widthMode: 'column',
+      });
+      doc.semanticUnits.push({
+        id: fragment.id, kind: 'paragraph', sourceText: fragment.text,
+        protectedTokens: [], layoutRegionId: 'r1', order: 20,
+      });
+      doc.layoutRegions[0].orderedUnitIds.push(fragment.id);
+    }
+
+    const prepared = prepareImmutableStructure(doc);
+    const asset = prepared.assetRegions.find((candidate) => candidate.id === 'eq1')!;
+
+    expect(asset.rect.x).toBeLessThanOrEqual(177);
+    expect(asset.rect.x + asset.rect.w).toBeGreaterThanOrEqual(338);
+    expect(asset.rect.y).toBeLessThanOrEqual(196);
+    expect(asset.rect.y + asset.rect.h).toBeGreaterThanOrEqual(227);
+    expect(prepared.units.some((unit) => unit.id === 'math-wide-left')).toBe(false);
+    expect(prepared.units.some((unit) => unit.id === 'math-wide-right')).toBe(false);
+  });
+
+  it('removes symbol-font diagram labels after prose while keeping the immutable figure pixels', () => {
+    const doc = fixtureDoc();
+    const source = [
+      'The proof system remains secure and supports private computation.',
+      'POLY',
+      'MSM',
+      '݊ܣ INTT M NTT',
+      'ࡼ',
+      'PMULT',
+    ].join('\n');
+    const body = doc.blocks.find((block) => block.id === 'p1')!;
+    body.text = source;
+    doc.semanticUnits.find((unit) => unit.id === 'p1')!.sourceText = source;
+
+    const prepared = prepareImmutableStructure(doc);
+
+    expect(prepared.units.find((unit) => unit.id === 'p1')?.sourceText)
+      .toBe('The proof system remains secure and supports private computation.');
   });
 
   it('removes table rows from a mixed text block while preserving prose below the immutable table', () => {
@@ -388,6 +490,41 @@ describe('production pipeline preparation', () => {
 
     expect(prepared.units.some((unit) => unit.id === 'nested-index')).toBe(false);
     expect(prepared.assetRegions.some((asset) => asset.id === 'nested-index')).toBe(false);
+  });
+
+  it('keeps a short table caption even when its PDF box is nested in a table text aggregate', () => {
+    const doc = fixtureDoc();
+    doc.blocks.push({
+      id: 'short-table-caption', docId: 'en', type: 'caption', pageIndex: 0,
+      rect: { x: 70, y: 400, w: 45, h: 9 }, order: 4,
+      text: 'TABLE IV', splitAllowed: false, widthMode: 'column',
+    }, {
+      id: 'table-text-aggregate', docId: 'en', type: 'paragraph', pageIndex: 0,
+      rect: { x: 50, y: 390, w: 230, h: 120 }, order: 4.1,
+      text: 'Benchmark Architecture Throughput Latency Area Power Frequency',
+      splitAllowed: true, widthMode: 'column',
+    });
+    doc.semanticUnits.push({
+      id: 'short-table-caption', kind: 'caption', sourceText: 'TABLE IV', protectedTokens: [],
+      layoutRegionId: 'r1', order: 4,
+    }, {
+      id: 'table-text-aggregate', kind: 'paragraph',
+      sourceText: 'Benchmark Architecture Throughput Latency Area Power Frequency',
+      protectedTokens: [], layoutRegionId: 'r1', order: 4.1,
+    });
+    doc.layoutRegions[0].orderedUnitIds.push('short-table-caption', 'table-text-aggregate');
+
+    const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: [{
+      id: 'vision-table', kind: 'table', pageIndex: 0,
+      rect: { x: 50, y: 412, w: 230, h: 80 }, widthMode: 'column',
+      captionUnitId: 'short-table-caption',
+    }] });
+
+    expect(prepared.units.find((unit) => unit.id === 'short-table-caption')).toMatchObject({
+      kind: 'caption', sourceText: 'TABLE IV',
+    });
+    expect(prepared.assetRegions.find((asset) => asset.id === 'vision-table')?.captionUnitId)
+      .toBe('short-table-caption');
   });
 
   it('uses the raw block box when faulty character geometry hides a nested math fragment', () => {

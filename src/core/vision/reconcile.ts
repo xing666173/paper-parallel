@@ -140,6 +140,32 @@ function withAdjacentCaptionClearance(rect: Rect, caption: Rect | undefined, typ
   return rect;
 }
 
+function withoutFollowingTableCaption(
+  doc: Doc,
+  pageIndex: number,
+  rect: Rect,
+  ownCaptionId: string | undefined,
+  type: VisionRegion['type'],
+): Rect {
+  if (type !== 'table') return rect;
+  const bottom = rect.y + rect.h;
+  const nextCaption = doc.blocks
+    .filter((block) => {
+      if (block.id === ownCaptionId || block.pageIndex !== pageIndex || block.type !== 'caption') return false;
+      const horizontalOverlap = Math.max(0, Math.min(
+        block.rect.x + block.rect.w,
+        rect.x + rect.w,
+      ) - Math.max(block.rect.x, rect.x));
+      return horizontalOverlap > 0
+        && block.rect.y > rect.y + 12
+        && block.rect.y < bottom;
+    })
+    .sort((left, right) => left.rect.y - right.rect.y)[0];
+  if (!nextCaption) return rect;
+  const trimmedBottom = nextCaption.rect.y - 3;
+  return trimmedBottom > rect.y + 12 ? { ...rect, h: trimmedBottom - rect.y } : rect;
+}
+
 interface CharacterLine {
   y: number;
   bottom: number;
@@ -450,6 +476,7 @@ export function reconcileVisionLayout(
         : [caption?.rect, captionRect];
       rect = withoutCaption(rect, captionBoundaries, vision.type);
       rect = withAdjacentCaptionClearance(rect, caption?.rect, vision.type);
+      rect = withoutFollowingTableCaption(doc, page.pageIndex, rect, caption?.id, vision.type);
       rect = withoutTopMarginFurniture(doc, page.pageIndex, rect, vision.type);
       rect = withoutTrailingProse(doc, page.pageIndex, rect, vision.type);
       rect = withPrecedingTextClearance(doc, page.pageIndex, rect, vision.type);

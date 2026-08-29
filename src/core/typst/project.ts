@@ -210,8 +210,14 @@ export async function buildTypstProject(input: TypstProjectInput): Promise<Typst
       }
     }
     if (region.presentation === 'horizontal') {
-      const cells = segments.flatMap((segment) => segment.rendered.map((item) => item.content));
+      const cells = segments.flatMap((segment) => segment.rendered.map((item) => (
+        item.content.replace(/^#pagebreak\(weak: true\)\n/, '')
+      )));
       if (cells.length) {
+        // A horizontal band is itself placed at the document root. Individual
+        // span assets may already request a root page boundary, but carrying
+        // that directive into a grid cell is illegal in Typst (pagebreaks are
+        // not allowed inside containers). Keep one boundary around the band.
         regionBodies.push(`#pagebreak(weak: true)\n#pp-asset-group[\n#grid(columns: ${cells.length}, gutter: 6pt, ${cells.map((cell) => `[${cell}]`).join(', ')})\n]`);
       }
       continue;

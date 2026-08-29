@@ -48,7 +48,7 @@ const currentStageFraction = computed(() => {
     return Math.min(1, props.task.progress.completed / props.task.progress.total);
   }
   if (props.task.stage === 'analyzing-layout') {
-    const entry = latestEntry(['vision-layout-page', 'vision-layout-page-started']);
+    const entry = latestEntry(['vision-layout-page', 'vision-layout-page-phase', 'vision-layout-page-started']);
     if (!entry?.page || !entry.totalPages) return 0;
     const completed = entry.type === 'vision-layout-page' ? entry.page : entry.page - 1;
     return Math.min(0.99, Math.max(0, completed / entry.totalPages));

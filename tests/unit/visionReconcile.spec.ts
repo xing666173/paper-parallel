@@ -222,6 +222,30 @@ describe('vision: deterministic layout reconciliation', () => {
     expect(result.assetRegions[0]!.rect.y).toBeGreaterThanOrEqual(164);
   });
 
+  it('trims an overlong table crop before the following table caption', () => {
+    const doc = fixtureDoc();
+    const ownCaption = doc.blocks.find((block) => block.id === 'caption-1')!;
+    ownCaption.text = 'TABLE III';
+    ownCaption.rect = { x: 60, y: 60, w: 60, h: 9 };
+    doc.semanticUnits.find((unit) => unit.id === 'caption-1')!.sourceText = ownCaption.text;
+    doc.blocks.push({
+      id: 'caption-2', docId: 'en', type: 'caption', pageIndex: 0,
+      rect: { x: 60, y: 205, w: 60, h: 9 }, order: 3,
+      text: 'TABLE IV', splitAllowed: false, widthMode: 'column',
+    });
+
+    const result = reconcileVisionLayout(doc, [{
+      pageIndex: 0, layout: 'mixed', regions: [{
+        type: 'table', bbox: [80, 90, 400, 200], column: 'left',
+        captionBBox: [80, 70, 400, 20], confidence: 0.99,
+      }],
+    }]);
+
+    expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions[0]!.rect.y + result.assetRegions[0]!.rect.h)
+      .toBeLessThanOrEqual(202);
+  });
+
   it('adds clearance above a figure when a preceding text block touches its crop edge', () => {
     const doc = fixtureDoc();
     doc.blocks.push({

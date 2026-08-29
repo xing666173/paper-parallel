@@ -18,8 +18,10 @@ import { buildTranslationBatches, translationLimitsFor } from '../translate/batc
 import { runTranslationTask } from '../translate/coordinator';
 import {
   maskProtectedTokensForTranslation,
+  restoreMissingProtectedTokensFromTranslation,
   restoreProtectedTokensFromTranslation,
 } from '../translate/protected';
+import { buildSingleBlockRepairPlan } from '../translate/repair';
 import { chatCompletion } from '../translate/client';
 import { buildBatchPrompt, buildSystemPrompt, SYSTEM_PROMPT_VERSION } from '../translate/prompts';
 import type { TranslationBlockRequest, TranslationBlockResponse, TranslationRequest } from '../translate/protocol';
@@ -205,6 +207,10 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
           type: 'vision-layout-page-started', at: Date.now(), page: event.pageIndex + 1,
           totalPages: event.totalPages,
         }),
+        onPagePhase: (event) => options.onAiEvent?.({
+          type: 'vision-layout-page-phase', at: Date.now(), page: event.pageIndex + 1,
+          totalPages: event.totalPages, phase: event.phase,
+        }),
         onPage: (event) => options.onAiEvent?.({
           type: 'vision-layout-page', at: Date.now(), page: event.pageIndex + 1,
           totalPages: event.totalPages, cached: event.cached,
@@ -288,7 +294,10 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
         signal,
         request: async (batch, batchSignal) => {
           const requestThinkingMode = batch.recovery?.disableThinking ? 'disabled' : settings.thinkingMode;
-          const protectedMask = maskProtectedTokensForTranslation(batch.blocks);
+          const repairPlan = batch.recovery?.reason === 'validation' && batch.blocks.length === 1
+            ? buildSingleBlockRepairPlan(batch.blocks[0]!)
+            : undefined;
+          const protectedMask = maskProtectedTokensForTranslation(repairPlan?.blocks ?? batch.blocks);
           const requestBody: TranslationRequest = {
             documentContext: {
               title: doc.meta.title ?? settings.sourceFileName,
@@ -340,8 +349,14 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
             ],
           });
           const normalized = normalizeDeepSeekTranslationResponse(parseDeepSeekTranslationJson(completion.content));
+          const restored = restoreProtectedTokensFromTranslation(
+            normalized,
+            protectedMask.replacements,
+            protectedMask.blocks,
+          );
+          const merged = repairPlan ? repairPlan.merge(restored) : restored;
           return {
-            ...restoreProtectedTokensFromTranslation(normalized, protectedMask.replacements),
+            ...restoreMissingProtectedTokensFromTranslation(batch.blocks, merged),
             usage: completion.usage,
           };
         },
