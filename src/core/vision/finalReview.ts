@@ -70,7 +70,12 @@ function calibratedSeverity(
   confidence: number,
   evidence: string,
 ): VisionFinalIssue['severity'] {
-  if (type === 'asset_missing') return 'warning';
+  // Page-local absence is not proof of document-wide loss after natural
+  // repagination. Every translated segment and immutable asset has already
+  // passed the global marker/content/hash gates before this review. Keep the
+  // model's missing-text/asset observations as useful warnings, while visible
+  // clipping, overlap, corruption and changed assets remain blocking.
+  if (type === 'asset_missing' || type === 'missing_text') return 'warning';
   if (severity === 'severe') return severity;
   if (confidence >= 0.8
     && (type === 'asset_changed' || type === 'formula_changed' || type === 'table_changed')) return 'severe';
@@ -119,10 +124,11 @@ export function parseVisionFinalPageReport(value: unknown, expectedTargetPageInd
     return {
       targetPageIndex: expectedTargetPageIndex,
       type: item.type as VisionFinalIssueType,
-      // Asset markers and source hashes are checked deterministically before
-      // this page review. With natural repagination, a source-page asset can
-      // legitimately appear on an adjacent target page, so a page-local
-      // "missing" guess must not veto the whole document. Conversely,
+      // Text markers, asset markers, content coverage and source hashes are
+      // checked deterministically before this page review. With natural
+      // repagination, source-page content can legitimately appear on an
+      // adjacent target page, so a page-local "missing" guess must not veto
+      // the whole document. Conversely,
       // high-confidence unreadable or visibly orphaned glyphs are production
       // defects even when the model undersells them as a warning.
       severity: calibratedSeverity(

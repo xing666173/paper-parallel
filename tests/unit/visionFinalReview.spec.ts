@@ -8,10 +8,10 @@ import {
 import { buildVisionFinalReviewPrompt } from '../../src/core/vision/prompts';
 
 describe('vision: final PDF review', () => {
-  it('treats a nearly empty interior page caused by forced pagination as a production defect', () => {
+  it('allows sparse natural pagination while keeping visible corruption blocking', () => {
     const prompt = buildVisionFinalReviewPrompt(8, [7, 8]);
-    expect(prompt).toContain('near-empty interior target page');
-    expect(prompt).toContain('severe layout_drift');
+    expect(prompt).toContain('sparse target page');
+    expect(prompt).toContain('Do not call content missing merely from page density');
     expect(prompt).toContain('duplicated figure, table, formula, or algorithm');
     expect(prompt).toContain('scattered baseline text');
   });
@@ -19,17 +19,17 @@ describe('vision: final PDF review', () => {
   it('renders dense academic pages above CSS-pixel resolution for legible inspection', () => {
     expect(VISION_FINAL_REVIEW_RENDER_SCALE).toBeGreaterThanOrEqual(1.5);
   });
-  it('derives failure from a confident severe finding instead of trusting a model pass flag', () => {
+  it('derives failure from a confident visibly clipped finding instead of trusting a model pass flag', () => {
     const report = parseVisionFinalPageReport({
       target_page: 1,
       pass: true,
       issues: [{
-        type: 'missing_text', severity: 'severe', bbox: [0, 0, 1000, 1000],
-        confidence: 0.98, evidence: 'The target page is blank.',
+        type: 'clipped_text', severity: 'severe', bbox: [0, 0, 1000, 1000],
+        confidence: 0.98, evidence: 'Text strokes are cut at the page boundary.',
       }],
     }, 0);
     expect(report.pass).toBe(false);
-    expect(report.issues[0]).toMatchObject({ targetPageIndex: 0, type: 'missing_text' });
+    expect(report.issues[0]).toMatchObject({ targetPageIndex: 0, type: 'clipped_text' });
   });
 
   it('does not block on warnings or low-confidence severe guesses', () => {
@@ -85,6 +85,19 @@ describe('vision: final PDF review', () => {
         confidence: 0.99, evidence: 'Source-only figure is absent here.',
       }],
     }, 0);
+
+    expect(report.pass).toBe(true);
+    expect(report.issues[0]?.severity).toBe('warning');
+  });
+
+  it('does not let page-local missing-text density guesses veto globally verified content', () => {
+    const report = parseVisionFinalPageReport({
+      target_page: 10,
+      issues: [{
+        type: 'missing_text', severity: 'severe', bbox: [1, 1, 998, 998],
+        confidence: 0.99, evidence: 'Large portions of source text missing.',
+      }],
+    }, 9);
 
     expect(report.pass).toBe(true);
     expect(report.issues[0]?.severity).toBe('warning');
