@@ -1,4 +1,5 @@
 import type {
+  CharacterRect,
   Doc,
   LayoutRegion,
   Rect,
@@ -348,6 +349,10 @@ function nestedPdfFragmentIds(doc: Doc): Set<string> {
 function withoutScatteredMathLines(source: string): string {
   const lines = source.split(/\r?\n/).map((line) => line.replace(/[ \t]+/g, ' ').trim());
   const naturalWordCount = (line: string) => line.match(/[A-Za-z]{3,}/g)?.length ?? 0;
+  const ordinaryShortWords = new Set([
+    'a', 'an', 'as', 'at', 'be', 'by', 'do', 'for', 'if', 'in', 'is', 'it',
+    'no', 'of', 'on', 'or', 'so', 'to', 'up', 'we',
+  ]);
   if (!lines.some((line) => naturalWordCount(line) >= 2)) return source.trim();
   const cleaned = lines
     .filter((line) => {
@@ -364,6 +369,19 @@ function withoutScatteredMathLines(source: string): string {
       if (prefix.length > 20 || /^\s*\d+[.)]\s*$/.test(prefix)) return line;
       const fragmentPrefix = prefix.trim();
       if (!fragmentPrefix || /[A-Za-z]{3,}/.test(fragmentPrefix)) return line;
+      const shortWords = fragmentPrefix.match(/[A-Za-z]+/g) ?? [];
+      // Line wrapping legitimately places short English function words before
+      // the first 3+ letter word ("in the process", "to the pipeline",
+      // "on-chip"). They are prose, not detached equation glyphs. Likewise,
+      // an opening bracket belongs to the following word. Strip a prefix only
+      // when it carries actual mathematical evidence or consists solely of
+      // isolated one-letter variables such as "m P .".
+      if (/^[([{'"“‘]+\s*$/.test(fragmentPrefix)) return line;
+      if (shortWords.length > 0
+        && shortWords.every((word) => ordinaryShortWords.has(word.toLocaleLowerCase()))) return line;
+      const mathematicalPrefix = /[=+*/∑∫√≤≥≈≠⌈⌉λ𝑎-𝑧𝛼-𝜔α-ωΑ-Ω\d]/u.test(fragmentPrefix)
+        || (shortWords.length > 0 && shortWords.every((word) => word.length === 1));
+      if (!mathematicalPrefix) return line;
       return line.slice(firstWord.index);
     });
   return cleaned.join('\n').trim();
@@ -409,6 +427,39 @@ function withoutAssetTextLines(
   const blockText = block.text ?? '';
   const sourceOffset = blockText.indexOf(source);
   if (sourceOffset >= 0) {
+    const protectedFormulaOverlapIndexes = new Set<number>();
+    let lineOffset = 0;
+    for (const line of blockText.split(/\r?\n/)) {
+      const lineStart = lineOffset;
+      const lineEnd = lineStart + line.length;
+      lineOffset = lineEnd + 1;
+      if ((line.match(/[A-Za-z]{3,}/g)?.length ?? 0) < 5) continue;
+      const lineCharacters = block.characterRects.filter((character) => (
+        character.sourceIndex >= lineStart
+        && character.sourceIndex < lineEnd
+        && character.ch.trim().length > 0
+      ));
+      if (!lineCharacters.length) continue;
+      for (const asset of assets) {
+        const inlineOwner = asset.id.match(/^(.*)-inline-formula(?:-\d+)?$/)?.[1];
+        if (asset.kind !== 'formula' || !inlineOwner || inlineOwner === block.id) continue;
+        const overlapping = lineCharacters.filter((character) => {
+          if (character.pageIndex !== asset.pageIndex) return false;
+          const centerX = character.rect.x + character.rect.w / 2;
+          const centerY = character.rect.y + character.rect.h / 2;
+          return centerX >= asset.rect.x && centerX <= asset.rect.x + asset.rect.w
+            && centerY >= asset.rect.y && centerY <= asset.rect.y + asset.rect.h;
+        });
+        // Formula crops include a small safety pad for subscripts. If that pad
+        // merely clips part of a natural-language line owned by another PDF
+        // block, preserve the line instead of deleting a convincing-looking
+        // substring from the sentence. Formula assets derived from this block
+        // remain authoritative and still mask their exact inline expression.
+        if (overlapping.length > 0 && overlapping.length / lineCharacters.length < 0.6) {
+          overlapping.forEach((character) => protectedFormulaOverlapIndexes.add(character.sourceIndex));
+        }
+      }
+    }
     const masked = new Uint8Array(source.length);
     for (const character of block.characterRects) {
       const centerX = character.rect.x + character.rect.w / 2;
@@ -417,6 +468,7 @@ function withoutAssetTextLines(
         character.pageIndex === asset.pageIndex
         && centerX >= asset.rect.x && centerX <= asset.rect.x + asset.rect.w
         && centerY >= asset.rect.y && centerY <= asset.rect.y + asset.rect.h
+        && !protectedFormulaOverlapIndexes.has(character.sourceIndex)
       ));
       if (!insideAsset) continue;
       const localStart = character.sourceIndex - sourceOffset;
@@ -1091,6 +1143,175 @@ function splitMergedCaptionText(source: string): Array<{ kind: 'figure' | 'table
   })).filter((segment) => segment.text.length > 0);
 }
 
+const BIBLIOGRAPHY_HEADING = /^(references|bibliography|参考文献)\s*$/i;
+
+function physicalHeadingBlock(
+  unit: SemanticUnit,
+  blocks: ReadonlyMap<string, Doc['blocks'][number]>,
+): Doc['blocks'][number] | undefined {
+  return blocks.get(unit.sourceBlockId ?? unit.id);
+}
+
+/**
+ * PDF reading order is column-based, so a narrow citation-label column can be
+ * emitted after the wider bibliography body even when the References heading
+ * is physically above both. Rebuild a terminal bibliography from character
+ * geometry so labels, bodies, and wrapped lines share one physical sequence.
+ */
+function rebuildBibliographyFromGeometry(
+  doc: Doc,
+  inputUnits: SemanticUnit[],
+  regions: LayoutRegion[],
+  blocks: ReadonlyMap<string, Doc['blocks'][number]>,
+): SemanticUnit[] {
+  const heading = inputUnits
+    .filter((unit) => unit.kind === 'heading' && BIBLIOGRAPHY_HEADING.test(unit.sourceText?.trim() ?? ''))
+    .map((unit) => ({ unit, block: physicalHeadingBlock(unit, blocks) }))
+    .filter((candidate): candidate is { unit: SemanticUnit; block: Doc['blocks'][number] } => Boolean(candidate.block))
+    .sort((left, right) => left.block.pageIndex - right.block.pageIndex || left.block.rect.y - right.block.rect.y)[0];
+  if (!heading) return inputUnits;
+
+  const nextHeading = inputUnits
+    .filter((unit) => unit.kind === 'heading' && unit.id !== heading.unit.id)
+    .map((unit) => physicalHeadingBlock(unit, blocks))
+    .filter((block): block is Doc['blocks'][number] => Boolean(block))
+    .filter((block) => (
+      block.pageIndex > heading.block.pageIndex
+      || (block.pageIndex === heading.block.pageIndex
+        && block.rect.y > heading.block.rect.y + heading.block.rect.h + 2)
+    ))
+    .sort((left, right) => left.pageIndex - right.pageIndex || left.rect.y - right.rect.y)[0];
+
+  const headingPage = doc.pages[heading.block.pageIndex];
+  const headingPageMidpoint = (headingPage?.width ?? doc.meta.paperWidth) / 2;
+  const citationBlocks = doc.blocks.filter((block) => (
+    block.order > heading.block.order
+    && (!nextHeading || block.order < nextHeading.order)
+    && /^\s*\[[^\]]+\]/.test(block.text ?? '')
+  ));
+  const leftCitationBlocks = citationBlocks.filter((block) => block.rect.x < headingPageMidpoint);
+  const rightCitationBlocks = citationBlocks.filter((block) => block.rect.x >= headingPageMidpoint);
+  const multiColumnBibliography = leftCitationBlocks.length >= 2 && rightCitationBlocks.length >= 2;
+
+  const selectedBlockIds = new Set<string>();
+  const characters: CharacterRect[] = [];
+  const seenCharacters = new Set<string>();
+  for (const block of doc.blocks) {
+    for (const character of block.characterRects ?? []) {
+      const page = doc.pages[character.pageIndex];
+      if (!page) continue;
+      const centerY = character.rect.y + character.rect.h / 2;
+      const centerX = character.rect.x + character.rect.w / 2;
+      const headingIsNarrowLeftColumn = multiColumnBibliography
+        && heading.block.rect.w < page.width * 0.6
+        && heading.block.rect.x + heading.block.rect.w / 2 < page.width / 2;
+      const followsHeadingInLaterColumn = character.pageIndex === heading.block.pageIndex
+        && headingIsNarrowLeftColumn
+        && centerX >= page.width / 2;
+      const afterHeading = character.pageIndex > heading.block.pageIndex
+        || (character.pageIndex === heading.block.pageIndex
+          && (followsHeadingInLaterColumn || centerY > heading.block.rect.y + heading.block.rect.h + 2));
+      const beforeNextHeading = !nextHeading
+        || character.pageIndex < nextHeading.pageIndex
+        || (character.pageIndex === nextHeading.pageIndex && centerY < nextHeading.rect.y - 2);
+      if (!afterHeading || !beforeNextHeading || centerY <= page.height * 0.1 || centerY >= page.height * 0.92) {
+        continue;
+      }
+      const key = [
+        character.pageIndex,
+        Math.round(character.rect.x * 10),
+        Math.round(character.rect.y * 10),
+        Math.round(character.rect.w * 10),
+        character.ch,
+      ].join(':');
+      if (seenCharacters.has(key)) continue;
+      seenCharacters.add(key);
+      selectedBlockIds.add(block.id);
+      characters.push(character);
+    }
+  }
+
+  const rows: Array<typeof characters> = [];
+  const pageIndexes = [...new Set(characters.map((character) => character.pageIndex))]
+    .sort((left, right) => left - right);
+  for (const pageIndex of pageIndexes) {
+    const page = doc.pages[pageIndex]!;
+    const pageCharacters = characters.filter((character) => character.pageIndex === pageIndex);
+    const columns = multiColumnBibliography
+      ? [
+          pageCharacters.filter((character) => character.rect.x + character.rect.w / 2 < page.width / 2),
+          pageCharacters.filter((character) => character.rect.x + character.rect.w / 2 >= page.width / 2),
+        ]
+      : [pageCharacters];
+    for (const column of columns) {
+      column.sort((left, right) => left.rect.y - right.rect.y || left.rect.x - right.rect.x);
+      for (const character of column) {
+        const last = rows.at(-1);
+        if (last?.length
+          && last[0]!.pageIndex === character.pageIndex
+          && Math.abs(last[0]!.rect.y - character.rect.y) <= 1.5
+          && (!multiColumnBibliography
+            || (last[0]!.rect.x < page.width / 2) === (character.rect.x < page.width / 2))) {
+          last.push(character);
+        } else {
+          rows.push([character]);
+        }
+      }
+    }
+  }
+
+  const lines = rows.map((row) => row
+    .sort((left, right) => left.rect.x - right.rect.x)
+    .map((character) => character.ch)
+    .join('')
+    .replace(/\s+/g, ' ')
+    .trim())
+    .filter(Boolean);
+  const entries: string[] = [];
+  for (const rawLine of lines) {
+    const line = rawLine.replace(/^(\[[^\]]+\])(?=\S)/, '$1 ');
+    if (/^\[[^\]]+\]/.test(line)) {
+      entries.push(line);
+    } else if (entries.length && entries.at(-1)!.endsWith('-') && /^[a-z]/.test(line)) {
+      entries[entries.length - 1] = `${entries.at(-1)!.slice(0, -1)}${line}`;
+    } else if (entries.length) {
+      entries[entries.length - 1] += ` ${line}`;
+    }
+  }
+  // A single bracketed line can be an ordinary citation-bearing paragraph.
+  // Require a real multi-entry bibliography before changing document order.
+  if (entries.length < 2) return inputUnits;
+
+  const replacedIds = new Set(inputUnits
+    .filter((unit) => (
+      unit.id !== heading.unit.id
+      && (unit.parentId === heading.unit.id || selectedBlockIds.has(unit.sourceBlockId ?? unit.id))
+    ))
+    .map((unit) => unit.id));
+  const targetRegion = regions.find((region) => region.id === heading.unit.layoutRegionId);
+  if (!targetRegion) return inputUnits;
+
+  for (const region of regions) {
+    region.orderedUnitIds = region.orderedUnitIds.filter((unitId) => !replacedIds.has(unitId));
+  }
+  const rebuilt = entries.map((sourceText, index): SemanticUnit => ({
+    id: `${heading.unit.id}-reference-${index + 1}`,
+    parentId: heading.unit.id,
+    kind: 'reference',
+    sourceText,
+    protectedTokens: extractProtectedTokens(sourceText),
+    layoutRegionId: targetRegion.id,
+    order: heading.unit.order + (index + 1) / 1_000,
+  }));
+  let headingIndex = targetRegion.orderedUnitIds.indexOf(heading.unit.id);
+  if (headingIndex < 0) {
+    targetRegion.orderedUnitIds.push(heading.unit.id);
+    headingIndex = targetRegion.orderedUnitIds.length - 1;
+  }
+  targetRegion.orderedUnitIds.splice(headingIndex + 1, 0, ...rebuilt.map((unit) => unit.id));
+  return inputUnits.filter((unit) => !replacedIds.has(unit.id)).concat(rebuilt);
+}
+
 export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOptions = {}): PreparedImmutableStructure {
   const regions = doc.layoutRegions.map((region) => ({ ...region, orderedUnitIds: [...region.orderedUnitIds] }));
   const blocks = new Map(doc.blocks.map((block) => [block.id, block]));
@@ -1187,7 +1408,7 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
   }
 
   const bibliographySectionIds = new Set(units
-    .filter((unit) => unit.kind === 'heading' && /^(references|bibliography|参考文献)\s*$/i.test(unit.sourceText?.trim() ?? ''))
+    .filter((unit) => unit.kind === 'heading' && BIBLIOGRAPHY_HEADING.test(unit.sourceText?.trim() ?? ''))
     .map((unit) => unit.id));
   if (bibliographySectionIds.size) {
     units = units.map((unit) => unit.id !== unit.parentId && bibliographySectionIds.has(unit.parentId ?? '')
@@ -1207,6 +1428,8 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
       .match(/[A-Za-z]{3,}/g)?.length ?? 0;
     return wordsAfterCitation >= 5 ? { ...unit, kind: 'paragraph' as const } : unit;
   });
+
+  units = rebuildBibliographyFromGeometry(doc, units, regions, blocks);
 
   // PDF text extraction can merge adjacent captions from multiple visual
   // objects into one block (for example Figure 9 + Figure 10, or Figure 9 +
@@ -1272,6 +1495,7 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
 
   for (const asset of verifiedAssetRegions) {
     if (asset.kind !== 'table') continue;
+    const assetBottom = asset.rect.y + asset.rect.h;
     const numericRows = doc.blocks.filter((block) => {
       if (block.pageIndex !== asset.pageIndex || block.id === asset.captionUnitId) return false;
       const horizontalOverlap = Math.max(0, Math.min(
@@ -1283,16 +1507,25 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
         asset.rect.y + asset.rect.h,
       ) - Math.max(block.rect.y, asset.rect.y));
       const numericTokens = block.text?.match(/\d+(?:[.,]\d+)?/g) ?? [];
+      const visuallyContinuousLabels = block.rect.y <= assetBottom + 4
+        && block.rect.y + block.rect.h > asset.rect.y
+        && looksLikeVisualLabels(block);
       return horizontalOverlap / Math.max(1, Math.min(block.rect.w, asset.rect.w)) >= 0.2
-        && overlap / Math.max(1, block.rect.h) >= 0.6
+        && (overlap / Math.max(1, block.rect.h) >= 0.6 || visuallyContinuousLabels)
         && numericTokens.length >= 2;
     });
     if (!numericRows.length) continue;
     const left = Math.min(asset.rect.x, ...numericRows.map((block) => block.rect.x));
     const right = Math.max(asset.rect.x + asset.rect.w, ...numericRows.map((block) => block.rect.x + block.rect.w));
-    const assetBottom = asset.rect.y + asset.rect.h;
     const numericBottom = Math.max(...numericRows.map((block) => block.rect.y + block.rect.h)) + 2;
-    const bottom = Math.min(assetBottom, numericBottom);
+    const extendsThroughVisualLabels = numericRows.some((block) => (
+      block.rect.y <= assetBottom + 4
+      && block.rect.y + block.rect.h > assetBottom + 2
+      && looksLikeVisualLabels(block)
+    ));
+    const bottom = extendsThroughVisualLabels
+      ? Math.max(assetBottom, numericBottom)
+      : Math.min(assetBottom, numericBottom);
     asset.rect = {
       ...asset.rect,
       x: left,
@@ -1710,6 +1943,40 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
       region.orderedUnitIds.splice(nextIndex < 0 ? region.orderedUnitIds.length : nextIndex, 0, asset.id);
     }
     assetRegions.push(asset);
+  }
+
+  // Caption-derived table crops can be bounded from only one parser column
+  // even when the physical table spans both columns. Extend a shallow crop
+  // through an attached block of short labels/numeric cells before applying
+  // the final text mask. Natural-language paragraphs do not satisfy the
+  // visual-label predicate, so they remain outside the immutable region.
+  for (const asset of assetRegions) {
+    if (asset.kind !== 'table') continue;
+    const assetBottom = asset.rect.y + asset.rect.h;
+    const continuations = doc.blocks.filter((block) => {
+      if (block.pageIndex !== asset.pageIndex || block.id === asset.captionUnitId) return false;
+      const horizontalOverlap = Math.max(0, Math.min(
+        block.rect.x + block.rect.w,
+        asset.rect.x + asset.rect.w,
+      ) - Math.max(block.rect.x, asset.rect.x));
+      const numericTokens = block.text?.match(/\d+(?:[.,]\d+)?/g) ?? [];
+      return horizontalOverlap / Math.max(1, Math.min(block.rect.w, asset.rect.w)) >= 0.2
+        && block.rect.y <= assetBottom + 4
+        && block.rect.y + block.rect.h > assetBottom + 2
+        && looksLikeVisualLabels(block)
+        && numericTokens.length >= 2;
+    });
+    if (!continuations.length) continue;
+    const left = Math.min(asset.rect.x, ...continuations.map((block) => block.rect.x));
+    const right = Math.max(
+      asset.rect.x + asset.rect.w,
+      ...continuations.map((block) => block.rect.x + block.rect.w),
+    );
+    const bottom = Math.max(
+      assetBottom,
+      ...continuations.map((block) => block.rect.y + block.rect.h + 2),
+    );
+    asset.rect = { ...asset.rect, x: left, w: right - left, h: bottom - asset.rect.y };
   }
 
   const emptyAfterAssetMask = new Set<string>();

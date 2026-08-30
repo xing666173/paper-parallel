@@ -142,7 +142,13 @@ test('real API exact-paper PDF quality acceptance', async () => {
 
     const alignmentManifest = await page.evaluate(() => (
       globalThis as typeof globalThis & { __PP_DIAGNOSTIC_ALIGNMENT_MANIFEST__?: {
-        units: Array<{ source: Array<{ rects: unknown[] }>; target: Array<{ rects: unknown[] }> }>;
+        units: Array<{
+          id: string;
+          kind: string;
+          fallbackReason?: string;
+          source: Array<{ page: number; rects: unknown[] }>;
+          target: Array<{ page: number; rects: unknown[] }>;
+        }>;
       } }
     ).__PP_DIAGNOSTIC_ALIGNMENT_MANIFEST__ ?? null);
     expect(alignmentManifest).not.toBeNull();
@@ -153,6 +159,10 @@ test('real API exact-paper PDF quality acceptance', async () => {
 
     const outputDirectory = OUTPUT_DIRECTORY;
     await mkdir(outputDirectory, { recursive: true });
+    await writeFile(
+      path.join(outputDirectory, 'successful-alignment-manifest.json'),
+      JSON.stringify(alignmentManifest, null, 2),
+    );
     const successfulDiagnostics = await page.evaluate(() => {
       const debugGlobal = globalThis as typeof globalThis & {
         __PP_DIAGNOSTIC_LAYOUT__?: unknown;

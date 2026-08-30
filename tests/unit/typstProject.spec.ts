@@ -2,8 +2,16 @@ import { describe, expect, it } from 'vitest';
 import { buildAssetManifest } from '../../src/core/assets/extract';
 import { escapeTypstText } from '../../src/core/typst/escape';
 import { buildTypstProject } from '../../src/core/typst/project';
+import { buildAcademicTemplate } from '../../src/core/typst/template';
 
 describe('Typst project generation', () => {
+  it('keeps bibliography lines readable while reducing only paragraph spacing', () => {
+    const template = buildAcademicTemplate({ paperWidth: 612, paperHeight: 792 });
+
+    expect(template).toContain('set par(spacing: 1pt)');
+    expect(template).not.toContain('pp-reference(body) = block(above: 0pt, below: 0pt');
+  });
+
   it('emits ordered inherited regions, stable markers and immutable asset files', async () => {
     const figBytes = new Uint8Array([1, 2, 3]);
     const { assets } = await buildAssetManifest([{

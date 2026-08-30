@@ -109,7 +109,107 @@ describe('source PDF geometry', () => {
     expect(resolved.status).toBe('aligned');
   });
 
-  it('falls back to the source paragraph rectangle when sentence character geometry is incomplete', () => {
+  it('relocates a restored sentence to the original PDF block that owns its glyphs', () => {
+    const restored = 'rapidly evolving into the dominant bottleneck.';
+    const metadata = `arXiv:1234.5678 [cs.AR] ${restored}`;
+    const doc = emptyDoc();
+    doc.blocks = [
+      {
+        id: 'body', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 300, y: 200, w: 240, h: 200 }, order: 1,
+        splitAllowed: true, widthMode: 'column', text: 'Before. After.',
+        characterRects: [...'Before. After.'].map((ch, sourceIndex) => ({
+          ch, sourceIndex, pageIndex: 0, rect: { x: 300 + sourceIndex * 4, y: 200, w: 4, h: 10 },
+        })),
+      },
+      {
+        id: 'metadata', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 30, y: 300, w: 520, h: 20 }, order: 2,
+        splitAllowed: true, widthMode: 'span', text: metadata,
+        characterRects: [...metadata].map((ch, sourceIndex) => ({
+          ch, sourceIndex, pageIndex: 0, rect: { x: 30 + sourceIndex * 4, y: 300, w: 4, h: 10 },
+        })),
+      },
+    ];
+    const unit = alignmentUnit({
+      id: 'body-g-2', parentId: 'body', sourceBlockId: 'body',
+      kind: 'semantic-group', relation: '1:1', sourceText: restored,
+    });
+
+    const [resolved] = resolveSourceGeometry([unit], doc, []);
+    expect(resolved).toMatchObject({
+      status: 'aligned', confidence: 0.95,
+      fallbackReason: 'source-sentence-relocated-to-origin-block',
+      source: [{ page: 0 }],
+    });
+    expect(resolved.source[0].rects[0].y).toBe(300);
+  });
+
+  it('combines geometry when one sentence is split between body and metadata blocks', () => {
+    const prefix = 'According to the law, this front-end is ';
+    const suffix = 'rapidly evolving into the dominant bottleneck.';
+    const body = `Earlier sentence. ${prefix}`;
+    const metadata = `arXiv:1234.5678 [cs.AR] ${suffix}`;
+    const doc = emptyDoc();
+    doc.blocks = [
+      {
+        id: 'body', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 300, y: 200, w: 240, h: 60 }, order: 1,
+        splitAllowed: true, widthMode: 'column', text: body,
+        characterRects: [...body].map((ch, sourceIndex) => ({
+          ch, sourceIndex, pageIndex: 0, rect: { x: 300 + sourceIndex * 3, y: 200, w: 3, h: 10 },
+        })),
+      },
+      {
+        id: 'metadata', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 30, y: 240, w: 520, h: 20 }, order: 2,
+        splitAllowed: true, widthMode: 'span', text: metadata,
+        characterRects: [...metadata].map((ch, sourceIndex) => ({
+          ch, sourceIndex, pageIndex: 0, rect: { x: 30 + sourceIndex * 3, y: 240, w: 3, h: 10 },
+        })),
+      },
+    ];
+    const unit = alignmentUnit({
+      id: 'body-g-2', parentId: 'body', sourceBlockId: 'body',
+      kind: 'semantic-group', relation: '1:1', sourceText: `${prefix}${suffix}`,
+    });
+
+    const [resolved] = resolveSourceGeometry([unit], doc, []);
+    expect(resolved).toMatchObject({
+      status: 'aligned', confidence: 0.95,
+      fallbackReason: 'source-sentence-split-across-origin-blocks',
+    });
+    expect(resolved.source).toHaveLength(2);
+    expect(resolved.source.map((set) => set.rects[0].y)).toEqual([200, 240]);
+  });
+
+  it('tolerates a small diagram-label insertion inside an otherwise matching sentence', () => {
+    const source = 'The process begins with 1 the interpretive execution of the guest program.';
+    const target = 'The process begins with the interpretive execution of the guest program.';
+    const doc = emptyDoc();
+    doc.blocks = [{
+      id: 'body', docId: 'en', type: 'paragraph', pageIndex: 0,
+      rect: { x: 20, y: 30, w: 400, h: 20 }, order: 0,
+      splitAllowed: true, widthMode: 'column', text: source,
+      characterRects: [...source].map((ch, sourceIndex) => ({
+        ch, sourceIndex, pageIndex: 0, rect: { x: 20 + sourceIndex * 4, y: 30, w: 4, h: 10 },
+      })),
+    }];
+    const unit = alignmentUnit({
+      id: 'body-g-1', parentId: 'body', sourceBlockId: 'body',
+      kind: 'semantic-group', relation: '1:1', sourceText: target,
+    });
+
+    const [resolved] = resolveSourceGeometry([unit], doc, []);
+    expect(resolved).toMatchObject({
+      status: 'aligned',
+      fallbackReason: 'source-sentence-fuzzy-token-match',
+    });
+    expect(resolved.confidence).toBeGreaterThan(0.9);
+    expect(resolved.source[0].rects[0].w).toBeLessThan(doc.blocks[0].rect.w);
+  });
+
+  it('refuses to highlight a whole paragraph for an unresolved short sentence', () => {
     const doc = emptyDoc();
     doc.blocks = [{
       id: 'p1', docId: 'en', type: 'paragraph', pageIndex: 2,
@@ -119,6 +219,26 @@ describe('source PDF geometry', () => {
     const unit = alignmentUnit({
       id: 'p1-g-2', parentId: 'p1', sourceBlockId: 'p1',
       kind: 'semantic-group', relation: '1:1', sourceText: 'Second result.',
+    });
+
+    const [resolved] = resolveSourceGeometry([unit], doc, []);
+    expect(resolved).toMatchObject({
+      status: 'unmatched', confidence: 0,
+      fallbackReason: 'source-sentence-range-unresolved',
+      source: [],
+    });
+  });
+
+  it('allows block geometry only when a semantic group covers nearly the complete block', () => {
+    const doc = emptyDoc();
+    doc.blocks = [{
+      id: 'p1', docId: 'en', type: 'paragraph', pageIndex: 2,
+      rect: { x: 20, y: 30, w: 200, h: 80 }, order: 0,
+      splitAllowed: true, widthMode: 'column', text: 'Nearly the complete source paragraph.',
+    }];
+    const unit = alignmentUnit({
+      id: 'p1-g-1', parentId: 'p1', sourceBlockId: 'p1',
+      kind: 'semantic-group', relation: '1:1', sourceText: 'Nearly the complete source paragraph',
     });
 
     const [resolved] = resolveSourceGeometry([unit], doc, []);

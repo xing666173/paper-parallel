@@ -31,7 +31,11 @@ export function buildAcademicTemplate(options: AcademicTemplateOptions): string 
 #let pp-author(body) = block(below: 3pt)[#align(center)[#text(size: 10pt)[#body]]]
 #let pp-heading(body) = block(above: 7pt, below: 3pt)[#text(size: 12pt, weight: "bold")[#body]]
 #let pp-caption(body) = block(above: 3pt, below: 5pt)[#align(center)[#text(size: 9pt, weight: "bold")[#body]]]
-#let pp-reference(body) = text(size: 9pt)[#body]
+#let pp-reference(body) = {
+  set text(size: 8.5pt)
+  set par(spacing: 1pt)
+  body
+}
 #let pp-asset-group(body) = block(breakable: false, width: 100%, above: 2pt, below: 4pt)[#body]
 #let pp-asset(id, path, source-width, span: false) = {
   let body = block(breakable: false, width: 100%)[#align(center)[#pp-unit(id)[#image(path, width: source-width)]]]

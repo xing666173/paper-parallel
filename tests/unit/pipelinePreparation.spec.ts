@@ -116,6 +116,141 @@ describe('production pipeline preparation', () => {
     expect(requests.find((request) => request.blockId === 'refs')?.kind).toBe('heading');
   });
 
+  it('rebuilds split bibliography label and body columns in physical reading order', () => {
+    const doc = fixtureDoc();
+    const characterRows = (lines: string[], x: number, ys: number[]) => {
+      let sourceIndex = 0;
+      return lines.flatMap((line, rowIndex) => {
+        const row = [...line].map((ch, charIndex) => ({
+          ch,
+          sourceIndex: sourceIndex + charIndex,
+          pageIndex: 0,
+          rect: { x: x + charIndex * 5, y: ys[rowIndex]!, w: 4.5, h: 8 },
+        }));
+        sourceIndex += line.length + 1;
+        return row;
+      });
+    };
+    const bodyLines = [
+      'A. Author. A paral-',
+      'lel paper.',
+      'B. Writer. Second title.',
+      'continued venue.',
+    ];
+    doc.blocks.push(
+      {
+        id: 'reference-body', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 100, y: 630, w: 380, h: 60 }, order: 4,
+        text: bodyLines.join('\n'), characterRects: characterRows(bodyLines, 100, [630, 642, 660, 672]),
+        splitAllowed: true, widthMode: 'column',
+      },
+      {
+        id: 'references-heading', docId: 'en', type: 'section', pageIndex: 0,
+        rect: { x: 50, y: 600, w: 90, h: 14 }, order: 6,
+        text: 'References', splitAllowed: true, widthMode: 'span',
+      },
+      {
+        id: 'reference-labels', docId: 'en', type: 'reference', pageIndex: 0,
+        rect: { x: 50, y: 630, w: 45, h: 40 }, order: 7,
+        text: '[A1]\n[B2]', characterRects: characterRows(['[A1]', '[B2]'], 50, [630, 660]),
+        splitAllowed: true, widthMode: 'column',
+      },
+    );
+    doc.layoutRegions.push(
+      {
+        id: 'reference-body-region', mode: 'double', sourcePage: 0,
+        bounds: { x: 100, y: 630, w: 380, h: 60 }, orderedUnitIds: ['reference-body'],
+      },
+      {
+        id: 'reference-heading-region', mode: 'double', sourcePage: 0,
+        bounds: { x: 50, y: 600, w: 430, h: 100 },
+        orderedUnitIds: ['references-heading', 'reference-labels'],
+      },
+    );
+    doc.semanticUnits.push(
+      {
+        id: 'reference-body', kind: 'paragraph', sourceText: bodyLines.join('\n'),
+        protectedTokens: [], layoutRegionId: 'reference-body-region', order: 4,
+      },
+      {
+        id: 'references-heading', parentId: 'references-heading', kind: 'heading', sourceText: 'References',
+        protectedTokens: [], layoutRegionId: 'reference-heading-region', order: 6,
+      },
+      {
+        id: 'reference-labels', parentId: 'references-heading', kind: 'reference', sourceText: '[A1]\n[B2]',
+        protectedTokens: [], layoutRegionId: 'reference-heading-region', order: 7,
+      },
+    );
+
+    const prepared = prepareImmutableStructure(doc);
+    const references = prepared.units.filter((unit) => unit.parentId === 'references-heading' && unit.kind === 'reference');
+
+    expect(references.map((unit) => unit.sourceText)).toEqual([
+      '[A1] A. Author. A parallel paper.',
+      '[B2] B. Writer. Second title. continued venue.',
+    ]);
+    expect(prepared.units.some((unit) => unit.id === 'reference-body')).toBe(false);
+    expect(prepared.units.some((unit) => unit.id === 'reference-labels')).toBe(false);
+    expect(prepared.regions.find((region) => region.id === 'reference-heading-region')?.orderedUnitIds)
+      .toEqual(['references-heading', ...references.map((unit) => unit.id)]);
+  });
+
+  it('reads independent bibliography columns top-to-bottom instead of interleaving equal-height rows', () => {
+    const doc = fixtureDoc();
+    const characters = (text: string, x: number, y: number) => [...text].map((ch, index) => ({
+      ch,
+      sourceIndex: index,
+      pageIndex: 0,
+      rect: { x: x + index * 5, y, w: 4.5, h: 8 },
+    }));
+    const references = [
+      { id: 'left-ref-1', text: '[1] First left-column reference.', x: 50, y: 630, order: 5 },
+      { id: 'left-ref-2', text: '[2] Second left-column reference.', x: 50, y: 660, order: 6 },
+      { id: 'right-ref-3', text: '[3] First right-column reference.', x: 330, y: 100, order: 7 },
+      { id: 'right-ref-4', text: '[4] Second right-column reference.', x: 330, y: 130, order: 8 },
+    ];
+    doc.blocks.push({
+      id: 'two-column-references', docId: 'en', type: 'section', pageIndex: 0,
+      rect: { x: 50, y: 600, w: 90, h: 14 }, order: 4,
+      text: 'References', splitAllowed: true, widthMode: 'column',
+    }, ...references.map((reference) => ({
+      id: reference.id,
+      docId: 'en' as const,
+      type: 'reference' as const,
+      pageIndex: 0,
+      rect: { x: reference.x, y: reference.y, w: 230, h: 12 },
+      order: reference.order,
+      text: reference.text,
+      characterRects: characters(reference.text, reference.x, reference.y),
+      splitAllowed: true,
+      widthMode: 'column' as const,
+    })));
+    doc.layoutRegions.push({
+      id: 'two-column-reference-region', mode: 'double', sourcePage: 0,
+      bounds: { x: 50, y: 80, w: 510, h: 610 },
+      orderedUnitIds: ['two-column-references', ...references.map((reference) => reference.id)],
+    });
+    doc.semanticUnits.push({
+      id: 'two-column-references', parentId: 'two-column-references', kind: 'heading',
+      sourceText: 'References', protectedTokens: [], layoutRegionId: 'two-column-reference-region', order: 4,
+    }, ...references.map((reference) => ({
+      id: reference.id,
+      parentId: 'two-column-references',
+      kind: 'reference' as const,
+      sourceText: reference.text,
+      protectedTokens: [],
+      layoutRegionId: 'two-column-reference-region',
+      order: reference.order,
+    })));
+
+    const prepared = prepareImmutableStructure(doc);
+    const rebuilt = prepared.units.filter((unit) => (
+      unit.parentId === 'two-column-references' && unit.kind === 'reference'
+    ));
+
+    expect(rebuilt.map((unit) => unit.sourceText)).toEqual(references.map((reference) => reference.text));
+  });
+
   it('recovers a citation-leading body continuation that was misclassified as a reference', () => {
     const doc = fixtureDoc();
     doc.blocks.push({
@@ -492,6 +627,62 @@ describe('production pipeline preparation', () => {
       .toEqual({ x: 52, y: 415, w: 238, h: 67 });
   });
 
+  it('extends a shallow table header crop through an attached visual-label table body', () => {
+    const doc = fixtureDoc();
+    const tableText = [
+      'Optional', 'Operations', 'Elliptic Curves',
+      'Groth BLS12-381, MNT4753,', 'BLS12-377',
+      'Groth', 'BLS12-381', 'Groth', 'MNT4753',
+      'MSM', 'BLS12-377', 'MSM', 'BLS12-377',
+    ].join('\n');
+    doc.blocks.push({
+      id: 'continued-table-body', docId: 'en', type: 'paragraph', pageIndex: 0,
+      rect: { x: 330, y: 430, w: 230, h: 110 }, order: 5,
+      text: tableText, splitAllowed: true, widthMode: 'column',
+    });
+    doc.semanticUnits.push({
+      id: 'continued-table-body', kind: 'paragraph', sourceText: tableText,
+      protectedTokens: [], layoutRegionId: 'r1', order: 5,
+    });
+    doc.layoutRegions[0].orderedUnitIds.push('continued-table-body');
+
+    const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: [{
+      id: 'table', kind: 'table', pageIndex: 0,
+      rect: { x: 52, y: 415, w: 508, h: 35 }, widthMode: 'span',
+    }] });
+
+    const table = prepared.assetRegions.find((asset) => asset.id === 'table')!;
+    expect(table.rect.y + table.rect.h).toBeGreaterThanOrEqual(542);
+    expect(prepared.units.some((unit) => unit.id === 'continued-table-body')).toBe(false);
+  });
+
+  it('does not let another block inline-formula padding erase overlapping prose', () => {
+    const doc = fixtureDoc();
+    const formulaText = 'The equation is defined as Q = n k P, where n is fixed.';
+    const formula = doc.blocks.find((block) => block.id === 'eq1')!;
+    formula.text = formulaText;
+    formula.rect = { x: 50, y: 500, w: 300, h: 10 };
+    formula.characterRects = [...formulaText].map((ch, sourceIndex) => ({
+      ch, sourceIndex, pageIndex: 0,
+      rect: { x: 50 + sourceIndex * 5, y: 500, w: 4.8, h: 9 },
+    }));
+    doc.semanticUnits.find((unit) => unit.id === 'eq1')!.sourceText = formulaText;
+
+    const proseText = 'task and these subtasks can be expressed by Formula (1).';
+    const prose = doc.blocks.find((block) => block.id === 'p1')!;
+    prose.text = proseText;
+    prose.rect = { x: 100, y: 512, w: 300, h: 10 };
+    prose.characterRects = [...proseText].map((ch, sourceIndex) => ({
+      ch, sourceIndex, pageIndex: 0,
+      rect: { x: 100 + sourceIndex * 5, y: 512, w: 4.8, h: 9 },
+    }));
+    doc.semanticUnits.find((unit) => unit.id === 'p1')!.sourceText = proseText;
+
+    const prepared = prepareImmutableStructure(doc);
+
+    expect(prepared.units.find((unit) => unit.id === 'p1')?.sourceText).toBe(proseText);
+  });
+
   it('removes a trailing cluster of extracted chart labels from prose', () => {
     const doc = fixtureDoc();
     const source = [
@@ -781,6 +972,30 @@ describe('production pipeline preparation', () => {
 
     expect(prepared.units.find((unit) => unit.id === 'p1')?.sourceText)
       .toBe('Specifically, as shown in Figure 6,');
+  });
+
+  it('preserves short function words and opening punctuation at wrapped prose line starts', () => {
+    const doc = fixtureDoc();
+    doc.pageCount = 2;
+    doc.pages.push({ pageIndex: 1, width: 612, height: 792, columns: [] });
+    const source = [
+      'The first page contains ordinary prose.',
+      'in the process, the trace is generated.',
+      'to the pipeline, the result is returned.',
+      'on-the-fly conversion remains enabled.',
+      '(FastModRed) performs the reduction.',
+    ].join('\n');
+    const block = doc.blocks.find((candidate) => candidate.id === 'p1')!;
+    block.text = source;
+    block.fragments = [
+      { pageIndex: 0, rect: block.rect },
+      { pageIndex: 1, rect: { x: 50, y: 100, w: 230, h: 50 } },
+    ];
+    doc.semanticUnits.find((unit) => unit.id === 'p1')!.sourceText = source;
+
+    const prepared = prepareImmutableStructure(doc);
+
+    expect(prepared.units.find((unit) => unit.id === 'p1')?.sourceText).toBe(source);
   });
 
   it('removes symbol-only extraction lines next to a verified display formula', () => {
@@ -1260,6 +1475,35 @@ describe('production pipeline preparation', () => {
       'table-caption', 'table-caption-asset', 'after-table',
     ]));
     expect(prepared.regions[0].orderedUnitIds).not.toContain('table-body');
+  });
+
+  it('extends a caption-derived span table through a right-column label block', () => {
+    const doc = fixtureDoc();
+    const rightLabels = [
+      'Optional', 'Operations', 'Elliptic Curves',
+      'Groth BLS12-381, MNT4753,', 'BLS12-377',
+      'Groth', 'BLS12-381', 'Groth', 'MNT4753',
+      'MSM', 'BLS12-377', 'MSM', 'BLS12-377',
+    ].join('\n');
+    doc.blocks.push(
+      { id: 'cross-table-caption', docId: 'en', type: 'caption', pageIndex: 0, rect: { x: 103, y: 230, w: 389, h: 18 }, order: 4, text: 'Table 9: Optional operations', splitAllowed: false, widthMode: 'span' },
+      { id: 'cross-table-right', docId: 'en', type: 'paragraph', pageIndex: 0, rect: { x: 324, y: 257, w: 139, h: 116 }, order: 5, text: rightLabels, splitAllowed: true, widthMode: 'column' },
+      { id: 'cross-table-span-boundary', docId: 'en', type: 'paragraph', pageIndex: 0, rect: { x: 103, y: 279, w: 389, h: 12 }, order: 6, text: 'Curve 12 381 4753', splitAllowed: true, widthMode: 'span' },
+    );
+    doc.semanticUnits.push(
+      { id: 'cross-table-caption', kind: 'caption', sourceText: 'Table 9: Optional operations', protectedTokens: [], layoutRegionId: 'r1', order: 4 },
+      { id: 'cross-table-right', kind: 'paragraph', sourceText: rightLabels, protectedTokens: [], layoutRegionId: 'r1', order: 5 },
+      { id: 'cross-table-span-boundary', kind: 'paragraph', sourceText: 'Curve 12 381 4753', protectedTokens: [], layoutRegionId: 'r1', order: 6 },
+    );
+    doc.layoutRegions[0].orderedUnitIds.push(
+      'cross-table-caption', 'cross-table-right', 'cross-table-span-boundary',
+    );
+
+    const prepared = prepareImmutableStructure(doc);
+    const table = prepared.assetRegions.find((asset) => asset.id === 'cross-table-caption-asset')!;
+
+    expect(table.rect.y + table.rect.h).toBeGreaterThanOrEqual(375);
+    expect(prepared.units.some((unit) => unit.id === 'cross-table-right')).toBe(false);
   });
 
   it('trims an over-tall Vision table crop before the following prose paragraph', () => {
