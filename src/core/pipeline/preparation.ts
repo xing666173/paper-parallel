@@ -223,12 +223,19 @@ function proseHeavyFormulaRegion(doc: Doc, asset: DetectedAssetRegion): boolean 
     .trim();
   const words = text.match(/[A-Za-z]{3,}/g) ?? [];
   const functionWords = text.match(/\b(?:the|a|an|and|or|of|to|in|for|with|that|this|is|are|was|were|as|by|from|on|at)\b/gi) ?? [];
+  const alphabeticCharacters = text.match(/[A-Za-z]/g)?.length ?? 0;
   // Vision often encloses an entire prose line merely because it contains an
   // inline equation. Keeping that wide rectangle as pixels leaves the prose
   // untranslated. Reject only regions whose inside text is clearly prose;
   // the inline-formula geometry pass below will preserve the mathematical
   // substring instead.
-  return words.length >= 6 && functionWords.length >= 2;
+  return (words.length >= 6 && functionWords.length >= 2)
+    // A hallucinated Vision formula box is sometimes only one short prose
+    // continuation line (for example, "architecture to accelerate it").
+    // Four natural words plus a function word are already incompatible with
+    // a tight display-formula crop. Formula symbols embedded in a sentence
+    // are reconstructed later from their character geometry.
+    || (words.length >= 3 && functionWords.length >= 1 && alphabeticCharacters >= 18);
 }
 
 function trimTableBeforeFollowingProse(
@@ -866,6 +873,27 @@ function withoutLeadingFormulaLines(source: string): string {
   return source;
 }
 
+function withoutDetachedVariableLines(source: string): string {
+  const lines = source.split(/\r?\n/);
+  if (lines.length < 2) return source;
+  const naturalLine = lines.some((line) => {
+    const words = line.match(/[A-Za-z]{3,}/g) ?? [];
+    const functionWords = line.match(
+      /\b(?:the|a|an|and|or|of|to|in|for|with|that|this|is|are|was|were|as|by|from|on|at|each)\b/gi,
+    ) ?? [];
+    return words.length >= 3 && functionWords.length >= 1;
+  });
+  if (!naturalLine) return source;
+  return lines
+    // PDF symbol-font subscripts are often emitted as late standalone lines
+    // such as `i` or `i i`. Their visible glyphs are already inside the
+    // neighbouring immutable formula crop; keeping the duplicate text makes
+    // them appear as scattered prose.
+    .filter((line) => !/^\s*[A-Za-z](?:\s+[A-Za-z]){0,3}\s*$/.test(line))
+    .join('\n')
+    .trim();
+}
+
 function formulaGlyphCluster(
   doc: Doc,
   anchor: Doc['blocks'][number],
@@ -1069,6 +1097,11 @@ function inlineFormulaFragment(
 
 function normalizePdfNumericSpacing(source: string): string {
   return source
+    // Symbol-font vector accents can surface as C0 control codes (notably
+    // U+0003) in PDF.js text. They cannot be rendered by Typst and otherwise
+    // become visible replacement squares. The surrounding variable and
+    // subscript remain readable; immutable source pixels retain decoration.
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
     // PDF.js may emit a decimal point and its digits as separate glyph runs.
     // Canonicalizing only digit-surrounded punctuation keeps prose and formula
     // punctuation intact while preventing `2 . 08` from becoming four
@@ -1229,6 +1262,30 @@ function trailingVisualLabelClusterTop(block: Doc['blocks'][number]): number | u
   return Math.max(1, Math.min(...characters.map((character) => character.rect.y)) - 6);
 }
 
+function extendFigureThroughPrecedingVisualLabels(doc: Doc, asset: DetectedAssetRegion): void {
+  if (asset.kind !== 'figure' || !asset.captionUnitId) return;
+  const caption = doc.blocks.find((block) => block.id === asset.captionUnitId);
+  if (!caption || embeddedCaptionText(caption.text ?? '', 'figure') !== (caption.text ?? '').trim()) return;
+  const pageWidth = doc.pages[asset.pageIndex]?.width ?? doc.meta.paperWidth;
+  const candidates = doc.blocks
+    .filter((block) => (
+      block.id !== caption.id
+      && block.pageIndex === asset.pageIndex
+      && sameVisualColumn(block, caption, pageWidth)
+      && block.rect.y < caption.rect.y
+      && block.rect.y + block.rect.h >= asset.rect.y - 24
+    ))
+    .flatMap((block) => {
+      const top = trailingVisualLabelClusterTop(block);
+      return top !== undefined && top < asset.rect.y ? [top] : [];
+    });
+  if (!candidates.length) return;
+  const top = Math.max(...candidates);
+  if (asset.rect.y - top > (doc.pages[asset.pageIndex]?.height ?? doc.meta.paperHeight) * 0.25) return;
+  const bottom = asset.rect.y + asset.rect.h;
+  asset.rect = { ...asset.rect, y: top, h: bottom - top };
+}
+
 function looksLikeNumericTableBody(block: Doc['blocks'][number]): boolean {
   const text = block.text ?? '';
   const numericTokens = text.match(/\d+(?:[.,]\d+)?/g)?.length ?? 0;
@@ -1269,6 +1326,20 @@ function clampColumnTableToGutter(doc: Doc, asset: DetectedAssetRegion): void {
     const right = asset.rect.x + asset.rect.w;
     asset.rect = { ...asset.rect, x: midpoint + gutter, w: right - midpoint - gutter };
   }
+}
+
+function clampSpanFigureToCaptionColumn(doc: Doc, asset: DetectedAssetRegion): void {
+  if (asset.kind !== 'figure' || asset.widthMode !== 'span' || !asset.captionUnitId) return;
+  const page = doc.pages[asset.pageIndex];
+  const caption = doc.blocks.find((block) => block.id === asset.captionUnitId);
+  if (!page || !caption || caption.widthMode !== 'column' || asset.rect.w < page.width * 0.62) return;
+  const column = visualColumnBounds(doc, caption);
+  if (column.w > page.width * 0.55) return;
+  const left = Math.max(asset.rect.x, column.x);
+  const right = Math.min(asset.rect.x + asset.rect.w, column.x + column.w);
+  if (right - left < page.width * 0.2) return;
+  asset.rect = { ...asset.rect, x: left, w: right - left };
+  asset.widthMode = 'column';
 }
 
 function detectedPageFurnitureIds(doc: Doc): Set<string> {
@@ -1419,6 +1490,25 @@ function detectedAlgorithmAssets(doc: Doc): DetectedAssetRegion[] {
     });
   }
   return assets;
+}
+
+function embeddedCaptionText(source: string, kind: 'figure' | 'table'): string | undefined {
+  const lines = source.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const start = lines.findIndex((line) => (
+    kind === 'figure' ? isFigureCaptionText(line) : isTableCaptionText(line)
+  ));
+  if (start < 0) return undefined;
+  const caption = [lines[start]!];
+  if (/[.!?。！？]\s*$/.test(lines[start]!)) return caption[0];
+  for (const line of lines.slice(start + 1, start + 4)) {
+    if (isFigureCaptionText(line) || isTableCaptionText(line)) break;
+    const words = line.match(/[A-Za-z]{2,}/g) ?? [];
+    const functionWords = line.match(/\b(?:the|a|an|and|or|of|to|in|for|with|that|this|is|are|was|were|as|by|from|on|at|has|have)\b/gi) ?? [];
+    if (words.length < 4 || functionWords.length < 1) break;
+    caption.push(line);
+    if (/[.!?。！？]\s*$/.test(line)) break;
+  }
+  return caption.join(' ');
 }
 
 function splitMergedCaptionText(source: string): Array<{ kind: 'figure' | 'table'; text: string }> {
@@ -1644,7 +1734,33 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
     .concat(algorithmAssets);
   // Clamp before any coordinate-based text masking so a coarse table box
   // cannot delete the first glyphs of the neighbouring prose column.
-  verifiedAssetRegions.forEach((asset) => clampColumnTableToGutter(doc, asset));
+  verifiedAssetRegions.forEach((asset) => {
+    clampSpanFigureToCaptionColumn(doc, asset);
+    clampColumnTableToGutter(doc, asset);
+    extendFigureThroughPrecedingVisualLabels(doc, asset);
+  });
+  // PDF.js can aggregate an entire diagram's labels with its trailing caption.
+  // When reconciliation binds that block as the caption owner, translate only
+  // the actual caption lines; the verified asset retains the preceding labels.
+  const captionAssetCounts = new Map<string, number>();
+  for (const asset of verifiedAssetRegions) {
+    if (asset.captionUnitId) {
+      captionAssetCounts.set(asset.captionUnitId, (captionAssetCounts.get(asset.captionUnitId) ?? 0) + 1);
+    }
+  }
+  for (const asset of verifiedAssetRegions) {
+    if (!asset.captionUnitId || (asset.kind !== 'figure' && asset.kind !== 'table')) continue;
+    if (captionAssetCounts.get(asset.captionUnitId) !== 1) continue;
+    const unit = units.find((candidate) => candidate.id === asset.captionUnitId);
+    const block = blocks.get(asset.captionUnitId);
+    const caption = block ? embeddedCaptionText(block.text ?? '', asset.kind) : undefined;
+    if (!unit || !caption) continue;
+    if (unit.kind === 'paragraph' || unit.kind === 'list-item') {
+      unit.kind = asset.kind === 'table' ? 'table-title' : 'caption';
+    }
+    unit.sourceText = caption;
+    unit.protectedTokens = extractProtectedTokens(caption);
+  }
   const verifiedCaptionIds = new Set(verifiedAssetRegions
     .map((asset) => asset.captionUnitId)
     .filter((id): id is string => Boolean(id)));
@@ -1813,6 +1929,9 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
   for (const asset of verifiedAssetRegions) {
     if (asset.kind !== 'table') continue;
     const assetBottom = asset.rect.y + asset.rect.h;
+    const caption = asset.captionUnitId ? blocks.get(asset.captionUnitId) : undefined;
+    const captionBottom = caption ? caption.rect.y + caption.rect.h : undefined;
+    const attachedBodyIds = new Set<string>();
     const numericRows = doc.blocks.filter((block) => {
       if (block.pageIndex !== asset.pageIndex || block.id === asset.captionUnitId) return false;
       const horizontalOverlap = Math.max(0, Math.min(
@@ -1824,11 +1943,18 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
         asset.rect.y + asset.rect.h,
       ) - Math.max(block.rect.y, asset.rect.y));
       const numericTokens = block.text?.match(/\d+(?:[.,]\d+)?/g) ?? [];
+      const lines = (block.text ?? '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+      const attachedCaptionBody = captionBottom !== undefined
+        && block.rect.y >= captionBottom - 1
+        && block.rect.y <= captionBottom + 18
+        && lines.length >= 4
+        && numericTokens.length >= 4;
+      if (attachedCaptionBody) attachedBodyIds.add(block.id);
       const visuallyContinuousLabels = block.rect.y <= assetBottom + 4
         && block.rect.y + block.rect.h > asset.rect.y
         && looksLikeVisualLabels(block);
       return horizontalOverlap / Math.max(1, Math.min(block.rect.w, asset.rect.w)) >= 0.2
-        && (overlap / Math.max(1, block.rect.h) >= 0.6 || visuallyContinuousLabels)
+        && (overlap / Math.max(1, block.rect.h) >= 0.6 || visuallyContinuousLabels || attachedCaptionBody)
         && numericTokens.length >= 2;
     });
     if (!numericRows.length) continue;
@@ -1840,14 +1966,18 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
       && block.rect.y + block.rect.h > assetBottom + 2
       && looksLikeVisualLabels(block)
     ));
-    const bottom = extendsThroughVisualLabels
+    const bottom = extendsThroughVisualLabels || attachedBodyIds.size > 0
       ? Math.max(assetBottom, numericBottom)
       : Math.min(assetBottom, numericBottom);
+    const top = Math.min(asset.rect.y, ...numericRows
+      .filter((block) => attachedBodyIds.has(block.id))
+      .map((block) => Math.max(captionBottom! + 2, block.rect.y - 2)));
     asset.rect = {
       ...asset.rect,
       x: left,
+      y: top,
       w: right - left,
-      h: bottom > asset.rect.y + 12 ? bottom - asset.rect.y : asset.rect.h,
+      h: bottom > top + 12 ? bottom - top : asset.rect.h,
     };
   }
 
@@ -1882,10 +2012,33 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
     }
     if (!fragments.length) continue;
 
+    const previousUnit = [...units]
+      .filter((candidate) => candidate.order < unit.order && Boolean(candidate.sourceText))
+      .sort((left, right) => right.order - left.order)
+      .find((candidate) => {
+        const candidateBlock = blocks.get(candidate.sourceBlockId ?? candidate.id);
+        return candidateBlock
+          && candidateBlock.pageIndex === block.pageIndex
+          && sameVisualColumn(candidateBlock, block, doc.pages[block.pageIndex]?.width ?? doc.meta.paperWidth);
+      });
+    const previousBlock = previousUnit ? blocks.get(previousUnit.sourceBlockId ?? previousUnit.id) : undefined;
+    if (previousUnit?.sourceText && previousBlock) {
+      const cleanedPrevious = withoutTrailingFormulaFragment(previousUnit.sourceText);
+      if (cleanedPrevious.length < previousUnit.sourceText.trim().length) {
+        // The detached text-layer symbol can share a bounding row with the
+        // preceding prose even though the visible operator is already inside
+        // the tight inline-formula crop. Remove the duplicate source text but
+        // do not enlarge the crop into that prose baseline.
+        previousUnit.sourceText = cleanedPrevious;
+        previousUnit.protectedTokens = extractProtectedTokens(cleanedPrevious);
+      }
+    }
+
     const replacementUnits: SemanticUnit[] = [];
     let cursor = 0;
     const pushText = (text: string, id: string) => {
-      const cleaned = text.trim().replace(/^[,;:]\s*/, '').replace(/[,;:]\s*$/, '');
+      const cleaned = withoutDetachedVariableLines(text)
+        .trim().replace(/^[,;:]\s*/, '').replace(/[,;:]\s*$/, '');
       if (!cleaned) return;
       replacementUnits.push({
         ...unit,
@@ -1905,6 +2058,43 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
       const assetId = index === 0
         ? `${unit.id}-inline-formula`
         : `${unit.id}-inline-formula-${index + 1}`;
+      const overlappingPrevious = assetRegions
+        .filter((asset) => (
+          asset.kind === 'formula'
+          && asset.pageIndex === fragment.pageIndex
+          && asset.id.includes('-inline-formula')
+          && !asset.id.startsWith(`${unit.id}-`)
+        ))
+        .sort((left, right) => right.rect.y - left.rect.y)
+        .find((asset) => {
+          const horizontalGap = Math.max(
+            0,
+            asset.rect.x - (fragment.rect.x + fragment.rect.w),
+            fragment.rect.x - (asset.rect.x + asset.rect.w),
+          );
+          const verticalGap = Math.max(
+            0,
+            asset.rect.y - (fragment.rect.y + fragment.rect.h),
+            fragment.rect.y - (asset.rect.y + asset.rect.h),
+          );
+          return horizontalGap <= 12 && verticalGap <= 2;
+      });
+      if (overlappingPrevious) {
+        // The later block is a duplicate limit/subscript extraction from the
+        // same visual formula. Its rectangle can also span surrounding prose,
+        // so retain the earlier tight crop instead of taking their union.
+        const fragmentSource = unit.sourceText.slice(fragment.absoluteStart, fragment.absoluteEnd);
+        const baseVariable = (fragmentSource.match(/\b[A-Za-z]\b/g) ?? [])
+          .filter((candidate) => !/^[ij]$/i.test(candidate))
+          .at(-1);
+        const precedingText = replacementUnits.at(-1);
+        if (baseVariable && precedingText?.sourceText) {
+          precedingText.sourceText = `${precedingText.sourceText} ${baseVariable}`;
+          precedingText.protectedTokens = extractProtectedTokens(precedingText.sourceText);
+        }
+        cursor = fragment.absoluteEnd;
+        continue;
+      }
       replacementUnits.push({
         ...unit,
         id: assetId,

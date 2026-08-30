@@ -171,6 +171,11 @@ describe('parser: lines -> blocks', () => {
     expect(isTableCaptionText(merged)).toBe(true);
   });
 
+  it('recognizes an IEEE Fig. caption whose description starts with The', () => {
+    expect(isFigureCaptionText('Fig. 10. The overall architecture of PipeZK.')).toBe(true);
+    expect(isFigureCaptionText('Figure 10. The architecture is discussed below.')).toBe(false);
+  });
+
   it('在块文本中保留 PDF.js 文本项的字符索引和真实坐标', () => {
     const result = parsePageItems([
       { str: 'AB', x: 10, y: 20, w: 12, h: 10 },

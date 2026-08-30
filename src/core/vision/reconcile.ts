@@ -45,12 +45,40 @@ function captionFor(
   assetType: VisionRegion['type'],
   assetRect: Rect,
 ): Doc['blocks'][number] | undefined {
-  const candidates = doc.blocks.filter((block) => {
-    if (block.pageIndex !== pageIndex) return false;
+  const candidates: Doc['blocks'][number][] = doc.blocks.flatMap<Doc['blocks'][number]>((block) => {
+    if (block.pageIndex !== pageIndex) return [];
     const text = block.text ?? '';
-    if (assetType === 'table') return isTableCaptionText(text);
-    if (assetType === 'figure') return isFigureCaptionText(text);
-    return block.type === 'caption';
+    const matches = assetType === 'table'
+      ? isTableCaptionText(text)
+      : assetType === 'figure'
+        ? isFigureCaptionText(text)
+        : block.type === 'caption';
+    if (!matches) return [];
+    if ((assetType !== 'figure' && assetType !== 'table') || !block.characterRects?.length) {
+      return [block];
+    }
+    let offset = 0;
+    for (const line of text.split(/\r?\n/)) {
+      const start = offset;
+      const end = start + line.length;
+      offset = end + 1;
+      const lineMatches = assetType === 'figure'
+        ? isFigureCaptionText(line)
+        : isTableCaptionText(line);
+      if (!lineMatches) continue;
+      const characters = block.characterRects.filter((character) => (
+        character.sourceIndex >= start
+        && character.sourceIndex < end
+        && character.ch.trim().length > 0
+      ));
+      if (!characters.length) return [block];
+      const left = Math.min(...characters.map((character) => character.rect.x));
+      const top = Math.min(...characters.map((character) => character.rect.y));
+      const right = Math.max(...characters.map((character) => character.rect.x + character.rect.w));
+      const bottom = Math.max(...characters.map((character) => character.rect.y + character.rect.h));
+      return [{ ...block, type: 'caption' as const, text: line, rect: { x: left, y: top, w: right - left, h: bottom - top } }];
+    }
+    return [block];
   });
   if (captionRect) {
     const overlapping = candidates

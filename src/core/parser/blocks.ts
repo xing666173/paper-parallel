@@ -40,7 +40,12 @@ function hasCaptionSuffix(suffix: string | undefined): boolean {
 
 export function isFigureCaptionText(text: string): boolean {
   return text.split(/\r?\n/).some((line) => (
-    hasCaptionSuffix(line.trim().match(/^fig(?:ure)?\.?\s*(?:\d+|[IVXLCDM]+)(.*)$/i)?.[1])
+    // IEEE captions conventionally begin with the abbreviated "Fig." and
+    // often continue with "The ...". The demonstrative-sentence guard in
+    // hasCaptionSuffix is intended for body references written as "Figure
+    // 11. The ...", not for an explicit abbreviated caption.
+    /^fig[.]\s*(?:\d+|[IVXLCDM]+)\s*[.:：\-–—]/i.test(line.trim())
+    || hasCaptionSuffix(line.trim().match(/^fig(?:ure)?\.?\s*(?:\d+|[IVXLCDM]+)(.*)$/i)?.[1])
   ));
 }
 

@@ -185,7 +185,7 @@ function findOrderedTokenRanges(text: string, needle: string, from: number): {
 } | null {
   const target = wordTokens(needle);
   const source = wordTokens(text).filter((token) => token.end > from);
-  if (target.length < 6 || source.length < target.length) return null;
+  if (target.length < 4 || source.length < target.length) return null;
 
   const matchedSourceIndexes: number[] = [];
   let sourceCursor = 0;
@@ -213,15 +213,24 @@ function findOrderedTokenRanges(text: string, needle: string, from: number): {
   const firstIndex = matchedSourceIndexes[0]!;
   const lastIndex = matchedSourceIndexes.at(-1)!;
   const spannedTokenCount = lastIndex - firstIndex + 1;
+  const skippedText = matchedSourceIndexes.slice(1).flatMap((sourceIndex, index) => {
+    const previousIndex = matchedSourceIndexes[index]!;
+    return sourceIndex > previousIndex + 1
+      ? [text.slice(source[previousIndex]!.end, source[sourceIndex]!.start)]
+      : [];
+  }).join('\n');
+  // Four- or five-word fragments are sufficiently distinctive only when the
+  // omitted source contains no prose words. This covers a sentence split by
+  // a frozen numeric formula ("requires 1024 - 15 = 1009 operations") while
+  // refusing a short match that jumps over unrelated natural language.
+  if (target.length < 6 && wordTokens(skippedText).some((token) => (
+    /\p{L}/u.test(token.value) && [...token.value].length > 1
+  ))) {
+    return null;
+  }
   // Exact ordered tokens are a strong signal, but cap the amount of skipped
   // source material so repeated words cannot bridge unrelated paragraphs.
   if (spannedTokenCount > target.length * 3 + 24) {
-    const skippedText = matchedSourceIndexes.slice(1).flatMap((sourceIndex, index) => {
-      const previousIndex = matchedSourceIndexes[index]!;
-      return sourceIndex > previousIndex + 1
-        ? [text.slice(source[previousIndex]!.end, source[sourceIndex]!.start)]
-        : [];
-    }).join('\n');
     const publisherBoilerplate = /Permission to make (?:digital or hard|digital|hard) copies\b/i.test(skippedText)
       && /(?:Copyright held by|ACM ISBN|doi[.]org\/)/i.test(skippedText);
     if (!publisherBoilerplate) return null;

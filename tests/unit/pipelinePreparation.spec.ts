@@ -508,6 +508,58 @@ describe('production pipeline preparation', () => {
       });
   });
 
+  it('merges an overlapping next-block formula fragment and removes detached subscript lines', () => {
+    const doc = fixtureDoc();
+    const prefix = 'The MSM computations are\n∑';
+    const equationText = 'defined as Q = n k P, where each P is a point on a pre-';
+    const continuationText = 'i i\ni\ndetermined EC and each i =1 k is a lambda-bit scalar.\ni i\nand the products are accumulated.';
+    const equation = doc.blocks.find((block) => block.id === 'eq1')!;
+    equation.text = equationText;
+    equation.rect = { x: 330, y: 500, w: 230, h: 10 };
+    equation.characterRects = [...equationText].map((ch, sourceIndex) => ({
+      ch, sourceIndex, pageIndex: 0,
+      rect: { x: 330 + sourceIndex * 3, y: 500, w: 2.8, h: 9 },
+    }));
+    doc.semanticUnits.find((unit) => unit.id === 'eq1')!.sourceText = equationText;
+    doc.blocks.push(
+      {
+        id: 'formula-prefix', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 330, y: 480, w: 230, h: 18 }, order: 2.9,
+        text: prefix, splitAllowed: true, widthMode: 'column',
+        characterRects: [...prefix].map((ch, sourceIndex) => ({
+          ch, sourceIndex, pageIndex: 0,
+          rect: { x: 330 + sourceIndex * 4, y: sourceIndex < prefix.length - 1 ? 480 : 497, w: 3.8, h: 8 },
+        })),
+      },
+      {
+        id: 'formula-continuation', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 330, y: 506, w: 230, h: 36 }, order: 3.1,
+        text: continuationText, splitAllowed: true, widthMode: 'column',
+        characterRects: [...continuationText].map((ch, sourceIndex) => ({
+          ch, sourceIndex, pageIndex: 0,
+          rect: { x: 360 + (sourceIndex % 20) * 2, y: 506 + Math.floor(sourceIndex / 62) * 8, w: 1.8, h: 8 },
+        })),
+      },
+    );
+    doc.semanticUnits.push(
+      { id: 'formula-prefix', kind: 'paragraph', sourceText: prefix, protectedTokens: [], layoutRegionId: 'r1', order: 2.9 },
+      { id: 'formula-continuation', kind: 'paragraph', sourceText: continuationText, protectedTokens: [], layoutRegionId: 'r1', order: 3.1 },
+    );
+    doc.layoutRegions[0].orderedUnitIds.push('formula-prefix', 'formula-continuation');
+
+    const prepared = prepareImmutableStructure(doc);
+
+    expect(prepared.assetRegions.filter((asset) => asset.id.includes('-inline-formula'))).toHaveLength(1);
+    expect(prepared.units.find((unit) => unit.id === 'formula-prefix')?.sourceText)
+      .toBe('The MSM computations are');
+    const continuation = prepared.units
+      .filter((unit) => unit.id.startsWith('formula-continuation-inline-'))
+      .map((unit) => unit.sourceText ?? '').join(' ');
+    expect(continuation).not.toMatch(/(?:^|\s)i(?:\s+i)*(?:\s|$)/);
+    expect(continuation).toContain('determined EC and each k');
+    expect(continuation).toContain('is a lambda-bit scalar');
+  });
+
   it('preserves multiple inline formulas found inside a paragraph block', () => {
     const doc = fixtureDoc();
     const source = 'The relation Q = n k P, where n is the scale. Another equation y 2 = x 3 + ax + b, and the point is valid.';
@@ -760,6 +812,51 @@ describe('production pipeline preparation', () => {
       .toBe(neighbouringText);
   });
 
+  it('clamps a Vision span figure to its explicit column caption', () => {
+    const doc = fixtureDoc();
+    const neighbouringText = 'The right column paragraph must remain translatable beside the left-column figure.';
+    doc.blocks.push(
+      {
+        id: 'left-figure-caption', docId: 'en', type: 'caption', pageIndex: 0,
+        rect: { x: 62, y: 220, w: 220, h: 10 }, order: 4,
+        text: 'Figure 9: Left-column architecture.', splitAllowed: false, widthMode: 'column',
+      },
+      {
+        id: 'right-neighbour-prose', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 330, y: 105, w: 230, h: 90 }, order: 5,
+        text: neighbouringText,
+        characterRects: [...neighbouringText].map((ch, sourceIndex) => ({
+          ch, sourceIndex, pageIndex: 0,
+          rect: { x: 330 + sourceIndex * 3, y: 105, w: 2.8, h: 8 },
+        })),
+        splitAllowed: true, widthMode: 'column',
+      },
+    );
+    doc.semanticUnits.push(
+      {
+        id: 'left-figure-caption', kind: 'caption', sourceText: 'Figure 9: Left-column architecture.',
+        protectedTokens: [], layoutRegionId: 'r1', order: 4,
+      },
+      {
+        id: 'right-neighbour-prose', kind: 'paragraph', sourceText: neighbouringText,
+        protectedTokens: [], layoutRegionId: 'r1', order: 5,
+      },
+    );
+    doc.layoutRegions[0].orderedUnitIds.push('left-figure-caption', 'right-neighbour-prose');
+
+    const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: [{
+      id: 'vision-left-figure', kind: 'figure', pageIndex: 0,
+      rect: { x: 30, y: 92, w: 552, h: 112 }, widthMode: 'span',
+      captionUnitId: 'left-figure-caption',
+    }] });
+    const figure = prepared.assetRegions.find((asset) => asset.id === 'vision-left-figure')!;
+
+    expect(figure.widthMode).toBe('column');
+    expect(figure.rect.x + figure.rect.w).toBeLessThan(300);
+    expect(prepared.units.find((unit) => unit.id === 'right-neighbour-prose')?.sourceText)
+      .toBe(neighbouringText);
+  });
+
   it('extends a shallow table header crop through an attached visual-label table body', () => {
     const doc = fixtureDoc();
     const tableText = [
@@ -787,6 +884,45 @@ describe('production pipeline preparation', () => {
     const table = prepared.assetRegions.find((asset) => asset.id === 'table')!;
     expect(table.rect.y + table.rect.h).toBeGreaterThanOrEqual(542);
     expect(prepared.units.some((unit) => unit.id === 'continued-table-body')).toBe(false);
+  });
+
+  it('extends a shallow verified table through the numeric block attached to its caption', () => {
+    const doc = fixtureDoc();
+    const bodyText = [
+      'CONFIGURATIONS AND SUPPORTED CURVES',
+      'Platforms Detailed Configurations Supported Curves',
+      'ASIC UMC 28nm DDR4 2400MHz BN-128 BLS12-381',
+      'CPU 80 cores 377GB MNT4753',
+      '8GPUs Nvidia GTX 1080 TI BLS12-381',
+    ].join('\n');
+    doc.blocks.push(
+      {
+        id: 'attached-table-caption', docId: 'en', type: 'caption', pageIndex: 0,
+        rect: { x: 418, y: 70, w: 32, h: 8 }, order: 4,
+        text: 'TABLE I', splitAllowed: false, widthMode: 'column',
+      },
+      {
+        id: 'attached-table-body', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 323, y: 82, w: 220, h: 96 }, order: 5,
+        text: bodyText, splitAllowed: true, widthMode: 'column',
+      },
+    );
+    doc.semanticUnits.push(
+      { id: 'attached-table-caption', kind: 'caption', sourceText: 'TABLE I', protectedTokens: [], layoutRegionId: 'r1', order: 4 },
+      { id: 'attached-table-body', kind: 'paragraph', sourceText: bodyText, protectedTokens: [], layoutRegionId: 'r1', order: 5 },
+    );
+    doc.layoutRegions[0].orderedUnitIds.push('attached-table-caption', 'attached-table-body');
+
+    const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: [{
+      id: 'vision-attached-table', kind: 'table', pageIndex: 0,
+      rect: { x: 313, y: 91, w: 272, h: 34 }, widthMode: 'column',
+      captionUnitId: 'attached-table-caption',
+    }] });
+    const table = prepared.assetRegions.find((asset) => asset.id === 'vision-attached-table')!;
+
+    expect(table.rect.y).toBeLessThanOrEqual(82);
+    expect(table.rect.y + table.rect.h).toBeGreaterThanOrEqual(180);
+    expect(prepared.units.some((unit) => unit.id === 'attached-table-body')).toBe(false);
   });
 
   it('does not let another block inline-formula padding erase overlapping prose', () => {
@@ -1285,6 +1421,19 @@ describe('production pipeline preparation', () => {
     expect(preparedSource).toContain('7.8%');
   });
 
+  it('removes unrenderable PDF control accents from vector variables', () => {
+    const doc = fixtureDoc();
+    const source = 'Scalar vectors S \u0003 n and A \u0003 n remain readable.';
+    doc.blocks.find((block) => block.id === 'p1')!.text = source;
+    doc.semanticUnits.find((unit) => unit.id === 'p1')!.sourceText = source;
+
+    const prepared = prepareImmutableStructure(doc);
+    const preparedSource = prepared.units.find((unit) => unit.id === 'p1')?.sourceText ?? '';
+
+    expect(preparedSource).toBe('Scalar vectors S  n and A  n remain readable.');
+    expect(preparedSource).not.toContain('\u0003');
+  });
+
   it('removes symbol-only extraction lines next to a verified display formula', () => {
     const doc = fixtureDoc();
     const source = [
@@ -1551,6 +1700,67 @@ describe('production pipeline preparation', () => {
       .toBe(prepared.regions[0].orderedUnitIds.indexOf('fig-caption') - 1);
   });
 
+  it('translates only an embedded figure caption and extends the next figure through its label cluster', () => {
+    const doc = fixtureDoc();
+    const embeddedText = [
+      'Fig. 1. The workflow of the prover has a constraint',
+      'system size of five.',
+      'POLY',
+      'MSM',
+      'INTT M NTT',
+      'PMULT PADD',
+    ].join('\n');
+    let sourceIndex = 0;
+    const lines = embeddedText.split('\n');
+    const lineYs = [220, 232, 260, 272, 284, 296];
+    doc.blocks.push(
+      {
+        id: 'embedded-figure-caption', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 330, y: 220, w: 220, h: 86 }, order: 4,
+        text: embeddedText, splitAllowed: true, widthMode: 'column',
+        characterRects: lines.flatMap((line, lineIndex) => {
+          const chars = [...line].map((ch, index) => ({
+            ch, sourceIndex: sourceIndex + index, pageIndex: 0,
+            rect: { x: 330 + index * 4, y: lineYs[lineIndex]!, w: 3.8, h: 8 },
+          }));
+          sourceIndex += line.length + 1;
+          return chars;
+        }),
+      },
+      {
+        id: 'figure-2-caption', docId: 'en', type: 'caption', pageIndex: 0,
+        rect: { x: 330, y: 385, w: 220, h: 10 }, order: 5,
+        text: 'Fig. 2. Prover computations.', splitAllowed: false, widthMode: 'column',
+      },
+    );
+    doc.semanticUnits.push(
+      { id: 'embedded-figure-caption', kind: 'paragraph', sourceText: embeddedText, protectedTokens: [], layoutRegionId: 'r1', order: 4 },
+      { id: 'figure-2-caption', kind: 'caption', sourceText: 'Fig. 2. Prover computations.', protectedTokens: [], layoutRegionId: 'r1', order: 5 },
+    );
+    doc.layoutRegions[0].orderedUnitIds.push('embedded-figure-caption', 'figure-2-caption');
+
+    const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: [
+      {
+        id: 'vision-figure-1', kind: 'figure', pageIndex: 0,
+        rect: { x: 325, y: 100, w: 230, h: 110 }, widthMode: 'column',
+        captionUnitId: 'embedded-figure-caption',
+      },
+      {
+        id: 'vision-figure-2', kind: 'figure', pageIndex: 0,
+        rect: { x: 325, y: 320, w: 230, h: 60 }, widthMode: 'column',
+        captionUnitId: 'figure-2-caption',
+      },
+    ] });
+    const embeddedCaption = prepared.units.find((unit) => unit.id === 'embedded-figure-caption')!;
+    const secondFigure = prepared.assetRegions.find((asset) => asset.id === 'vision-figure-2')!;
+
+    expect(embeddedCaption).toMatchObject({
+      kind: 'caption',
+      sourceText: 'Fig. 1. The workflow of the prover has a constraint system size of five.',
+    });
+    expect(secondFigure.rect.y).toBeLessThan(260);
+  });
+
   it('rejects a prose-heavy Vision formula rectangle and preserves only its inline equation', () => {
     const doc = fixtureDoc();
     const block = doc.blocks.find((candidate) => candidate.id === 'p1')!;
@@ -1578,6 +1788,27 @@ describe('production pipeline preparation', () => {
       .toBe('The NTT computation');
     expect(prepared.units.find((candidate) => candidate.id === 'p1-inline-after')?.sourceText)
       .toBe('is defined on two arrays.');
+  });
+
+  it('rejects a Vision formula rectangle around one short prose continuation line', () => {
+    const doc = fixtureDoc();
+    const block = doc.blocks.find((candidate) => candidate.id === 'p1')!;
+    const source = 'corresponding architecture to accelerate it.';
+    block.text = source;
+    block.rect = { x: 330, y: 620, w: 190, h: 10 };
+    block.characterRects = [...source].map((ch, sourceIndex) => ({
+      ch, sourceIndex, pageIndex: 0,
+      rect: { x: 330 + sourceIndex * 4, y: 620, w: 3.8, h: 8 },
+    }));
+    doc.semanticUnits.find((candidate) => candidate.id === 'p1')!.sourceText = source;
+
+    const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: [{
+      id: 'vision-false-formula', kind: 'formula', pageIndex: 0,
+      rect: { x: 328, y: 618, w: 194, h: 14 }, widthMode: 'column',
+    }] });
+
+    expect(prepared.assetRegions.some((asset) => asset.id === 'vision-false-formula')).toBe(false);
+    expect(prepared.units.find((unit) => unit.id === 'p1')?.sourceText).toBe(source);
   });
 
   it('places a captionless Vision formula through its covered semantic unit in a cross-page region', () => {

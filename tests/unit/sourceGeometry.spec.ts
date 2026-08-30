@@ -286,6 +286,38 @@ describe('source PDF geometry', () => {
     expect(resolved.source.flatMap((set) => set.rects).some((rect) => rect.y === 200)).toBe(false);
   });
 
+  it('maps a short sentence across a frozen numeric formula without including the formula', () => {
+    const source = 'This requires i = 1, 1024 - 15 = 1009 PADD operations.';
+    const formulaStart = source.indexOf('1024');
+    const formulaEnd = source.indexOf('PADD');
+    const doc = emptyDoc();
+    doc.blocks = [{
+      id: 'formula-gap', docId: 'en', type: 'paragraph', pageIndex: 0,
+      rect: { x: 20, y: 100, w: 240, h: 50 }, order: 0,
+      splitAllowed: true, widthMode: 'column', text: source,
+      characterRects: [...source].map((ch, sourceIndex) => ({
+        ch, sourceIndex, pageIndex: 0,
+        rect: {
+          x: 20 + sourceIndex * 4,
+          y: sourceIndex >= formulaStart && sourceIndex < formulaEnd ? 130 : 100,
+          w: 4, h: 10,
+        },
+      })),
+    }];
+    const unit = alignmentUnit({
+      id: 'formula-gap-g-1', parentId: 'formula-gap', sourceBlockId: 'formula-gap',
+      kind: 'semantic-group', relation: '1:1', sourceText: 'This requires PADD operations.',
+    });
+
+    const [resolved] = resolveSourceGeometry([unit], doc, []);
+
+    expect(resolved).toMatchObject({
+      status: 'aligned', confidence: 0.92,
+      fallbackReason: 'source-sentence-matched-across-masked-ranges',
+    });
+    expect(resolved.source.flatMap((set) => set.rects).every((rect) => rect.y === 100)).toBe(true);
+  });
+
   it('maps a sentence across a long publisher permission footer removed from translation', () => {
     const prefix = 'Moreover, with increasing demand, the degree of';
     const publisher = [

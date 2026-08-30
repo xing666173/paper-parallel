@@ -306,6 +306,34 @@ describe('vision: deterministic layout reconciliation', () => {
     expect(result.assetRegions[0]?.captionUnitId).toBe('caption-1');
   });
 
+  it('matches an IEEE Fig. caption embedded after diagram labels', () => {
+    const doc = fixtureDoc();
+    doc.blocks = doc.blocks.filter((block) => block.id !== 'body-1');
+    const caption = doc.blocks.find((block) => block.id === 'caption-1')!;
+    caption.type = 'paragraph';
+    caption.text = 'Expand\nwitness\nDDR\nAccelerator\nFig. 10. The overall architecture of PipeZK.';
+    caption.rect = { x: 50, y: 80, w: 220, h: 110 };
+    let sourceIndex = 0;
+    caption.characterRects = caption.text.split('\n').flatMap((line, lineIndex) => {
+      const characters = [...line].map((ch, index) => ({
+        ch, sourceIndex: sourceIndex + index, pageIndex: 0,
+        rect: { x: 50 + index * 4, y: lineIndex === 4 ? 180 : 80 + lineIndex * 16, w: 3.8, h: 8 },
+      }));
+      sourceIndex += line.length + 1;
+      return characters;
+    });
+
+    const result = reconcileVisionLayout(doc, [{
+      pageIndex: 0, layout: 'double', regions: [{
+        type: 'figure', bbox: [80, 100, 360, 100], column: 'left',
+        captionBBox: [80, 225, 360, 20], confidence: 0.99,
+      }],
+    }]);
+
+    expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions[0]?.captionUnitId).toBe('caption-1');
+  });
+
   it('drops a formula box that is actually a label nested inside a larger figure', () => {
     const result = reconcileVisionLayout(fixtureDoc(), [{
       pageIndex: 0, layout: 'mixed', regions: [
