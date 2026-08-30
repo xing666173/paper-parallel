@@ -52,6 +52,35 @@ function statusForConfidence(confidence: number): AlignmentUnit['status'] {
   return 'unmatched';
 }
 
+function hasGeometry(sets: AlignmentRectSet[]): boolean {
+  return sets.some((set) => set.rects.length > 0);
+}
+
+function withTargetGeometry(
+  unit: AlignmentUnit,
+  target: AlignmentRectSet[],
+  targetConfidence: number,
+): AlignmentUnit {
+  const sourceReady = hasGeometry(unit.source);
+  const targetReady = hasGeometry(target);
+  if (!sourceReady || !targetReady) {
+    return {
+      ...unit,
+      target,
+      confidence: 0,
+      status: 'unmatched',
+      fallbackReason: !sourceReady ? 'source-geometry-missing' : 'target-geometry-missing',
+    };
+  }
+  const confidence = Math.min(unit.confidence || 1, targetConfidence);
+  return {
+    ...unit,
+    target,
+    confidence,
+    status: statusForConfidence(confidence),
+  };
+}
+
 function resolveTargetGeometry(
   unit: AlignmentUnit,
   markers: Map<string, AlignmentRectSet[]>,
@@ -59,27 +88,17 @@ function resolveTargetGeometry(
 ): AlignmentUnit {
   const markerParts = unit.targetUnitIds.map((id) => markers.get(id));
   if (markerParts.length > 0 && markerParts.every((part) => part && part.length > 0)) {
-    return {
-      ...unit,
-      target: mergeGeometry(markerParts as AlignmentRectSet[][]),
-      confidence: 1,
-      status: 'aligned',
-    };
+    return withTargetGeometry(unit, mergeGeometry(markerParts as AlignmentRectSet[][]), 1);
   }
 
   const fallbackParts = unit.targetUnitIds.map((id) => fallback.get(id));
   if (fallbackParts.length > 0 && fallbackParts.every((part) => part?.status === 'aligned')) {
     const matches = fallbackParts as TargetTextMatch[];
     const confidence = Math.min(...matches.map((match) => match.confidence));
-    return {
-      ...unit,
-      target: mergeGeometry(matches.map((match) => match.rects)),
-      confidence,
-      status: statusForConfidence(confidence),
-    };
+    return withTargetGeometry(unit, mergeGeometry(matches.map((match) => match.rects)), confidence);
   }
 
-  return { ...unit, target: [], confidence: 0, status: 'unmatched' };
+  return withTargetGeometry(unit, [], 0);
 }
 
 function collapseParagraphFallbacks(

@@ -75,6 +75,7 @@ describe('production pipeline preparation', () => {
     const parts = prepared.units.filter((unit) => unit.parentId === 'p1');
 
     expect(parts.length).toBeGreaterThan(1);
+    expect(parts.every((unit) => unit.sourceBlockId === 'p1')).toBe(true);
     expect(parts.every((unit) => (unit.sourceText?.length ?? 0) <= 1_800)).toBe(true);
     expect(parts.map((unit) => unit.sourceText).join(' ').replace(/\s+/g, ' ').trim())
       .toBe(longSource.replace(/\s+/g, ' ').trim());
@@ -1425,8 +1426,8 @@ describe('production pipeline preparation', () => {
 
     expect(prepared.units.some((unit) => unit.id === 'mixed-caption')).toBe(false);
     expect(prepared.units).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: 'mixed-caption-figure', sourceText: 'Figure 9: Parallelism Analysis' }),
-      expect.objectContaining({ id: 'mixed-caption-table', sourceText: 'Table 2: PPA Results' }),
+      expect.objectContaining({ id: 'mixed-caption-figure', sourceBlockId: 'mixed-caption', sourceText: 'Figure 9: Parallelism Analysis' }),
+      expect.objectContaining({ id: 'mixed-caption-table', sourceBlockId: 'mixed-caption', sourceText: 'Table 2: PPA Results' }),
     ]));
     expect(prepared.assetRegions).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: 'figure-9', captionUnitId: 'mixed-caption-figure' }),
@@ -1464,8 +1465,8 @@ describe('production pipeline preparation', () => {
 
     expect(prepared.units.some((unit) => unit.id === 'paired-figures')).toBe(false);
     expect(prepared.units).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: 'paired-figures-figure-1', sourceText: 'Figure 9: Parallelism Analysis' }),
-      expect.objectContaining({ id: 'paired-figures-figure-2', sourceText: 'Figure 10: MTU and PTU Speedup' }),
+      expect.objectContaining({ id: 'paired-figures-figure-1', sourceBlockId: 'paired-figures', sourceText: 'Figure 9: Parallelism Analysis' }),
+      expect.objectContaining({ id: 'paired-figures-figure-2', sourceBlockId: 'paired-figures', sourceText: 'Figure 10: MTU and PTU Speedup' }),
     ]));
     expect(prepared.assetRegions).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: 'figure-9', captionUnitId: 'paired-figures-figure-1' }),

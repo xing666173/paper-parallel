@@ -140,6 +140,17 @@ test('real API exact-paper PDF quality acceptance', async () => {
 
     await waitForPipelineTerminal(page);
 
+    const alignmentManifest = await page.evaluate(() => (
+      globalThis as typeof globalThis & { __PP_DIAGNOSTIC_ALIGNMENT_MANIFEST__?: {
+        units: Array<{ source: Array<{ rects: unknown[] }>; target: Array<{ rects: unknown[] }> }>;
+      } }
+    ).__PP_DIAGNOSTIC_ALIGNMENT_MANIFEST__ ?? null);
+    expect(alignmentManifest).not.toBeNull();
+    expect(alignmentManifest!.units.every((unit) => (
+      unit.source.some((set) => set.rects.length > 0)
+      && unit.target.some((set) => set.rects.length > 0)
+    ))).toBe(true);
+
     const outputDirectory = OUTPUT_DIRECTORY;
     await mkdir(outputDirectory, { recursive: true });
     const successfulDiagnostics = await page.evaluate(() => {

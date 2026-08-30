@@ -1093,8 +1093,12 @@ function splitMergedCaptionText(source: string): Array<{ kind: 'figure' | 'table
 
 export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOptions = {}): PreparedImmutableStructure {
   const regions = doc.layoutRegions.map((region) => ({ ...region, orderedUnitIds: [...region.orderedUnitIds] }));
-  let units = doc.semanticUnits.map((unit) => ({ ...unit, protectedTokens: [...unit.protectedTokens] }));
   const blocks = new Map(doc.blocks.map((block) => [block.id, block]));
+  let units: SemanticUnit[] = doc.semanticUnits.map((unit) => ({
+    ...unit,
+    sourceBlockId: unit.sourceBlockId ?? (blocks.has(unit.id) ? unit.id : undefined),
+    protectedTokens: [...unit.protectedTokens],
+  }));
   const assetRegions: DetectedAssetRegion[] = [];
   const algorithmAssets = detectedAlgorithmAssets(doc);
   const algorithmPages = new Set(algorithmAssets.map((asset) => asset.pageIndex));

@@ -20,17 +20,24 @@ const pages = ref({ en: 0, zh: 0 });
 const zoom = ref({ en: 1, zh: 1 });
 const syncEnabled = ref(true);
 const highlightsEnabled = ref(true);
-const activeUnitId = ref(props.manifest.units.find((unit) => unit.status !== 'unmatched')?.id ?? '');
+function hasGeometry(sets: AlignmentManifest['units'][number]['source']): boolean {
+  return sets.some((set) => set.rects.length > 0);
+}
+function isPairedUnit(unit: AlignmentManifest['units'][number]): boolean {
+  return unit.status !== 'unmatched' && hasGeometry(unit.source) && hasGeometry(unit.target);
+}
+const pairedUnits = computed(() => props.manifest.units.filter(isPairedUnit));
+const activeUnitId = ref(props.manifest.units.find(isPairedUnit)?.id ?? '');
 const lock = createSyncController(120);
 let suppressNext: 'en' | 'zh' | '' = '';
 let animationFrame = 0;
 let pendingScroll: { side: 'en' | 'zh'; scrollTop: number; viewportHeight: number } | undefined;
 
-const activeUnit = computed(() => props.manifest.units.find((unit) => unit.id === activeUnitId.value));
+const activeUnit = computed(() => pairedUnits.value.find((unit) => unit.id === activeUnitId.value));
 const enActiveRects = computed(() => highlightsEnabled.value ? activeUnit.value?.source ?? [] : []);
 const zhActiveRects = computed(() => highlightsEnabled.value ? activeUnit.value?.target ?? [] : []);
-const enGeometry = computed(() => props.manifest.units.map((unit) => ({ id: unit.id, rects: unit.source })));
-const zhGeometry = computed(() => props.manifest.units.map((unit) => ({ id: unit.id, rects: unit.target })));
+const enGeometry = computed(() => pairedUnits.value.map((unit) => ({ id: unit.id, rects: unit.source })));
+const zhGeometry = computed(() => pairedUnits.value.map((unit) => ({ id: unit.id, rects: unit.target })));
 
 function offsetsFor(side: 'en' | 'zh'): number[] {
   const offsets: number[] = [];

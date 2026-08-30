@@ -87,6 +87,48 @@ describe('source PDF geometry', () => {
     expect(resolved.status).toBe('aligned');
   });
 
+  it('uses the preserved original block id for a split translation unit', () => {
+    const text = 'First result. Second result.';
+    const doc = emptyDoc();
+    doc.blocks = [{
+      id: 'p1', docId: 'en', type: 'paragraph', pageIndex: 0,
+      rect: { x: 10, y: 20, w: 150, h: 20 }, order: 0,
+      splitAllowed: true, widthMode: 'column', text,
+      characterRects: [...text].map((ch, sourceIndex) => ({
+        ch, sourceIndex, pageIndex: 0,
+        rect: { x: 10 + sourceIndex * 5, y: 20, w: 5, h: 10 },
+      })),
+    }];
+    const unit = alignmentUnit({
+      id: 'p1-part-1-g-1', parentId: 'p1-part-1', sourceBlockId: 'p1',
+      kind: 'semantic-group', relation: '1:1', sourceText: 'Second result.',
+    });
+
+    const [resolved] = resolveSourceGeometry([unit], doc, []);
+    expect(resolved.source[0].rects[0].x).toBeGreaterThan(10);
+    expect(resolved.status).toBe('aligned');
+  });
+
+  it('falls back to the source paragraph rectangle when sentence character geometry is incomplete', () => {
+    const doc = emptyDoc();
+    doc.blocks = [{
+      id: 'p1', docId: 'en', type: 'paragraph', pageIndex: 2,
+      rect: { x: 20, y: 30, w: 200, h: 80 }, order: 0,
+      splitAllowed: true, widthMode: 'column', text: 'First result. Second result.',
+    }];
+    const unit = alignmentUnit({
+      id: 'p1-g-2', parentId: 'p1', sourceBlockId: 'p1',
+      kind: 'semantic-group', relation: '1:1', sourceText: 'Second result.',
+    });
+
+    const [resolved] = resolveSourceGeometry([unit], doc, []);
+    expect(resolved).toMatchObject({
+      status: 'low-confidence', confidence: 0.75,
+      fallbackReason: 'source-sentence-fell-back-to-block',
+      source: [{ page: 2, rects: [doc.blocks[0].rect] }],
+    });
+  });
+
   it('marks missing geometry unmatched instead of discarding the unit', () => {
     const unit = alignmentUnit({ id: 'missing', sourceUnitIds: ['missing'] });
     const result = resolveSourceGeometry([unit], emptyDoc(), []);

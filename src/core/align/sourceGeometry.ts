@@ -123,10 +123,21 @@ function withSource(
   unit: AlignmentUnit,
   source: AlignmentRectSet[],
   confidence = 1,
+  fallbackReason?: string,
 ): AlignmentUnit {
-  return source.length
-    ? { ...unit, source, confidence, status: 'aligned' }
-    : { ...unit, source: [], confidence: 0, status: 'unmatched' };
+  if (!source.length) {
+    return {
+      ...unit, source: [], confidence: 0, status: 'unmatched',
+      fallbackReason: fallbackReason ?? 'source-geometry-missing',
+    };
+  }
+  return {
+    ...unit,
+    source,
+    confidence,
+    status: confidence >= 0.9 ? 'aligned' : 'low-confidence',
+    fallbackReason: fallbackReason ?? unit.fallbackReason,
+  };
 }
 
 export function resolveSourceGeometry(
@@ -147,7 +158,8 @@ export function resolveSourceGeometry(
         : withSource(unit, []);
     }
 
-    const block = blocks.get(unit.parentId ?? '')
+    const block = blocks.get(unit.sourceBlockId ?? '')
+      ?? blocks.get(unit.parentId ?? '')
       ?? unit.sourceUnitIds.map((id) => blocks.get(id)).find(Boolean)
       ?? blocks.get(unit.id);
     if (!block) return withSource(unit, []);
@@ -158,13 +170,18 @@ export function resolveSourceGeometry(
 
     const chars = indexedChars(block);
     const range = findTextRange(block.text ?? '', unit.sourceText, cursorByBlock.get(block.id) ?? 0);
-    if (!range || chars.length === 0) return withSource(unit, []);
+    if (!range || chars.length === 0) {
+      return withSource(unit, geometryForBlock(block), 0.75, 'source-sentence-fell-back-to-block');
+    }
     cursorByBlock.set(block.id, range[1]);
-    return withSource(unit, resolveTextRangeRects({
+    const sentenceGeometry = resolveTextRangeRects({
       start: range[0],
       end: range[1],
       page: block.pageIndex,
       charRects: chars,
-    }));
+    });
+    return sentenceGeometry.length
+      ? withSource(unit, sentenceGeometry)
+      : withSource(unit, geometryForBlock(block), 0.75, 'source-sentence-fell-back-to-block');
   });
 }

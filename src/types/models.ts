@@ -119,6 +119,8 @@ export type SemanticUnitKind =
 export interface SemanticUnit {
   id: string;
   parentId?: string;
+  /** 原始英文 PDF 中承载该单元文字与字符坐标的块 ID。 */
+  sourceBlockId?: string;
   kind: SemanticUnitKind;
   sourceText?: string;
   translation?: string;
@@ -174,6 +176,8 @@ export type AlignmentRelation =
 export interface AlignmentUnit {
   id: string;
   parentId?: string;
+  /** 原始英文 PDF 中承载该对齐单元的块 ID。 */
+  sourceBlockId?: string;
   kind: 'semantic-group' | 'block' | 'asset' | 'reference';
   relation: AlignmentRelation;
   sourceUnitIds: string[];

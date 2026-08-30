@@ -17,6 +17,7 @@ export interface SourceCandidateBlock {
 export interface OrderedSemanticInput {
   id: string;
   parentId?: string;
+  sourceBlockId?: string;
   kind: SemanticUnitKind;
   sourceText?: string;
   translation?: string;
@@ -126,7 +127,16 @@ export function buildBlockAndAssetAlignmentUnits(
   return [...units]
     .sort((left, right) => left.order - right.order)
     .map((unit) => {
-      const isAsset = unit.kind === 'figure' || unit.kind === 'table' || unit.kind === 'formula';
+      // `assetId` is the authoritative signal. In particular, immutable
+      // algorithm/code crops and page furniture are assets too; treating them
+      // as ordinary text blocks loses their source crop because no PDF text
+      // block exists under the synthetic asset id.
+      const isAsset = Boolean(unit.assetId)
+        || unit.kind === 'figure'
+        || unit.kind === 'table'
+        || unit.kind === 'formula'
+        || unit.kind === 'code'
+        || unit.kind === 'page-furniture';
       const isReference = unit.kind === 'reference';
       const id = isAsset ? (unit.assetId ?? unit.id) : unit.id;
       return {
@@ -138,6 +148,7 @@ export function buildBlockAndAssetAlignmentUnits(
           targetUnitIds: [unit.id],
         }),
         parentId: unit.parentId,
+        sourceBlockId: unit.sourceBlockId,
         sourceText: unit.sourceText,
         targetText: unit.translation,
         order: unit.order,

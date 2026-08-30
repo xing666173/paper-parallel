@@ -1,6 +1,6 @@
 import type { AiLogEvent } from '../translate/events';
 import type { ProjectRepository } from '../project/repository';
-import type { TaskSnapshot, Doc, SemanticUnit } from '../../types/models';
+import type { AlignmentUnit, TaskSnapshot, Doc, SemanticUnit } from '../../types/models';
 import type { ProductionPipelineStages, PipelineValue } from './productionPipeline';
 import { getDocument } from '../pdf/runtime';
 import { normalizeTextItem } from '../parser/pdfjsAdapter';
@@ -456,21 +456,28 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
       const targetPdf = await targetLoading.promise;
       const markers = await readTargetMarkers(targetPdf as any);
       const segments: TargetTextSegment[] = [];
-      let units = requests.flatMap((request) => {
+      const prepared = requireValue(current.prepared, '版式结构缺失');
+      const preparedById = new Map(prepared.units.map((unit) => [unit.id, unit]));
+      let units: AlignmentUnit[] = requests.flatMap((request) => {
         const response = translations.find((candidate) => candidate.blockId === request.blockId)!;
         const groups = responseGroups(request, response);
         groups.forEach((group, groupIndex) => group.targetUnitIds.forEach((id, index) => {
           segments.push({ id, targetText: response.alignmentGroups[groupIndex].targetSegments[index] });
         }));
-        return groups;
+        const sourceBlockId = preparedById.get(request.blockId)?.sourceBlockId;
+        return groups.map((group) => ({ ...group, sourceBlockId }));
       });
-      const immutable = requireValue(current.prepared, '版式结构缺失').units.filter((unit) => Boolean(unit.assetId));
+      const immutable = prepared.units.filter((unit) => Boolean(unit.assetId));
       units.push(...buildBlockAndAssetAlignmentUnits(immutable));
       units = resolveSourceGeometry(units, doc, current.assets ?? []);
       const fallback = await matchTranslatedText(targetPdf as any, segments);
       const manifest = buildAlignmentManifest({
         projectId: options.projectId, units, markers, fallback,
       });
+      if (import.meta.env.MODE === 'test') {
+        (globalThis as typeof globalThis & { __PP_DIAGNOSTIC_ALIGNMENT_MANIFEST__?: AlignmentManifest })
+          .__PP_DIAGNOSTIC_ALIGNMENT_MANIFEST__ = manifest;
+      }
       await targetPdf.destroy();
       return { ...current, manifest };
     },
@@ -494,7 +501,8 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
         throw new Error(`PDF 内容质量门未通过：${contentGate.issues.map((issue) => issue.message).join('；')}`);
       }
       if (!alignment.pass) {
-        throw new Error(`对齐质量门未通过：${alignment.issues.map((issue) => issue.message).join('；')}`);
+        const errors = alignment.issues.filter((issue) => issue.severity === 'error');
+        throw new Error(`对齐质量门未通过：${errors.map((issue) => issue.message).join('；')}`);
       }
       const sourcePdf = requireValue(current.sourcePdf, '源 PDF 缺失');
       const targetLoading = getDocument({ data: compiled.pdf.slice() });

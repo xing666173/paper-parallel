@@ -37,7 +37,24 @@ describe('quality-gated alignment manifest', () => {
     });
     const gate = runAlignmentGate(manifest);
     expect(gate.pass).toBe(false);
-    expect(gate.issues).toEqual([expect.objectContaining({ code: 'unit-unmatched', unitId: 's2' })]);
+    expect(gate.issues).toEqual([expect.objectContaining({ code: 'target-geometry-missing', unitId: 's2' })]);
+  });
+
+  it('does not mark target-only geometry as aligned', () => {
+    const manifest = buildAlignmentManifest({
+      projectId: 'p1', createdAt: 10,
+      units: [unit({ id: 'right-only', sourceUnitIds: ['s1'], targetUnitIds: ['t1'] })],
+      markers: new Map([['t1', marker]]), fallback: new Map(),
+    });
+
+    expect(manifest.units[0]).toMatchObject({
+      id: 'right-only', source: [], target: marker,
+      status: 'unmatched', confidence: 0, fallbackReason: 'source-geometry-missing',
+    });
+    expect(manifest.stats).toMatchObject({ aligned: 0, unmatched: 1, coverage: 0 });
+    expect(runAlignmentGate(manifest).issues).toContainEqual(expect.objectContaining({
+      code: 'source-geometry-missing', unitId: 'right-only', severity: 'error',
+    }));
   });
 
   it('collapses unreliable child groups to a verified paragraph fallback', () => {

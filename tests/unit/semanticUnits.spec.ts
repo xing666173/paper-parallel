@@ -5,7 +5,7 @@ import {
 } from '../../src/core/align/semanticUnits';
 
 describe('stable semantic alignment units', () => {
-  it.each(['figure', 'table', 'formula'] as const)('creates one asset unit for %s', (kind) => {
+  it.each(['figure', 'table', 'formula', 'code', 'page-furniture'] as const)('creates one asset unit for %s', (kind) => {
     const units = buildBlockAndAssetAlignmentUnits([
       { id: `${kind}-1`, kind, assetId: `${kind}-1`, order: 10 },
     ]);
@@ -13,6 +13,17 @@ describe('stable semantic alignment units', () => {
     expect(units).toEqual([
       expect.objectContaining({ id: `${kind}-1`, kind: 'asset', relation: 'asset' }),
     ]);
+  });
+
+  it('uses assetId as the authoritative signal even for a synthetic unit kind', () => {
+    const [unit] = buildBlockAndAssetAlignmentUnits([
+      { id: 'algorithm-body', kind: 'code', assetId: 'algorithm-body-crop', order: 10 },
+    ]);
+
+    expect(unit).toMatchObject({
+      id: 'algorithm-body-crop', kind: 'asset', relation: 'asset',
+      sourceUnitIds: ['algorithm-body'], targetUnitIds: ['algorithm-body'],
+    });
   });
 
   it('represents merge and split mappings without forcing one-to-one sentences', () => {
