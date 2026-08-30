@@ -275,7 +275,9 @@ export function resolveSourceGeometry(
       ?? blocks.get(unit.id);
     if (!block) return withSource(unit, []);
 
-    if (unit.kind !== 'semantic-group' || !unit.sourceText) {
+    const requiresTextRange = unit.kind === 'semantic-group'
+      || unit.relation === 'paragraph-fallback';
+    if (!requiresTextRange || !unit.sourceText) {
       return withSource(unit, geometryForBlock(block));
     }
 
@@ -352,11 +354,13 @@ export function resolveSourceGeometry(
 
     const chars = indexedChars(block);
     if (!range || chars.length === 0) {
-      // A sentence-level unit must never highlight an entire multi-paragraph
-      // PDF aggregate. That creates a visually convincing but semantically
-      // false pair. Only use the block rectangle when this unit itself covers
-      // nearly the whole block; otherwise fail closed and let the quality gate
-      // report the unresolved source geometry.
+      // A text-range unit must never highlight an entire multi-paragraph PDF
+      // aggregate. This includes paragraph fallbacks created from one split
+      // translation unit: their sourceBlockId still points at the unsplit PDF
+      // block, whose rectangle can cover most of a column. Only use that block
+      // rectangle when the requested text itself covers nearly the whole block;
+      // otherwise fail closed and let the quality gate report the unresolved
+      // source geometry.
       const coverage = normalizedLength(unit.sourceText)
         / Math.max(1, normalizedLength(block.text ?? ''));
       return coverage >= 0.8

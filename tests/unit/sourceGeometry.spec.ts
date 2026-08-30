@@ -109,6 +109,44 @@ describe('source PDF geometry', () => {
     expect(resolved.status).toBe('aligned');
   });
 
+  it('crops a paragraph fallback to its split text inside a larger PDF block', () => {
+    const prefix = 'Unrelated material from the beginning of the source column.';
+    const paragraph = 'This process requires one addition; trace_on starts capture and trace_off stops it.';
+    const suffix = 'Unrelated material from the end of the source column.';
+    const text = `${prefix}\n${paragraph}\n${suffix}`;
+    const paragraphStart = text.indexOf(paragraph);
+    const paragraphEnd = paragraphStart + paragraph.length;
+    const doc = emptyDoc();
+    doc.blocks = [{
+      id: 'aggregate', docId: 'en', type: 'paragraph', pageIndex: 3,
+      rect: { x: 40, y: 100, w: 240, h: 500 }, order: 0,
+      splitAllowed: true, widthMode: 'column', text,
+      characterRects: [...text].map((ch, sourceIndex) => ({
+        ch, sourceIndex, pageIndex: 3,
+        rect: {
+          x: 40 + (sourceIndex % 60) * 3,
+          y: sourceIndex >= paragraphStart && sourceIndex < paragraphEnd ? 400 : 100,
+          w: 3,
+          h: 10,
+        },
+      })),
+    }];
+    const unit = alignmentUnit({
+      id: 'aggregate-part-2', parentId: 'aggregate-part-2', sourceBlockId: 'aggregate',
+      kind: 'block', relation: 'paragraph-fallback', sourceText: paragraph,
+      fallbackReason: 'sentence-boundary-ambiguous',
+    });
+
+    const [resolved] = resolveSourceGeometry([unit], doc, []);
+    expect(resolved).toMatchObject({
+      status: 'aligned', confidence: 1,
+      fallbackReason: 'sentence-boundary-ambiguous',
+      source: [{ page: 3 }],
+    });
+    expect(resolved.source[0].rects.every((rect) => rect.y === 400)).toBe(true);
+    expect(resolved.source[0].rects).not.toContainEqual(doc.blocks[0].rect);
+  });
+
   it('relocates a restored sentence to the original PDF block that owns its glyphs', () => {
     const restored = 'rapidly evolving into the dominant bottleneck.';
     const metadata = `arXiv:1234.5678 [cs.AR] ${restored}`;
