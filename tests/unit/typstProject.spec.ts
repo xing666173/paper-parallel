@@ -264,6 +264,10 @@ describe('Typst project generation', () => {
     expect(escapeTypstText('Cost is $5 and [x] #tag.')).toBe('Cost is \\$5 and \\[x\\] \\#tag.');
   });
 
+  it('renders Unicode script runs with Typst markup instead of unavailable font glyphs', () => {
+    expect(escapeTypstText('k₁, ..., kₙ and 2²')).toBe('k#sub[1], ..., k#sub[n] and 2#super[2]');
+  });
+
   it('escapes email, label, citation, emphasis, and raw-markup delimiters', () => {
     expect(escapeTypstText('xi.wang@<seu.edu.cn> uses *ASIC* and `code_ref`.')).toBe(
       'xi.wang\\@\\<seu.edu.cn\\> uses \\*ASIC\\* and \\`code\\_ref\\`.',

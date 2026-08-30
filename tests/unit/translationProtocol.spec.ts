@@ -173,6 +173,27 @@ describe('generic academic translation protocol', () => {
       .toBe(restored.blocks[0]!.translation);
     expect(validateBatchResponse([source], restored).ok).toBe(true);
   });
+
+  it('moves a protected numeric section label back to the start of a translated heading', () => {
+    const source: TranslationBlockRequest = {
+      blockId: 'heading-4-2', kind: 'heading',
+      source: '4.2 Matrix-vector Multiplication on GPUs',
+      alignmentMode: 'sentence-candidates',
+      sourceSentences: [{ id: 'heading-4-2-s-1', text: '4.2 Matrix-vector Multiplication on GPUs' }],
+      protectedTokens: ['4.2'],
+    };
+    const translated = 'GPU 上的矩阵向量乘法 4.2';
+    const restored = restoreMissingProtectedTokensFromTranslation([source], { blocks: [{
+      blockId: source.blockId,
+      translation: translated,
+      alignmentGroups: [{ sourceSentenceIds: ['heading-4-2-s-1'], targetSegments: [translated] }],
+      newTerms: [], warnings: [],
+    }] });
+
+    expect(restored.blocks[0]!.translation).toBe('4.2 GPU 上的矩阵向量乘法');
+    expect(restored.blocks[0]!.alignmentGroups[0]!.targetSegments)
+      .toEqual(['4.2 GPU 上的矩阵向量乘法']);
+  });
   it('creates stable source candidates before any translation request', () => {
     expect(buildSourceSentenceCandidates('p1', 'First result. Second result!')).toEqual({
       mode: 'sentence-candidates',

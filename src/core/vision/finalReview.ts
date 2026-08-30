@@ -467,8 +467,11 @@ export async function runVisionFinalReview(options: RunVisionFinalReviewOptions)
               })),
             ),
           },
-          { type: 'text', text: `TARGET PAGE ${targetPageIndex + 1}` },
-          { type: 'image_url', image_url: { url: targetImage, detail: 'original' } },
+          // Changed-asset candidates require the same source references used
+          // by the first pass. A target-only confirmation can mistake a
+          // compact but intact ruled table for prose merely because its
+          // typography differs from the surrounding translated text.
+          ...content.slice(1),
         ] }],
       });
       const confirmationReport = parseVisionFinalPageReport(confirmation.content, targetPageIndex);

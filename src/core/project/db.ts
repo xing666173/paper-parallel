@@ -39,6 +39,7 @@ export type ProjectArtifactKind =
   | 'typst-preview'
   | 'alignment-manifest'
   | 'vision-layout'
+  | 'formula-ocr'
   | 'project-package';
 
 export interface ProjectArtifactRecord {

@@ -179,6 +179,29 @@ function insertProtectedToken(segment: string, token: string): string {
   return `${segment.slice(0, insertion).trimEnd()} ${token}${segment.slice(insertion)}`;
 }
 
+function restoreLeadingHeadingNumber(
+  source: TranslationBlockRequest,
+  block: TranslationBlockResponse,
+): TranslationBlockResponse {
+  if (source.kind !== 'heading') return block;
+  const sectionNumber = source.source.match(/^\s*(\d+(?:\.\d+)*)\b/)?.[1];
+  if (!sectionNumber) return block;
+  const segments = block.alignmentGroups.flatMap((group) => group.targetSegments);
+  if (segments.length !== 1) return block;
+  const segment = segments[0]!.trim();
+  if (new RegExp(`^${escapeRegExp(sectionNumber)}(?:\\s|[：:、.．])`).test(segment)) return block;
+  const numberPattern = new RegExp(`(?<![\\d.])${escapeRegExp(sectionNumber)}(?![\\d.])`);
+  if (!numberPattern.test(segment)) return block;
+  const withoutNumber = segment.replace(numberPattern, '').replace(/\s{2,}/g, ' ').trim();
+  const normalized = `${sectionNumber} ${withoutNumber}`.trim();
+  const alignmentGroups = block.alignmentGroups.map((group) => ({
+    ...group,
+    sourceSentenceIds: [...group.sourceSentenceIds],
+    targetSegments: group.targetSegments.map(() => normalized),
+  }));
+  return { ...block, translation: normalized, alignmentGroups };
+}
+
 /**
  * Last-resort deterministic repair after opaque markers have been restored.
  * Some providers rewrite a marker into visually similar Unicode before it
@@ -240,12 +263,12 @@ export function restoreMissingProtectedTokensFromTranslation(
           if (!missing) break;
         }
       }
-      if (!changed) return block;
-      return {
+      const repaired = !changed ? block : {
         ...block,
         alignmentGroups,
         translation: alignmentGroups.flatMap((group) => group.targetSegments).join(''),
       };
+      return restoreLeadingHeadingNumber(source, repaired);
     }),
   };
 }

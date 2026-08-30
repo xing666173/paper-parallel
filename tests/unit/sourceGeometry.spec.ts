@@ -318,6 +318,67 @@ describe('source PDF geometry', () => {
     expect(resolved.source.flatMap((set) => set.rects).every((rect) => rect.y === 100)).toBe(true);
   });
 
+  it('maps a compact formula across a stacked upper-bound fragment', () => {
+    const source = '∑\n2 s − 1\nl =1 l\ni =1 i i';
+    const upperBoundStart = source.indexOf('2');
+    const lowerBoundStart = source.indexOf('l =1');
+    const doc = emptyDoc();
+    doc.blocks = [{
+      id: 'stacked-formula', docId: 'en', type: 'paragraph', pageIndex: 10,
+      rect: { x: 300, y: 420, w: 190, h: 35 }, order: 0,
+      splitAllowed: true, widthMode: 'column', text: source,
+      characterRects: [...source].map((ch, sourceIndex) => ({
+        ch, sourceIndex, pageIndex: 10,
+        rect: {
+          x: 300 + sourceIndex * 4,
+          y: sourceIndex < upperBoundStart
+            ? 420
+            : sourceIndex < lowerBoundStart
+              ? 410
+              : 430,
+          w: 4, h: 10,
+        },
+      })),
+    }];
+    const unit = alignmentUnit({
+      id: 'stacked-formula-g-1', parentId: 'stacked-formula', sourceBlockId: 'stacked-formula',
+      kind: 'semantic-group', relation: '1:1', sourceText: '∑ l =1 l',
+    });
+
+    const [resolved] = resolveSourceGeometry([unit], doc, []);
+
+    expect(resolved).toMatchObject({
+      status: 'aligned', confidence: 0.9,
+      fallbackReason: 'source-formula-matched-across-stacked-ranges',
+    });
+    expect(resolved.source.flatMap((set) => set.rects).some((rect) => rect.y === 410)).toBe(false);
+    expect(resolved.source.flatMap((set) => set.rects).map((rect) => rect.y))
+      .toEqual(expect.arrayContaining([420, 430]));
+  });
+
+  it('does not use compact formula matching across ordinary prose', () => {
+    const source = '∑ important prose l =1 l';
+    const doc = emptyDoc();
+    doc.blocks = [{
+      id: 'formula-prose-gap', docId: 'en', type: 'paragraph', pageIndex: 0,
+      rect: { x: 20, y: 100, w: 200, h: 40 }, order: 0,
+      splitAllowed: true, widthMode: 'column', text: source,
+      characterRects: [...source].map((ch, sourceIndex) => ({
+        ch, sourceIndex, pageIndex: 0,
+        rect: { x: 20 + sourceIndex * 4, y: 100, w: 4, h: 10 },
+      })),
+    }];
+    const unit = alignmentUnit({
+      id: 'formula-prose-gap-g-1', parentId: 'formula-prose-gap', sourceBlockId: 'formula-prose-gap',
+      kind: 'semantic-group', relation: '1:1', sourceText: '∑ l =1 l',
+    });
+
+    const [resolved] = resolveSourceGeometry([unit], doc, []);
+
+    expect(resolved).toMatchObject({ status: 'unmatched' });
+    expect(resolved.source).toEqual([]);
+  });
+
   it('maps a sentence across a long publisher permission footer removed from translation', () => {
     const prefix = 'Moreover, with increasing demand, the degree of';
     const publisher = [

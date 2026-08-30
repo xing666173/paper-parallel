@@ -40,3 +40,24 @@ export function buildVisionLayoutCacheKey(value: VisionLayoutCacheIdentity): str
     value.renderVersion,
   ].map(encodeURIComponent).join(':');
 }
+
+export interface FormulaOcrCacheIdentity {
+  fileHash: string;
+  pageIndex: number;
+  regionId: string;
+  modelId: string;
+  promptVersion: string;
+  sourceRect: string;
+}
+
+export function buildFormulaOcrCacheKey(value: FormulaOcrCacheIdentity): string {
+  return [
+    'formula-ocr',
+    value.fileHash,
+    String(value.pageIndex),
+    value.regionId,
+    value.modelId,
+    value.promptVersion,
+    value.sourceRect,
+  ].map(encodeURIComponent).join(':');
+}

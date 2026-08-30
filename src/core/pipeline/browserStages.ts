@@ -14,6 +14,7 @@ import {
 } from './preparation';
 import { extractImmutableAssets } from '../assets/extract';
 import { cropPageRegionLossless } from '../assets/crop';
+import { renderLatexFormulaPng } from '../assets/formulaRender';
 import { buildTranslationBatches, translationLimitsFor } from '../translate/batcher';
 import { runTranslationTask } from '../translate/coordinator';
 import {
@@ -25,7 +26,7 @@ import { buildSingleBlockRepairPlan } from '../translate/repair';
 import { chatCompletion } from '../translate/client';
 import { buildBatchPrompt, buildSystemPrompt, SYSTEM_PROMPT_VERSION } from '../translate/prompts';
 import type { TranslationBlockRequest, TranslationBlockResponse, TranslationRequest } from '../translate/protocol';
-import { buildTranslationCacheKey } from '../project/cacheKey';
+import { buildFormulaOcrCacheKey, buildTranslationCacheKey } from '../project/cacheKey';
 import { buildSemanticGroups, buildBlockAndAssetAlignmentUnits } from '../align/semanticUnits';
 import { buildTypstProject, type TypstProject, type TypstSemanticUnit } from '../typst/project';
 import { compileTypstProject, type TypstCompileResult } from '../typst/compiler';
@@ -42,6 +43,12 @@ import { serializeVisionPageAnalysis } from '../vision/protocol';
 import { inspectCompiledPdf, runPdfContentGate } from '../quality/pdfContentGate';
 import { persistValidatedOutputs } from '../quality/finalPersistence';
 import { runVisionFinalReview, type VisionFinalReport } from '../vision/finalReview';
+import {
+  FORMULA_OCR_MODEL,
+  FORMULA_OCR_PROMPT_VERSION,
+  parseFormulaOcrResult,
+  recognizeFormulaCrop,
+} from '../vision/formulaOcr';
 
 const SESSION_KEY_STORAGE = 'paper-parallel.deepseek-key-session';
 const LOCAL_KEY_STORAGE = 'paper-parallel.deepseek-key';
@@ -247,8 +254,67 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
           },
         };
       }
-      const assets = await extractImmutableAssets(prepared.assetRegions, {
-        crop: async (region) => cropPageRegionLossless(await pdf.getPage(region.pageIndex + 1), region.rect, 4),
+      const assetRegions = prepared.assetRegions.map((region) => ({ ...region }));
+      const formulaRegions = assetRegions.filter((region) => (
+        region.kind === 'formula' && Boolean(region.preserveRects?.length)
+      ));
+      let nextFormula = 0;
+      const reconstructFormula = async (): Promise<void> => {
+        while (nextFormula < formulaRegions.length) {
+          const formula = formulaRegions[nextFormula]!;
+          nextFormula += 1;
+          const cacheKey = buildFormulaOcrCacheKey({
+            fileHash: settings.sourceFileHash,
+            pageIndex: formula.pageIndex,
+            regionId: formula.id,
+            modelId: FORMULA_OCR_MODEL,
+            promptVersion: FORMULA_OCR_PROMPT_VERSION,
+            sourceRect: [formula.rect.x, formula.rect.y, formula.rect.w, formula.rect.h]
+              .map((number) => number.toFixed(3)).join(','),
+          });
+          const cached = await options.repository.findArtifact(cacheKey);
+          const recognized = cached
+            ? parseFormulaOcrResult(JSON.parse(await cached.blob.text()))
+            : await recognizeFormulaCrop({
+              blob: await cropPageRegionLossless(
+                await pdf.getPage(formula.pageIndex + 1),
+                formula.rect,
+                6,
+              ),
+              baseUrl: options.baseUrl ?? 'https://api.deepseek.com',
+              apiKey,
+              formulaHint: formula.formulaHint,
+              requiresLargeOperator: formula.requiresLargeOperator,
+              signal,
+            });
+          if (!cached) {
+            await options.repository.putArtifact({
+              key: cacheKey,
+              projectId: options.projectId,
+              kind: 'formula-ocr',
+              blob: new Blob([JSON.stringify(recognized)], { type: 'application/json' }),
+              updatedAt: Date.now(),
+            });
+          }
+          const rendered = await renderLatexFormulaPng(recognized.latex);
+          formula.rawImage = {
+            bytes: new Uint8Array(await rendered.arrayBuffer()),
+            mimeType: 'image/png',
+          };
+        }
+      };
+      await Promise.all(Array.from(
+        { length: Math.min(2, formulaRegions.length) },
+        () => reconstructFormula(),
+      ));
+      const assets = await extractImmutableAssets(assetRegions, {
+        crop: async (region) => cropPageRegionLossless(
+          await pdf.getPage(region.pageIndex + 1),
+          region.rect,
+          4,
+          region.eraseRects,
+          region.preserveRects,
+        ),
       });
       return { ...current, prepared, assets };
     },
@@ -362,10 +428,12 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
         },
         findCached: async (block) => {
           const cached = await options.repository.findTranslation(cacheKey(block));
-          return cached ? {
+          if (!cached) return undefined;
+          const normalizedCached = restoreMissingProtectedTokensFromTranslation([block], { blocks: [{
             blockId: cached.blockId, translation: cached.translation,
             alignmentGroups: cached.alignmentGroups, newTerms: [], warnings: [],
-          } : undefined;
+          }] });
+          return normalizedCached.blocks[0];
         },
         saveValidated: async (record) => options.repository.putTranslation({
           key: cacheKey(requests.find((request) => request.blockId === record.blockId)!),

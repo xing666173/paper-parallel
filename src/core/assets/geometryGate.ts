@@ -27,15 +27,41 @@ function looksLikeVisualLabels(text: string | undefined): boolean {
   return labelLike / lines.length >= 0.6;
 }
 
-function proseCharacterCount(block: Block, rect: Rect): number | undefined {
+function proseCharacterCount(
+  block: Block,
+  rect: Rect,
+  eraseRects: readonly Rect[] = [],
+  preserveRects: readonly Rect[] = [],
+): number | undefined {
   if (!block.characterRects?.length) return undefined;
   const intersecting = block.characterRects.filter((character) => (
     /[A-Za-z\u3400-\u9fff]/.test(character.ch)
     && intersectionArea(rect, character.rect) > 0
+    && (!preserveRects.length || preserveRects.some((preserve) => {
+      const centerX = character.rect.x + character.rect.w / 2;
+      const centerY = character.rect.y + character.rect.h / 2;
+      return centerX >= preserve.x && centerX <= preserve.x + preserve.w
+        && centerY >= preserve.y && centerY <= preserve.y + preserve.h;
+    }))
+    && !eraseRects.some((erase) => {
+      const centerX = character.rect.x + character.rect.w / 2;
+      const centerY = character.rect.y + character.rect.h / 2;
+      return centerX >= erase.x && centerX <= erase.x + erase.w
+        && centerY >= erase.y && centerY <= erase.y + erase.h;
+    })
   ));
   if (!intersecting.length) return 0;
-  const indexes = intersecting.map((character) => character.sourceIndex);
-  const snippet = (block.text ?? '').slice(Math.min(...indexes), Math.max(...indexes) + 1);
+  const indexes = [...new Set(intersecting.map((character) => character.sourceIndex))]
+    .sort((left, right) => left - right);
+  const runs: Array<{ start: number; end: number }> = [];
+  for (const index of indexes) {
+    const last = runs.at(-1);
+    if (last && index <= last.end + 1) last.end = index;
+    else runs.push({ start: index, end: index });
+  }
+  const snippet = preserveRects.length
+    ? runs.map((run) => (block.text ?? '').slice(run.start, run.end + 1)).join('\n')
+    : (block.text ?? '').slice(indexes[0], indexes.at(-1)! + 1);
   // PDF.js may merge the prose above a diagram with labels inside the diagram.
   // Judge only the characters that actually intersect the crop so a label-only
   // tail does not inherit the prose classification of the aggregate block.
@@ -74,7 +100,7 @@ export function validateImmutableRegion(
   if (region.kind !== 'table' && region.kind !== 'code') {
     const longProse = intersectingBlocks.map((block) => ({
       block,
-      characterCount: proseCharacterCount(block, rect),
+      characterCount: proseCharacterCount(block, rect, region.eraseRects, region.preserveRects),
     })).filter(({ block, characterCount }) => (
       block.type === 'paragraph'
       && (block.text?.replace(/\s+/g, ' ').trim().length ?? 0) >= 45

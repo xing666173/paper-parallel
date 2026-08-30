@@ -62,6 +62,104 @@ describe('production pipeline preparation', () => {
     expect(requests.some((request) => request.blockId === 'eq1')).toBe(false);
   });
 
+  it('merges a late-emitted centered title continuation by first-page geometry', () => {
+    const doc = fixtureDoc();
+    const title = doc.blocks.find((block) => block.id === 'title')!;
+    title.rect = { x: 100, y: 50, w: 410, h: 30 };
+    title.text = 'A Faster Parallel Multi-Scalar Multiplication';
+    doc.semanticUnits.find((unit) => unit.id === 'title')!.sourceText = title.text;
+    doc.blocks.push({
+      id: 'title-tail', docId: 'en', type: 'paragraph', pageIndex: 0,
+      rect: { x: 205, y: 84, w: 200, h: 16 }, order: 9,
+      text: 'Algorithm on GPUs', splitAllowed: false, widthMode: 'span',
+    });
+    doc.semanticUnits.push({
+      id: 'title-tail', kind: 'paragraph', sourceText: 'Algorithm on GPUs',
+      protectedTokens: [], layoutRegionId: 'r1', order: 9,
+    });
+    doc.layoutRegions[0].orderedUnitIds.push('title-tail');
+
+    const prepared = prepareImmutableStructure(doc);
+
+    expect(prepared.units.find((unit) => unit.id === 'title')?.sourceText)
+      .toBe('A Faster Parallel Multi-Scalar Multiplication\nAlgorithm on GPUs');
+    expect(prepared.units.some((unit) => unit.id === 'title-tail')).toBe(false);
+  });
+
+  it('moves a late-emitted heading before the first paragraph physically below it', () => {
+    const doc = fixtureDoc();
+    const paragraph = doc.blocks.find((block) => block.id === 'p1')!;
+    paragraph.rect = { x: 50, y: 140, w: 230, h: 40 };
+    doc.blocks.push({
+      id: 'late-heading', docId: 'en', type: 'section', pageIndex: 0,
+      rect: { x: 50, y: 115, w: 150, h: 14 }, order: 9,
+      text: '2.4 Sparse Matrix', splitAllowed: false, widthMode: 'column',
+    });
+    doc.semanticUnits.push({
+      id: 'late-heading', parentId: 'late-heading', kind: 'heading',
+      sourceText: '2.4 Sparse Matrix', protectedTokens: [],
+      layoutRegionId: 'late-region', order: 9,
+    });
+    doc.layoutRegions.push({
+      id: 'late-region', mode: 'double', sourcePage: 0,
+      bounds: { x: 50, y: 115, w: 150, h: 14 }, orderedUnitIds: ['late-heading'],
+    });
+
+    const prepared = prepareImmutableStructure(doc);
+    const region = prepared.regions.find((candidate) => candidate.id === 'r1')!;
+
+    expect(region.orderedUnitIds.indexOf('late-heading')).toBeLessThan(region.orderedUnitIds.indexOf('p1'));
+    expect(prepared.units.find((unit) => unit.id === 'late-heading')?.layoutRegionId).toBe('r1');
+  });
+
+  it('moves a column heading before an aligned span paragraph below it', () => {
+    const doc = fixtureDoc();
+    const paragraph = doc.blocks.find((block) => block.id === 'p1')!;
+    paragraph.rect = { x: 50, y: 140, w: 500, h: 40 };
+    paragraph.widthMode = 'span';
+    doc.blocks.push({
+      id: 'late-span-heading', docId: 'en', type: 'section', pageIndex: 0,
+      rect: { x: 51, y: 115, w: 150, h: 14 }, order: 9,
+      text: '1 Introduction', splitAllowed: false, widthMode: 'column',
+    });
+    doc.semanticUnits.push({
+      id: 'late-span-heading', parentId: 'late-span-heading', kind: 'heading',
+      sourceText: '1 Introduction', protectedTokens: [],
+      layoutRegionId: 'late-span-region', order: 9,
+    });
+    doc.layoutRegions.push({
+      id: 'late-span-region', mode: 'double', sourcePage: 0,
+      bounds: { x: 51, y: 115, w: 150, h: 14 }, orderedUnitIds: ['late-span-heading'],
+    });
+
+    const prepared = prepareImmutableStructure(doc);
+    const region = prepared.regions.find((candidate) => candidate.id === 'r1')!;
+
+    expect(region.orderedUnitIds.indexOf('late-span-heading')).toBeLessThan(region.orderedUnitIds.indexOf('p1'));
+    expect(prepared.units.find((unit) => unit.id === 'late-span-heading')?.layoutRegionId).toBe('r1');
+  });
+
+  it('never removes a short section heading as a nested PDF text fragment', () => {
+    const doc = fixtureDoc();
+    const paragraph = doc.blocks.find((block) => block.id === 'p1')!;
+    paragraph.rect = { x: 50, y: 100, w: 500, h: 100 };
+    doc.blocks.push({
+      id: 'overlapping-heading', docId: 'en', type: 'section', pageIndex: 0,
+      rect: { x: 60, y: 120, w: 80, h: 12 }, order: 9,
+      text: 'Methods', splitAllowed: false, widthMode: 'column',
+    });
+    doc.semanticUnits.push({
+      id: 'overlapping-heading', parentId: 'overlapping-heading', kind: 'heading',
+      sourceText: 'Methods', protectedTokens: [], layoutRegionId: 'r1', order: 9,
+    });
+    doc.layoutRegions[0].orderedUnitIds.push('overlapping-heading');
+
+    const prepared = prepareImmutableStructure(doc);
+
+    expect(prepared.units.find((unit) => unit.id === 'overlapping-heading')?.sourceText)
+      .toBe('Methods');
+  });
+
   it('splits oversized translatable units at natural boundaries before batching', () => {
     const doc = fixtureDoc();
     const longSource = Array.from(
@@ -81,6 +179,26 @@ describe('production pipeline preparation', () => {
       .toBe(longSource.replace(/\s+/g, ' ').trim());
     expect(prepared.units.some((unit) => unit.id === 'p1')).toBe(false);
     expect(prepared.regions[0].orderedUnitIds).toEqual(expect.arrayContaining(parts.map((unit) => unit.id)));
+  });
+
+  it('does not split an oversized paragraph at a visual PDF line wrap inside a sentence', () => {
+    const doc = fixtureDoc();
+    const completeSentences = Array.from(
+      { length: 12 },
+      (_, index) => `Complete sentence ${index + 1} ${'describes the implementation '.repeat(3)}without ambiguity.`,
+    ).join('\n');
+    const finalSentence = `For the GPU implementations, our scheme has a\n${'substantial measured speedup over the baseline '.repeat(8)}without duplicating the continuation.`;
+    const source = `${completeSentences}\n${finalSentence}`;
+    const paragraph = doc.blocks.find((block) => block.id === 'p1')!;
+    paragraph.text = source;
+    doc.semanticUnits.find((unit) => unit.id === 'p1')!.sourceText = source;
+
+    const prepared = prepareImmutableStructure(doc);
+    const parts = prepared.units.filter((unit) => unit.parentId === 'p1');
+
+    expect(parts.length).toBeGreaterThan(1);
+    expect(parts[0]!.sourceText).toMatch(/[.]$/);
+    expect(parts[1]!.sourceText).toMatch(/^For the GPU implementations/);
   });
 
   it('keeps bibliography entries verbatim instead of sending them through translation', () => {
@@ -121,12 +239,12 @@ describe('production pipeline preparation', () => {
     const characterRows = (lines: string[], x: number, ys: number[]) => {
       let sourceIndex = 0;
       return lines.flatMap((line, rowIndex) => {
-        const row = [...line].map((ch, charIndex) => ({
+        const row = [...line].flatMap((ch, charIndex) => ch.trim() ? [{
           ch,
           sourceIndex: sourceIndex + charIndex,
           pageIndex: 0,
           rect: { x: x + charIndex * 5, y: ys[rowIndex]!, w: 4.5, h: 8 },
-        }));
+        }] : []);
         sourceIndex += line.length + 1;
         return row;
       });
@@ -134,14 +252,15 @@ describe('production pipeline preparation', () => {
     const bodyLines = [
       'A. Author. A paral-',
       'lel paper.',
-      'B. Writer. Second title.',
-      'continued venue.',
+      'B. Writer. Second title. https://github.com/',
+      'org/repo , Accessed: 2024-12-',
+      '09.',
     ];
     doc.blocks.push(
       {
         id: 'reference-body', docId: 'en', type: 'paragraph', pageIndex: 0,
         rect: { x: 100, y: 630, w: 380, h: 60 }, order: 4,
-        text: bodyLines.join('\n'), characterRects: characterRows(bodyLines, 100, [630, 642, 660, 672]),
+        text: bodyLines.join('\n'), characterRects: characterRows(bodyLines, 100, [630, 642, 660, 672, 684]),
         splitAllowed: true, widthMode: 'column',
       },
       {
@@ -187,7 +306,7 @@ describe('production pipeline preparation', () => {
 
     expect(references.map((unit) => unit.sourceText)).toEqual([
       '[A1] A. Author. A parallel paper.',
-      '[B2] B. Writer. Second title. continued venue.',
+      '[B2] B. Writer. Second title. https://github.com/org/repo , Accessed: 2024-12-09.',
     ]);
     expect(prepared.units.some((unit) => unit.id === 'reference-body')).toBe(false);
     expect(prepared.units.some((unit) => unit.id === 'reference-labels')).toBe(false);
@@ -377,7 +496,7 @@ describe('production pipeline preparation', () => {
 
     const prepared = prepareImmutableStructure(doc);
     expect(prepared.assetRegions.find((asset) => asset.id === 'eq1')?.rect)
-      .toEqual({ x: 330, y: 500, w: 200, h: 42 });
+      .toEqual({ x: 327, y: 498, w: 206, h: 46 });
     expect(prepared.units.some((unit) => unit.id === 'eq1-tail')).toBe(false);
   });
 
@@ -508,6 +627,59 @@ describe('production pipeline preparation', () => {
       });
   });
 
+  it('preserves an inline formula that reaches the end of its PDF text block', () => {
+    const doc = fixtureDoc();
+    const source = 'Specifically, it calculates a serial of new points T = 2 G';
+    const formula = doc.blocks.find((block) => block.id === 'eq1')!;
+    formula.text = source;
+    formula.rect = { x: 330, y: 500, w: 230, h: 12 };
+    formula.widthMode = 'span';
+    formula.characterRects = [...source].map((ch, index) => ({
+      ch, sourceIndex: index, pageIndex: 0,
+      rect: { x: 330 + index * 3, y: 500, w: 2.8, h: 9 },
+    }));
+    doc.semanticUnits.find((unit) => unit.id === 'eq1')!.sourceText = source;
+
+    const prepared = prepareImmutableStructure(doc);
+
+    expect(prepared.units.find((unit) => unit.id === 'eq1-inline-before')?.sourceText)
+      .toBe('Specifically, it calculates a serial of new points');
+    expect(prepared.units.find((unit) => unit.id === 'eq1-inline-formula')).toMatchObject({
+      kind: 'formula', assetId: 'eq1-inline-formula', sourceText: undefined,
+    });
+    expect(prepared.units.some((unit) => unit.id === 'eq1-inline-after')).toBe(false);
+  });
+
+  it('keeps formulas on adjacent source baselines as separate inline assets', () => {
+    const doc = fixtureDoc();
+    const firstSource = 'The first calculation produces an intermediate output Q = n k P';
+    const secondSource = 'Specifically, it calculates a serial of new values T = 2 G';
+    const first = doc.blocks.find((block) => block.id === 'p1')!;
+    const second = doc.blocks.find((block) => block.id === 'eq1')!;
+    first.text = firstSource;
+    first.rect = { x: 50, y: 380, w: 300, h: 10 };
+    first.characterRects = [...firstSource].map((ch, sourceIndex) => ({
+      ch, sourceIndex, pageIndex: 0,
+      rect: { x: 50 + sourceIndex * 4, y: 380, w: 3.8, h: 9 },
+    }));
+    second.text = secondSource;
+    second.rect = { x: 50, y: 397, w: 300, h: 10 };
+    second.characterRects = [...secondSource].map((ch, sourceIndex) => ({
+      ch, sourceIndex, pageIndex: 0,
+      rect: { x: 50 + sourceIndex * 4, y: 397, w: 3.8, h: 9 },
+    }));
+    doc.semanticUnits.find((unit) => unit.id === 'p1')!.sourceText = firstSource;
+    doc.semanticUnits.find((unit) => unit.id === 'eq1')!.sourceText = secondSource;
+
+    const prepared = prepareImmutableStructure(doc);
+
+    expect(prepared.assetRegions.filter((asset) => /-inline-formula/.test(asset.id)))
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: 'p1-inline-formula' }),
+        expect.objectContaining({ id: 'eq1-inline-formula' }),
+      ]));
+  });
+
   it('merges an overlapping next-block formula fragment and removes detached subscript lines', () => {
     const doc = fixtureDoc();
     const prefix = 'The MSM computations are\n∑';
@@ -560,6 +732,81 @@ describe('production pipeline preparation', () => {
     expect(continuation).toContain('is a lambda-bit scalar');
   });
 
+  it('reclassifies stacked prose-free paragraph fragments as one immutable formula', () => {
+    const doc = fixtureDoc();
+    const firstText = '∑ 1';
+    const secondText = '∑\n2 s − 1\nl =1 l\ni =1 i i';
+    doc.blocks.push(
+      {
+        id: 'stacked-formula-a', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 250, y: 600, w: 18, h: 10 }, order: 1.5,
+        text: firstText, splitAllowed: true, widthMode: 'span',
+      },
+      {
+        id: 'stacked-formula-b', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 268, y: 596, w: 180, h: 34 }, order: 1.6,
+        text: secondText, splitAllowed: true, widthMode: 'span',
+      },
+    );
+    doc.semanticUnits.push(
+      { id: 'stacked-formula-a', kind: 'paragraph', sourceText: firstText, protectedTokens: [], layoutRegionId: 'r1', order: 1.5 },
+      { id: 'stacked-formula-b', kind: 'paragraph', sourceText: secondText, protectedTokens: [], layoutRegionId: 'r1', order: 1.6 },
+    );
+    doc.layoutRegions[0].orderedUnitIds.splice(2, 0, 'stacked-formula-a', 'stacked-formula-b');
+
+    const prepared = prepareImmutableStructure(doc);
+
+    const formulaUnits = prepared.units.filter((unit) => unit.id.startsWith('stacked-formula'));
+    expect(formulaUnits).toHaveLength(1);
+    expect(formulaUnits[0]).toMatchObject({
+      kind: 'formula', sourceText: undefined,
+    });
+    const formulaAssets = prepared.assetRegions.filter((asset) => asset.id.startsWith('stacked-formula'));
+    expect(formulaAssets).toHaveLength(1);
+    expect(formulaAssets[0]).toMatchObject({
+      id: formulaUnits[0]!.assetId, kind: 'formula',
+      rect: expect.objectContaining({ y: 594 }),
+    });
+  });
+
+  it('drops an unsafe stacked formula duplicate embedded in a larger prose aggregate', () => {
+    const doc = fixtureDoc();
+    const firstText = '∑ 1';
+    const secondText = '∑\n2 s − 1\nl =1 l\ni =1 i i';
+    const prose = 'The result is a vector. Finally, we compute the weighted sum, which equals the result of the subtask.';
+    doc.blocks.push(
+      {
+        id: 'formula-prose-owner', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 200, y: 580, w: 310, h: 80 }, order: 1.4,
+        text: prose, splitAllowed: true, widthMode: 'span',
+      },
+      {
+        id: 'embedded-formula-a', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 250, y: 600, w: 18, h: 10 }, order: 1.5,
+        text: firstText, splitAllowed: true, widthMode: 'span',
+      },
+      {
+        id: 'embedded-formula-b', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 268, y: 596, w: 180, h: 34 }, order: 1.6,
+        text: secondText, splitAllowed: true, widthMode: 'span',
+      },
+    );
+    doc.semanticUnits.push(
+      { id: 'formula-prose-owner', kind: 'paragraph', sourceText: prose, protectedTokens: [], layoutRegionId: 'r1', order: 1.4 },
+      { id: 'embedded-formula-a', kind: 'paragraph', sourceText: firstText, protectedTokens: [], layoutRegionId: 'r1', order: 1.5 },
+      { id: 'embedded-formula-b', kind: 'paragraph', sourceText: secondText, protectedTokens: [], layoutRegionId: 'r1', order: 1.6 },
+    );
+    doc.layoutRegions[0].orderedUnitIds.splice(
+      2, 0, 'formula-prose-owner', 'embedded-formula-a', 'embedded-formula-b',
+    );
+
+    const prepared = prepareImmutableStructure(doc);
+
+    expect(prepared.units.find((unit) => unit.id === 'formula-prose-owner')?.sourceText).toBe(prose);
+    expect(prepared.units.some((unit) => unit.id.startsWith('embedded-formula'))).toBe(false);
+    expect(prepared.assetRegions.some((asset) => asset.id.startsWith('embedded-formula'))).toBe(false);
+  });
+
   it('preserves multiple inline formulas found inside a paragraph block', () => {
     const doc = fixtureDoc();
     const source = 'The relation Q = n k P, where n is the scale. Another equation y 2 = x 3 + ax + b, and the point is valid.';
@@ -584,6 +831,59 @@ describe('production pipeline preparation', () => {
       .toBe('where n is the scale. Another equation');
     expect(prepared.units.find((unit) => unit.id === 'p1-inline-after')?.sourceText)
       .toBe('and the point is valid.');
+  });
+
+  it('drops a later broad formula aggregate when tight inline crops already represent it', () => {
+    const doc = fixtureDoc();
+    const source = 'The relation Q = n k P, where n is the scale. Another equation y 2 = x 3 + ax + b, and the point is valid.';
+    const paragraph = doc.blocks.find((block) => block.id === 'p1')!;
+    paragraph.text = source;
+    paragraph.rect = { x: 50, y: 380, w: 500, h: 30 };
+    paragraph.widthMode = 'span';
+    paragraph.characterRects = [...source].map((ch, index) => ({
+      ch, sourceIndex: index, pageIndex: 0,
+      rect: { x: 50 + index * 4, y: 380, w: 3.8, h: 9 },
+    }));
+    doc.semanticUnits.find((unit) => unit.id === 'p1')!.sourceText = source;
+    doc.blocks.push({
+      id: 'broad-formula-duplicate', docId: 'en', type: 'paragraph', pageIndex: 0,
+      rect: { x: 95, y: 377, w: 300, h: 20 }, order: 1.1,
+      text: '∑\n2 s − 1\nl =1 l\ni =1 i i', splitAllowed: true, widthMode: 'span',
+      characterRects: [
+        { ch: '∑', sourceIndex: 0, pageIndex: 0, rect: { x: 110, y: 373, w: 4, h: 5 } },
+        { ch: 'j', sourceIndex: 2, pageIndex: 0, rect: { x: 310, y: 373, w: 4, h: 5 } },
+      ],
+    });
+    doc.blocks.push({
+      id: 'formula-cluster-companion', docId: 'en', type: 'equation', pageIndex: 0,
+      rect: { x: 105, y: 398, w: 20, h: 9 }, order: 1.05,
+      text: 'x = y', splitAllowed: false, widthMode: 'span',
+      characterRects: [...'x = y'].map((ch, sourceIndex) => ({
+        ch, sourceIndex, pageIndex: 0,
+        rect: { x: 105 + sourceIndex * 4, y: 398, w: 3.8, h: 9 },
+      })),
+    });
+    doc.semanticUnits.push({
+      id: 'broad-formula-duplicate', kind: 'paragraph',
+      sourceText: '∑\n2 s − 1\nl =1 l\ni =1 i i', protectedTokens: [],
+      layoutRegionId: 'r1', order: 1.1,
+    });
+    doc.layoutRegions[0].orderedUnitIds.splice(2, 0, 'broad-formula-duplicate');
+
+    const prepared = prepareImmutableStructure(doc);
+
+    expect(prepared.assetRegions.filter((asset) => asset.id.startsWith('p1-inline-formula')))
+      .toHaveLength(2);
+    expect(prepared.assetRegions.find((asset) => asset.id === 'p1-inline-formula')!.rect.y)
+      .toBeLessThanOrEqual(372.5);
+    expect(prepared.assetRegions.find((asset) => asset.id === 'p1-inline-formula')!.preserveRects)
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ x: 109.5 }),
+      ]));
+    expect(prepared.assetRegions.find((asset) => asset.id === 'p1-inline-formula'))
+      .toMatchObject({ requiresLargeOperator: true, formulaHint: expect.any(String) });
+    expect(prepared.units.some((unit) => unit.id === 'broad-formula-duplicate')).toBe(false);
+    expect(prepared.assetRegions.some((asset) => asset.id === 'broad-formula-duplicate')).toBe(false);
   });
 
   it('uses the raw formula substring when cleaned prose no longer shares the full block offset', () => {
@@ -1343,10 +1643,7 @@ describe('production pipeline preparation', () => {
     ].join('\n');
     const block = doc.blocks.find((candidate) => candidate.id === 'p1')!;
     block.text = source;
-    block.fragments = [
-      { pageIndex: 0, rect: block.rect },
-      { pageIndex: 1, rect: { x: 50, y: 100, w: 230, h: 30 } },
-    ];
+    block.rect = { x: 50, y: 100, w: 230, h: 33 };
     doc.semanticUnits.find((unit) => unit.id === 'p1')!.sourceText = source;
 
     const prepared = prepareImmutableStructure(doc);
@@ -2300,6 +2597,25 @@ describe('production pipeline preparation', () => {
     expect(assetBottom).toBeGreaterThan(572);
   });
 
+  it('extends a table crop through a short final note line crossing its bottom edge', () => {
+    const doc = fixtureDoc();
+    doc.blocks.push({
+      id: 'clipped-table-note-tail', docId: 'en', type: 'paragraph', pageIndex: 0,
+      rect: { x: 70, y: 201, w: 220, h: 8 }, order: 4,
+      text: 'where Groth represents all operations in its protocol.',
+      splitAllowed: false, widthMode: 'span',
+    });
+
+    const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: [{
+      id: 'vision-table-with-clipped-note', kind: 'table', pageIndex: 0,
+      rect: { x: 60, y: 100, w: 250, h: 106 }, widthMode: 'span',
+    }] });
+    const asset = prepared.assetRegions.find((candidate) => candidate.id === 'vision-table-with-clipped-note');
+
+    const assetBottom = asset ? asset.rect.y + asset.rect.h : undefined;
+    expect(assetBottom).toBe(211);
+  });
+
   it('reconstructs a complete caption-anchored algorithm and rejects a misplaced Vision code crop', () => {
     const doc = fixtureDoc();
     doc.blocks = doc.blocks.filter((block) => block.id !== 'fig-caption');
@@ -2369,6 +2685,41 @@ describe('production pipeline preparation', () => {
     expect(algorithm.rect.x).toBeGreaterThanOrEqual(328);
     expect(algorithm.rect.x + algorithm.rect.w).toBeLessThanOrEqual(532);
     expect(prepared.units.some((unit) => unit.id === 'left-unrelated-list')).toBe(true);
+  });
+
+  it('keeps wide pseudocode rows attached to a caption misclassified as a column item', () => {
+    const doc = fixtureDoc();
+    doc.blocks = doc.blocks.filter((block) => block.id !== 'fig-caption');
+    doc.semanticUnits = doc.semanticUnits.filter((unit) => unit.id !== 'fig-caption');
+    doc.layoutRegions[0].orderedUnitIds = doc.layoutRegions[0].orderedUnitIds
+      .filter((unitId) => unitId !== 'fig-caption');
+    doc.blocks.push(
+      { id: 'mixed-algorithm-caption', docId: 'en', type: 'caption', pageIndex: 0, rect: { x: 50, y: 200, w: 205, h: 12 }, order: 4, text: 'Algorithm 2 Bucket Reduction', splitAllowed: false, widthMode: 'column' },
+      { id: 'mixed-algorithm-header', docId: 'en', type: 'paragraph', pageIndex: 0, rect: { x: 52, y: 218, w: 200, h: 32 }, order: 5, text: 'Require: point vector B\nEnsure: result G', splitAllowed: false, widthMode: 'column' },
+      { id: 'mixed-algorithm-wide-row', docId: 'en', type: 'equation', pageIndex: 0, rect: { x: 55, y: 270, w: 300, h: 12 }, order: 6, text: '3: M ← M + B // accumulate every bucket point', splitAllowed: false, widthMode: 'span' },
+      { id: 'mixed-algorithm-tail', docId: 'en', type: 'paragraph', pageIndex: 0, rect: { x: 55, y: 286, w: 180, h: 30 }, order: 7, text: '4: G ← G + M\n5: return G', splitAllowed: false, widthMode: 'column' },
+      { id: 'mixed-after-heading', docId: 'en', type: 'section', pageIndex: 0, rect: { x: 50, y: 340, w: 220, h: 16 }, order: 8, text: '3 Next Section', splitAllowed: false, widthMode: 'column' },
+    );
+    doc.semanticUnits.push(
+      { id: 'mixed-algorithm-caption', kind: 'caption', sourceText: 'Algorithm 2 Bucket Reduction', protectedTokens: [], layoutRegionId: 'r1', order: 4 },
+      { id: 'mixed-algorithm-header', kind: 'paragraph', sourceText: 'Require: point vector B\nEnsure: result G', protectedTokens: [], layoutRegionId: 'r1', order: 5 },
+      { id: 'mixed-algorithm-wide-row', kind: 'formula', sourceText: '3: M ← M + B // accumulate every bucket point', protectedTokens: [], assetId: 'mixed-algorithm-wide-row', layoutRegionId: 'r1', order: 6 },
+      { id: 'mixed-algorithm-tail', kind: 'paragraph', sourceText: '4: G ← G + M\n5: return G', protectedTokens: [], layoutRegionId: 'r1', order: 7 },
+      { id: 'mixed-after-heading', kind: 'heading', sourceText: '3 Next Section', protectedTokens: [], layoutRegionId: 'r1', order: 8 },
+    );
+    doc.layoutRegions[0].orderedUnitIds.push(
+      'mixed-algorithm-caption', 'mixed-algorithm-header', 'mixed-algorithm-wide-row',
+      'mixed-algorithm-tail', 'mixed-after-heading',
+    );
+
+    const prepared = prepareImmutableStructure(doc);
+    const algorithm = prepared.assetRegions.find((asset) => asset.id === 'mixed-algorithm-caption-body-asset')!;
+
+    expect(algorithm).toBeDefined();
+    expect(algorithm.rect.y + algorithm.rect.h).toBeGreaterThanOrEqual(324);
+    expect(algorithm.widthMode).toBe('span');
+    expect(prepared.units.some((unit) => unit.id === 'mixed-algorithm-tail')).toBe(false);
+    expect(prepared.units.some((unit) => unit.id === 'mixed-after-heading')).toBe(true);
   });
 
   it('stops a deterministic algorithm crop before a detached figure formula cluster', () => {

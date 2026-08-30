@@ -6,7 +6,10 @@ import {
   VISION_FINAL_REVIEW_LAST_RESORT_RENDER_SCALE,
   VISION_FINAL_REVIEW_RENDER_SCALE,
 } from '../../src/core/vision/finalReview';
-import { buildVisionFinalReviewPrompt } from '../../src/core/vision/prompts';
+import {
+  buildVisionFinalConfirmationPrompt,
+  buildVisionFinalReviewPrompt,
+} from '../../src/core/vision/prompts';
 import { PdfPageRenderTimeoutError } from '../../src/core/vision/render';
 
 describe('vision: final PDF review', () => {
@@ -16,6 +19,24 @@ describe('vision: final PDF review', () => {
     expect(prompt).toContain('Do not call content missing merely from page density');
     expect(prompt).toContain('duplicated figure, table, formula, or algorithm');
     expect(prompt).toContain('scattered baseline text');
+  });
+
+  it('requires confirmation to distinguish an intact table from prose-like rows', () => {
+    const prompt = buildVisionFinalConfirmationPrompt(17, [{
+      type: 'table_changed', bbox: [100, 60, 700, 120], evidence: 'rows appear prose-like',
+    }]);
+    expect(prompt).toContain('headers, aligned rows/columns, rules, and cell values');
+    expect(prompt).toContain('return no table_changed issue');
+    expect(prompt).toContain('three-line');
+    expect(prompt).toContain('must not be reported as untranslated_body');
+  });
+
+  it('allows an intact inline formula to reflow onto a separate line', () => {
+    const prompt = buildVisionFinalConfirmationPrompt(14, [{
+      type: 'formula_changed', bbox: [100, 650, 800, 50], evidence: 'formula moved to separate line',
+    }]);
+    expect(prompt).toContain('complete formula may move from inline prose');
+    expect(prompt).toContain('operators, variables, limits/subscripts');
   });
 
   it('renders dense academic pages above CSS-pixel resolution for legible inspection', () => {
@@ -190,6 +211,35 @@ describe('vision: final PDF review', () => {
     expect(requests[0].messages[0].content[0].text).toContain(
       'Do not report small or fine English labels inside verified immutable assets as unreadable merely because they are dense',
     );
+  });
+
+  it('re-attaches source references when confirming a changed-table candidate', async () => {
+    const requests: any[] = [];
+    const page = { getViewport: () => ({ width: 1, height: 1 }), render: () => ({ promise: Promise.resolve() }) };
+    const report = await runVisionFinalReview({
+      sourcePdf: { numPages: 1, getPage: async () => page },
+      targetPdf: { numPages: 1, getPage: async () => page },
+      manifest: { units: [] } as any,
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test',
+      renderPage: async (_page, role, index) => `data:image/png;base64,${role}-${index}`,
+      complete: async (request: any) => {
+        requests.push(request);
+        return {
+          content: requests.length === 1
+            ? '{"target_page":1,"issues":[{"type":"table_changed","severity":"severe","bbox":[1,1,20,20],"confidence":0.9,"evidence":"rows appear prose-like"}]}'
+            : '{"target_page":1,"issues":[]}',
+          usage: { promptTokens: 1, completionTokens: 1 },
+        };
+      },
+    });
+
+    expect(report.pass).toBe(true);
+    const confirmationImages = requests[1].messages[0].content
+      .filter((part: any) => part.type === 'image_url');
+    expect(confirmationImages).toEqual([
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,source-0', detail: 'original' } },
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,target-0', detail: 'original' } },
+    ]);
   });
 
   it('releases a stalled page render and retries it at a lower scale before calling Vision', async () => {

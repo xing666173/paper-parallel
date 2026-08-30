@@ -43,6 +43,8 @@ export async function cropPageRegionLossless(
   page: RenderablePdfPage,
   rect: Rect,
   scale = 4,
+  eraseRects: readonly Rect[] = [],
+  preserveRects: readonly Rect[] = [],
 ): Promise<Blob> {
   const viewport = page.getViewport({ scale });
   const source = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
@@ -50,16 +52,65 @@ export async function cropPageRegionLossless(
 
   const target = createCanvas(Math.max(1, Math.ceil(rect.w * scale)), Math.max(1, Math.ceil(rect.h * scale)));
   const targetContext = context2d(target);
-  targetContext.drawImage(
-    source,
-    Math.floor(rect.x * scale),
-    Math.floor(rect.y * scale),
-    Math.ceil(rect.w * scale),
-    Math.ceil(rect.h * scale),
-    0,
-    0,
-    Math.ceil(rect.w * scale),
-    Math.ceil(rect.h * scale),
-  );
+  const cropWidth = Math.ceil(rect.w * scale);
+  const cropHeight = Math.ceil(rect.h * scale);
+  if (preserveRects.length) {
+    targetContext.fillStyle = '#ffffff';
+    targetContext.fillRect(0, 0, cropWidth, cropHeight);
+    for (const preserve of preserveRects) {
+      const left = Math.max(rect.x, preserve.x);
+      const top = Math.max(rect.y, preserve.y);
+      const right = Math.min(rect.x + rect.w, preserve.x + preserve.w);
+      const bottom = Math.min(rect.y + rect.h, preserve.y + preserve.h);
+      if (right <= left || bottom <= top) continue;
+      const sourceX = Math.floor(left * scale);
+      const sourceY = Math.floor(top * scale);
+      const sourceRight = Math.ceil(right * scale);
+      const sourceBottom = Math.ceil(bottom * scale);
+      const width = sourceRight - sourceX;
+      const height = sourceBottom - sourceY;
+      targetContext.drawImage(
+        source,
+        sourceX,
+        sourceY,
+        width,
+        height,
+        sourceX - Math.floor(rect.x * scale),
+        sourceY - Math.floor(rect.y * scale),
+        width,
+        height,
+      );
+    }
+  } else {
+    targetContext.drawImage(
+      source,
+      Math.floor(rect.x * scale),
+      Math.floor(rect.y * scale),
+      cropWidth,
+      cropHeight,
+      0,
+      0,
+      cropWidth,
+      cropHeight,
+    );
+  }
+  if (eraseRects.length && !preserveRects.length) {
+    targetContext.save();
+    targetContext.fillStyle = '#ffffff';
+    for (const erase of eraseRects) {
+      const left = Math.max(rect.x, erase.x);
+      const top = Math.max(rect.y, erase.y);
+      const right = Math.min(rect.x + rect.w, erase.x + erase.w);
+      const bottom = Math.min(rect.y + rect.h, erase.y + erase.h);
+      if (right <= left || bottom <= top) continue;
+      targetContext.fillRect(
+        Math.floor((left - rect.x) * scale),
+        Math.floor((top - rect.y) * scale),
+        Math.ceil((right - left) * scale),
+        Math.ceil((bottom - top) * scale),
+      );
+    }
+    targetContext.restore();
+  }
   return exportPng(target);
 }

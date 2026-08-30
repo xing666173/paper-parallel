@@ -251,6 +251,63 @@ function findOrderedTokenRanges(text: string, needle: string, from: number): {
   return { ranges, confidence: 0.92 };
 }
 
+function findOrderedFormulaRanges(text: string, needle: string, from: number): {
+  ranges: Array<[number, number]>;
+  confidence: number;
+} | null {
+  const source = normalizeWithSourceIndices(text);
+  const target = normalizeWithSourceIndices(needle).normalized;
+  const normalizedFrom = source.sourceIndices.findIndex((index) => index >= from);
+  if (
+    target.length < 3
+    || target.length > 24
+    || !/[=+−∑∏∫≤≥<>]/u.test(target)
+    || normalizedFrom < 0
+  ) {
+    return null;
+  }
+
+  const matchedNormalizedIndexes: number[] = [];
+  let cursor = normalizedFrom;
+  for (const targetChar of target) {
+    const relativeIndex = source.normalized.slice(cursor).indexOf(targetChar);
+    if (relativeIndex < 0) return null;
+    const sourceIndex = cursor + relativeIndex;
+    matchedNormalizedIndexes.push(sourceIndex);
+    cursor = sourceIndex + 1;
+  }
+
+  const firstIndex = matchedNormalizedIndexes[0]!;
+  const lastIndex = matchedNormalizedIndexes.at(-1)!;
+  if (lastIndex - firstIndex + 1 > target.length * 4 + 12) return null;
+
+  const matched = new Set(matchedNormalizedIndexes);
+  const skippedText = source.normalized
+    .slice(firstIndex, lastIndex + 1)
+    .split('')
+    .filter((_, index) => !matched.has(firstIndex + index))
+    .join('');
+  if (wordTokens(skippedText).some((token) => (
+    [...token.value].filter((char) => /\p{L}/u.test(char)).length > 1
+  ))) {
+    return null;
+  }
+
+  const rawIndexes = matchedNormalizedIndexes.map((index) => source.sourceIndices[index]!);
+  const ranges: Array<[number, number]> = [];
+  let rangeStart = rawIndexes[0]!;
+  let previous = rangeStart;
+  for (const rawIndex of rawIndexes.slice(1)) {
+    if (rawIndex !== previous + 1) {
+      ranges.push([rangeStart, previous + 1]);
+      rangeStart = rawIndex;
+    }
+    previous = rawIndex;
+  }
+  ranges.push([rangeStart, previous + 1]);
+  return { ranges, confidence: 0.9 };
+}
+
 /**
  * Semi-global token alignment: match the complete sentence against the best
  * substring of one source block while tolerating a small number of inserted
@@ -445,6 +502,32 @@ export function resolveSourceGeometry(
             source,
             orderedRanges.confidence,
             'source-sentence-matched-across-masked-ranges',
+          );
+        }
+      }
+    }
+
+    if (!range) {
+      const formulaRanges = findOrderedFormulaRanges(
+        designatedBlock.text ?? '',
+        unit.sourceText,
+        cursorByBlock.get(designatedBlock.id) ?? 0,
+      );
+      if (formulaRanges) {
+        const chars = indexedChars(designatedBlock);
+        const source = formulaRanges.ranges.flatMap(([start, end]) => resolveTextRangeRects({
+          start,
+          end,
+          page: designatedBlock.pageIndex,
+          charRects: chars,
+        }));
+        if (source.length) {
+          cursorByBlock.set(designatedBlock.id, formulaRanges.ranges.at(-1)![1]);
+          return withSource(
+            unit,
+            source,
+            formulaRanges.confidence,
+            'source-formula-matched-across-stacked-ranges',
           );
         }
       }

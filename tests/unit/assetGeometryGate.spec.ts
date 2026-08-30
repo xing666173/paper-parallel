@@ -130,6 +130,50 @@ describe('immutable asset geometry gate', () => {
     ).issues).toContain('body-prose-density');
   });
 
+  it('accepts an expanded formula only when every newly intersecting prose glyph is explicitly erased', () => {
+    const prose = block(
+      'p1',
+      'The surrounding explanation remains ordinary prose outside the immutable formula.',
+      55, 145, 230, 20,
+    );
+    prose.characterRects = [...prose.text!].map((ch, index) => ({
+      ch, sourceIndex: index, pageIndex: 0,
+      rect: { x: 58 + index * 2.2, y: 148, w: 2, h: 8 },
+    }));
+    const eraseRects = prose.characterRects.map((character) => ({ ...character.rect }));
+
+    expect(validateImmutableRegion(
+      {
+        id: 'masked-formula', kind: 'formula', pageIndex: 0,
+        rect: { x: 50, y: 140, w: 240, h: 24 }, widthMode: 'column', eraseRects,
+      },
+      page,
+      [prose],
+    ).issues).not.toContain('body-prose-density');
+  });
+
+  it('counts only composited glyph areas for a reconstructed formula crop', () => {
+    const prose = block(
+      'p1',
+      'A long natural language sentence surrounds the formula and must stay outside the source pixels.',
+      55, 145, 230, 20,
+    );
+    prose.characterRects = [...prose.text!].map((ch, index) => ({
+      ch, sourceIndex: index, pageIndex: 0,
+      rect: { x: 58 + index * 2.2, y: 148, w: 2, h: 8 },
+    }));
+
+    expect(validateImmutableRegion(
+      {
+        id: 'composited-formula', kind: 'formula', pageIndex: 0,
+        rect: { x: 50, y: 140, w: 240, h: 24 }, widthMode: 'column',
+        preserveRects: [{ x: 260, y: 146, w: 20, h: 12 }],
+      },
+      page,
+      [prose],
+    ).issues).not.toContain('body-prose-density');
+  });
+
   it('does not treat benchmark names such as Is-Prime as natural-language prose', () => {
     const labels = block(
       'labels',

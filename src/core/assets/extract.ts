@@ -22,6 +22,18 @@ export interface DetectedAssetRegion {
   rect: Rect;
   widthMode: WidthMode;
   captionUnitId?: string;
+  /** Source-page glyph boxes to paint white in a conventional rectangular crop. */
+  eraseRects?: Rect[];
+  /**
+   * Source-page areas to composite onto white after reconstructing a split
+   * formula. This avoids erasing accents or limits whose ink overlaps a
+   * neighbouring text glyph box.
+   */
+  preserveRects?: Rect[];
+  /** Flattened text hint used only to identify a formula in a noisy source crop. */
+  formulaHint?: string;
+  /** The reconstructed source glyphs prove that a large operator is required. */
+  requiresLargeOperator?: boolean;
   rawImage?: { bytes: Uint8Array; mimeType: ImmutableAssetMimeType };
 }
 
