@@ -247,6 +247,44 @@ describe('source PDF geometry', () => {
     expect(resolved.source[0].rects[0].w).toBeLessThan(doc.blocks[0].rect.w);
   });
 
+  it('maps one translated sentence across masked page furniture in the same PDF block', () => {
+    const prefix = 'However, the DSPs of the VP1502';
+    const furniture = 'MSMAC: Accelerating Multi-Scalar Multiplication for Zero-Knowledge Proof';
+    const suffix = 'The total computation of Steps 1 and 2 is reduced.';
+    const text = `${prefix}\n${furniture}\n${suffix}`;
+    const furnitureStart = text.indexOf(furniture);
+    const suffixStart = text.indexOf(suffix);
+    const doc = emptyDoc();
+    doc.blocks = [{
+      id: 'mixed', docId: 'en', type: 'paragraph', pageIndex: 3,
+      rect: { x: 20, y: 100, w: 240, h: 220 }, order: 0,
+      splitAllowed: true, widthMode: 'column', text,
+      characterRects: [...text].map((ch, sourceIndex) => ({
+        ch, sourceIndex, pageIndex: 3,
+        rect: {
+          x: 20 + (sourceIndex % 60) * 3,
+          y: sourceIndex < furnitureStart ? 100 : sourceIndex < suffixStart ? 200 : 300,
+          w: 3,
+          h: 10,
+        },
+      })),
+    }];
+    const unit = alignmentUnit({
+      id: 'mixed-g-2', parentId: 'mixed', sourceBlockId: 'mixed',
+      kind: 'semantic-group', relation: '1:1', sourceText: `${prefix} ${suffix}`,
+    });
+
+    const [resolved] = resolveSourceGeometry([unit], doc, []);
+
+    expect(resolved).toMatchObject({
+      status: 'aligned', confidence: 0.92,
+      fallbackReason: 'source-sentence-matched-across-masked-ranges',
+    });
+    expect(resolved.source.flatMap((set) => set.rects).map((rect) => rect.y))
+      .toEqual(expect.arrayContaining([100, 300]));
+    expect(resolved.source.flatMap((set) => set.rects).some((rect) => rect.y === 200)).toBe(false);
+  });
+
   it('refuses to highlight a whole paragraph for an unresolved short sentence', () => {
     const doc = emptyDoc();
     doc.blocks = [{

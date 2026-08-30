@@ -98,6 +98,13 @@ async function saveFailureDiagnostics(page: import('@playwright/test').Page): Pr
   if (typstSource) {
     await writeFile(path.join(outputDirectory, 'diagnostic-main.typ'), typstSource);
   }
+  const alignmentManifest = await page.evaluate(() => (
+    globalThis as typeof globalThis & { __PP_DIAGNOSTIC_ALIGNMENT_MANIFEST__?: unknown }
+  ).__PP_DIAGNOSTIC_ALIGNMENT_MANIFEST__ ?? null);
+  await writeFile(
+    path.join(outputDirectory, 'diagnostic-alignment-manifest.json'),
+    JSON.stringify(alignmentManifest, null, 2),
+  );
 }
 
 test('real API exact-paper PDF quality acceptance', async () => {

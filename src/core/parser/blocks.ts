@@ -30,6 +30,10 @@ function hasCaptionSuffix(suffix: string | undefined): boolean {
   if (suffix === undefined) return false;
   const trimmed = suffix.trimStart();
   if (!trimmed) return true;
+  // A wrapped body sentence can begin with a cross-reference such as
+  // "Figure 11. The sub-task size ...".  Treat that demonstrative sentence
+  // continuation as prose, not as a caption that owns the pixels above it.
+  if (/^[.]\s+(?:the|this|these|those|it|we|our|a|an)\b/i.test(trimmed)) return false;
   if (/^[:：.\-–—]/.test(trimmed)) return true;
   return trimmed.length < suffix.length && /^[A-Z\u4e00-\u9fff]/.test(trimmed);
 }

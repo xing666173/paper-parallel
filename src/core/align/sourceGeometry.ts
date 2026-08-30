@@ -179,6 +179,47 @@ function wordTokens(text: string): WordToken[] {
   }));
 }
 
+function findOrderedTokenRanges(text: string, needle: string, from: number): {
+  ranges: Array<[number, number]>;
+  confidence: number;
+} | null {
+  const target = wordTokens(needle);
+  const source = wordTokens(text).filter((token) => token.end > from);
+  if (target.length < 6 || source.length < target.length) return null;
+
+  const matchedSourceIndexes: number[] = [];
+  let sourceCursor = 0;
+  for (const targetToken of target) {
+    const relativeIndex = source.slice(sourceCursor)
+      .findIndex((sourceToken) => sourceToken.value === targetToken.value);
+    if (relativeIndex < 0) return null;
+    const sourceIndex = sourceCursor + relativeIndex;
+    matchedSourceIndexes.push(sourceIndex);
+    sourceCursor = sourceIndex + 1;
+  }
+
+  const firstIndex = matchedSourceIndexes[0]!;
+  const lastIndex = matchedSourceIndexes.at(-1)!;
+  const spannedTokenCount = lastIndex - firstIndex + 1;
+  // Exact ordered tokens are a strong signal, but cap the amount of skipped
+  // source material so repeated words cannot bridge unrelated paragraphs.
+  if (spannedTokenCount > target.length * 3 + 24) return null;
+
+  const ranges: Array<[number, number]> = [];
+  let rangeStartIndex = matchedSourceIndexes[0]!;
+  let previousIndex = rangeStartIndex;
+  for (const sourceIndex of matchedSourceIndexes.slice(1)) {
+    if (sourceIndex !== previousIndex + 1) {
+      ranges.push([source[rangeStartIndex]!.start, source[previousIndex]!.end]);
+      rangeStartIndex = sourceIndex;
+    }
+    previousIndex = sourceIndex;
+  }
+  ranges.push([source[rangeStartIndex]!.start, source[previousIndex]!.end]);
+  if (ranges.length < 2) return null;
+  return { ranges, confidence: 0.92 };
+}
+
 /**
  * Semi-global token alignment: match the complete sentence against the best
  * substring of one source block while tolerating a small number of inserted
@@ -349,6 +390,32 @@ export function resolveSourceGeometry(
         range = approximate.range;
         sourceConfidence = approximate.confidence;
         fallbackReason = 'source-sentence-fuzzy-token-match';
+      }
+    }
+
+    if (!range) {
+      const orderedRanges = findOrderedTokenRanges(
+        designatedBlock.text ?? '',
+        unit.sourceText,
+        cursorByBlock.get(designatedBlock.id) ?? 0,
+      );
+      if (orderedRanges) {
+        const chars = indexedChars(designatedBlock);
+        const source = orderedRanges.ranges.flatMap(([start, end]) => resolveTextRangeRects({
+          start,
+          end,
+          page: designatedBlock.pageIndex,
+          charRects: chars,
+        }));
+        if (source.length) {
+          cursorByBlock.set(designatedBlock.id, orderedRanges.ranges.at(-1)![1]);
+          return withSource(
+            unit,
+            source,
+            orderedRanges.confidence,
+            'source-sentence-matched-across-masked-ranges',
+          );
+        }
       }
     }
 

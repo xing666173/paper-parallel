@@ -986,6 +986,49 @@ function looksLikeVisualLabels(block: Doc['blocks'][number]): boolean {
   return labelLike / lines.length >= 0.7;
 }
 
+function trailingVisualLabelClusterTop(block: Doc['blocks'][number]): number | undefined {
+  if (!block.characterRects?.length || !/\r?\n/.test(block.text ?? '')) return undefined;
+  let offset = 0;
+  const lines = (block.text ?? '').split(/\r?\n/).map((text) => {
+    const start = offset;
+    const end = start + text.length;
+    offset = end + 1;
+    const words = text.match(/[A-Za-z]{2,}/g) ?? [];
+    const functionWords = text.match(/\b(?:the|a|an|and|or|of|to|in|for|with|that|this|is|are|was|were|as|by|from|on|at|has|have)\b/gi) ?? [];
+    const trimmed = text.trim();
+    const labelLike = Boolean(trimmed)
+      && trimmed.length <= 90
+      && words.length <= 10
+      && functionWords.length <= 1
+      && !/[.!?;:]\s*$/.test(trimmed);
+    return { start, end, words: words.length, labelLike };
+  });
+  let cut = lines.length;
+  while (cut > 0 && lines[cut - 1]!.labelLike) cut -= 1;
+  if (lines.length - cut < 3 || cut === 0 || !lines.slice(0, cut).some((line) => line.words >= 6)) {
+    return undefined;
+  }
+  const clusterStart = lines[cut]!.start;
+  const clusterEnd = lines.at(-1)!.end;
+  const characters = block.characterRects.filter((character) => (
+    character.sourceIndex >= clusterStart
+    && character.sourceIndex < clusterEnd
+    && character.ch.trim().length > 0
+  ));
+  if (!characters.length) return undefined;
+  return Math.max(1, Math.min(...characters.map((character) => character.rect.y)) - 6);
+}
+
+function looksLikeNumericTableBody(block: Doc['blocks'][number]): boolean {
+  const text = block.text ?? '';
+  const numericTokens = text.match(/\d+(?:[.,]\d+)?/g)?.length ?? 0;
+  const wordTokens = text.match(/[A-Za-z]{2,}/g)?.length ?? 0;
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).length;
+  return lines >= 3
+    && numericTokens >= 6
+    && numericTokens >= Math.max(4, wordTokens * 0.6);
+}
+
 function visualColumnBounds(doc: Doc, anchor: Doc['blocks'][number]): { x: number; w: number } {
   const pageWidth = doc.pages[anchor.pageIndex]?.width ?? doc.meta.paperWidth;
   const columnBlocks = doc.blocks.filter((block) => (
@@ -1208,9 +1251,13 @@ function rebuildBibliographyFromGeometry(
       const followsHeadingInLaterColumn = character.pageIndex === heading.block.pageIndex
         && headingIsNarrowLeftColumn
         && centerX >= page.width / 2;
+      const sameHeadingColumn = (centerX < page.width / 2)
+        === (heading.block.rect.x + heading.block.rect.w / 2 < page.width / 2);
       const afterHeading = character.pageIndex > heading.block.pageIndex
         || (character.pageIndex === heading.block.pageIndex
-          && (followsHeadingInLaterColumn || centerY > heading.block.rect.y + heading.block.rect.h + 2));
+          && (followsHeadingInLaterColumn
+            || (centerY > heading.block.rect.y + heading.block.rect.h + 2
+              && (multiColumnBibliography || sameHeadingColumn))));
       const beforeNextHeading = !nextHeading
         || character.pageIndex < nextHeading.pageIndex
         || (character.pageIndex === nextHeading.pageIndex && centerY < nextHeading.rect.y - 2);
@@ -1739,9 +1786,13 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
         && block.rect.y < bottom
         && block.rect.x < captionBlock.rect.x + captionBlock.rect.w
         && block.rect.x + block.rect.w > captionBlock.rect.x
-        && looksLikeVisualLabels(block)
       ))
-      .reduce((boundary, block) => Math.min(boundary, Math.max(1, block.rect.y - 6)), Number.POSITIVE_INFINITY);
+      .flatMap((block) => {
+        const clusterTop = trailingVisualLabelClusterTop(block);
+        if (clusterTop !== undefined) return [clusterTop];
+        return looksLikeVisualLabels(block) ? [Math.max(1, block.rect.y - 6)] : [];
+      })
+      .reduce((boundary, top) => Math.min(boundary, top), Number.POSITIVE_INFINITY);
     const inferredTop = Math.max(
       furnitureBoundary,
       Number.isFinite(visualLabelTop)
@@ -1822,7 +1873,12 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
       const lastBody = blocks.get(bodyIds.at(-1)!)!;
       bottom = lastBody.rect.y + lastBody.rect.h + 6;
     }
-    if (bottom - top < 18) throw new Error(`无法可靠确定表 ${caption.id} 的不可变区域（高度不足）`);
+    // A full-width table can be split by PDF.js into a shallow span header and
+    // a separate column-classified numeric body. Keep a valid header-height
+    // seed here; the attached-table pass below expands it through the numeric
+    // rows before final geometry validation. Requiring 18pt at this point
+    // rejects real two-row headers (MSMAC Table 3 was 15.4pt high).
+    if (bottom - top < 12) throw new Error(`无法可靠确定表 ${caption.id} 的不可变区域（高度不足）`);
 
     const id = `${caption.id}-asset`;
     const column = visualColumnBounds(doc, captionBlock);
@@ -1952,6 +2008,7 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
   // visual-label predicate, so they remain outside the immutable region.
   for (const asset of assetRegions) {
     if (asset.kind !== 'table') continue;
+    const captionDerived = !verifiedAssetRegions.includes(asset);
     const assetBottom = asset.rect.y + asset.rect.h;
     const continuations = doc.blocks.filter((block) => {
       if (block.pageIndex !== asset.pageIndex || block.id === asset.captionUnitId) return false;
@@ -1963,7 +2020,7 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
       return horizontalOverlap / Math.max(1, Math.min(block.rect.w, asset.rect.w)) >= 0.2
         && block.rect.y <= assetBottom + 4
         && block.rect.y + block.rect.h > assetBottom + 2
-        && looksLikeVisualLabels(block)
+        && (looksLikeVisualLabels(block) || (captionDerived && looksLikeNumericTableBody(block)))
         && numericTokens.length >= 2;
     });
     if (!continuations.length) continue;

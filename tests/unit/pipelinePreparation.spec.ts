@@ -251,6 +251,80 @@ describe('production pipeline preparation', () => {
     expect(rebuilt.map((unit) => unit.sourceText)).toEqual(references.map((reference) => reference.text));
   });
 
+  it('does not absorb lower left-column body text into a right-column bibliography', () => {
+    const doc = fixtureDoc();
+    const characters = (text: string, x: number, y: number) => [...text].map((ch, sourceIndex) => ({
+      ch, sourceIndex, pageIndex: 0,
+      rect: { x: x + sourceIndex * 3, y, w: 2.8, h: 8 },
+    }));
+    const leftBody = 'We also compare the accelerator with prior systems and report its speedup.';
+    const referenceTexts = [
+      '[1] First bibliography entry.',
+      '[2] Second bibliography entry.',
+    ];
+    doc.blocks.push(
+      {
+        id: 'right-references', docId: 'en', type: 'section', pageIndex: 0,
+        rect: { x: 330, y: 340, w: 90, h: 12 }, order: 4,
+        text: 'References', splitAllowed: true, widthMode: 'column',
+      },
+      {
+        id: 'left-body-after-right-heading', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 50, y: 390, w: 240, h: 20 }, order: 5,
+        text: leftBody, characterRects: characters(leftBody, 50, 390),
+        splitAllowed: true, widthMode: 'column',
+      },
+      ...referenceTexts.map((text, index) => ({
+        id: `right-reference-${index + 1}`,
+        docId: 'en' as const,
+        type: 'reference' as const,
+        pageIndex: 0,
+        rect: { x: 330, y: 370 + index * 30, w: 230, h: 12 },
+        order: 6 + index,
+        text,
+        characterRects: characters(text, 330, 370 + index * 30),
+        splitAllowed: true,
+        widthMode: 'column' as const,
+      })),
+    );
+    doc.layoutRegions.push({
+      id: 'mixed-ending', mode: 'double', sourcePage: 0,
+      bounds: { x: 50, y: 340, w: 510, h: 100 },
+      orderedUnitIds: [
+        'left-body-after-right-heading', 'right-references',
+        'right-reference-1', 'right-reference-2',
+      ],
+    });
+    doc.semanticUnits.push(
+      {
+        id: 'right-references', parentId: 'right-references', kind: 'heading',
+        sourceText: 'References', protectedTokens: [], layoutRegionId: 'mixed-ending', order: 4,
+      },
+      {
+        id: 'left-body-after-right-heading', kind: 'paragraph', sourceText: leftBody,
+        protectedTokens: [], layoutRegionId: 'mixed-ending', order: 5,
+      },
+      ...referenceTexts.map((sourceText, index) => ({
+        id: `right-reference-${index + 1}`,
+        parentId: 'right-references',
+        kind: 'reference' as const,
+        sourceText,
+        protectedTokens: [],
+        layoutRegionId: 'mixed-ending',
+        order: 6 + index,
+      })),
+    );
+
+    const prepared = prepareImmutableStructure(doc);
+    const rebuilt = prepared.units.filter((unit) => (
+      unit.parentId === 'right-references' && unit.kind === 'reference'
+    ));
+
+    expect(prepared.units.find((unit) => unit.id === 'left-body-after-right-heading')?.sourceText)
+      .toBe(leftBody);
+    expect(rebuilt.map((unit) => unit.sourceText)).toEqual(referenceTexts);
+  });
+
   it('recovers a citation-leading body continuation that was misclassified as a reference', () => {
     const doc = fixtureDoc();
     doc.blocks.push({
@@ -1423,6 +1497,70 @@ describe('production pipeline preparation', () => {
     expect(prepared.units.some((unit) => unit.id === 'plot-labels')).toBe(false);
   });
 
+  it('uses a trailing diagram-label cluster inside a mixed prose block as the figure top', () => {
+    const doc = fixtureDoc();
+    doc.blocks = doc.blocks.filter((block) => block.id !== 'fig-caption');
+    doc.semanticUnits = doc.semanticUnits.filter((unit) => unit.id !== 'fig-caption');
+    doc.layoutRegions[0]!.orderedUnitIds = doc.layoutRegions[0]!.orderedUnitIds
+      .filter((id) => id !== 'fig-caption');
+    const prose = [
+      'The controller processes requests from the input queue and preserves ordering.',
+      'The conflict buffer provides enough capacity for the delayed operation.',
+      'Therefore, execution completes without introducing overflow errors.',
+    ];
+    const labels = [
+      'Base address for Bucket RAM',
+      'Batch size',
+      'Destination selector Bucket RAM Temp RAM Output FIFO',
+      'OP size addr_b addr_t src_sel dest_sel step_b step_t',
+      'Instruction type',
+      'Base address for Temp RAM',
+    ];
+    const lines = [...prose, ...labels];
+    const text = lines.join('\n');
+    let sourceIndex = 0;
+    const lineYs = [100, 112, 124, 220, 232, 244, 256, 268, 280];
+    const characterRects = lines.flatMap((line, lineIndex) => {
+      const characters = [...line].map((ch, index) => ({
+        ch, sourceIndex: sourceIndex + index, pageIndex: 0,
+        rect: { x: 54 + index * 3, y: lineYs[lineIndex]!, w: 2.8, h: 8 },
+      }));
+      sourceIndex += line.length + 1;
+      return characters;
+    });
+    doc.blocks.push(
+      {
+        id: 'mixed-prose-labels', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 54, y: 100, w: 242, h: 188 }, order: 4,
+        text, characterRects, splitAllowed: true, widthMode: 'column',
+      },
+      {
+        id: 'mixed-figure-caption', docId: 'en', type: 'caption', pageIndex: 0,
+        rect: { x: 120, y: 300, w: 110, h: 9 }, order: 5,
+        text: 'Figure 5: instruction', splitAllowed: false, widthMode: 'column',
+      },
+    );
+    doc.semanticUnits.push(
+      {
+        id: 'mixed-prose-labels', kind: 'paragraph', sourceText: text,
+        protectedTokens: [], layoutRegionId: 'r1', order: 4,
+      },
+      {
+        id: 'mixed-figure-caption', kind: 'caption', sourceText: 'Figure 5: instruction',
+        protectedTokens: [], layoutRegionId: 'r1', order: 5,
+      },
+    );
+    doc.layoutRegions[0].orderedUnitIds.push('mixed-prose-labels', 'mixed-figure-caption');
+
+    const prepared = prepareImmutableStructure(doc);
+    const figure = prepared.assetRegions.find((asset) => asset.id === 'mixed-figure-caption-asset')!;
+
+    expect(figure.rect.y).toBeCloseTo(214);
+    expect(figure.rect.y + figure.rect.h).toBeCloseTo(294);
+    expect(prepared.units.find((unit) => unit.id === 'mixed-prose-labels')?.sourceText)
+      .toBe(prose.join('\n'));
+  });
+
   it('uses conservative page content margins for a pure-vector full-width figure fallback', () => {
     const doc = fixtureDoc();
     doc.pageCount = 2;
@@ -1504,6 +1642,73 @@ describe('production pipeline preparation', () => {
 
     expect(table.rect.y + table.rect.h).toBeGreaterThanOrEqual(375);
     expect(prepared.units.some((unit) => unit.id === 'cross-table-right')).toBe(false);
+  });
+
+  it('extends a shallow full-width table header through a column-classified numeric body', () => {
+    const doc = fixtureDoc();
+    const tableRows = [
+      'CPU MSMAC',
+      'Size 1 core 64 cores 1 FPGA 4 FPGAs',
+      '2^18 2.45s 122.47ms 10.65ms 6.30ms 230x 11x 389x 19x',
+      '2^19 4.63s 218.28ms 19.45ms 9.79ms 238x 11x 473x 22x',
+      '2^20 9.09s 399.61ms 34.15ms 14.39ms 266x 12x 632x 28x',
+    ].join('\n');
+    doc.blocks.push(
+      {
+        id: 'msmac-table-caption', docId: 'en', type: 'caption', pageIndex: 0,
+        rect: { x: 182.7, y: 82.4, w: 246.3, h: 9 }, order: 4,
+        text: 'Table 3: Performance comparison between MSMAC and CPU',
+        splitAllowed: false, widthMode: 'span',
+      },
+      {
+        id: 'msmac-table-body', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 90.7, y: 108.9, w: 210.1, h: 112.1 }, order: 5,
+        text: tableRows, splitAllowed: true, widthMode: 'column',
+      },
+      {
+        id: 'msmac-table-header', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 115.5, y: 118.8, w: 405.8, h: 8 }, order: 6,
+        text: '1 core 64 cores 1 FPGA 4 FPGAs v.s. CPU (1 core) v.s. CPU (64 cores)',
+        splitAllowed: true, widthMode: 'span',
+      },
+      {
+        id: 'msmac-conclusion', docId: 'en', type: 'section', pageIndex: 0,
+        rect: { x: 318, y: 240.2, w: 87.8, h: 10.9 }, order: 7,
+        text: '6 CONCLUSION', splitAllowed: true, widthMode: 'column',
+      },
+    );
+    doc.semanticUnits.push(
+      {
+        id: 'msmac-table-caption', kind: 'caption',
+        sourceText: 'Table 3: Performance comparison between MSMAC and CPU',
+        protectedTokens: [], layoutRegionId: 'r1', order: 4,
+      },
+      {
+        id: 'msmac-table-body', kind: 'paragraph', sourceText: tableRows,
+        protectedTokens: [], layoutRegionId: 'r1', order: 5,
+      },
+      {
+        id: 'msmac-table-header', kind: 'paragraph',
+        sourceText: '1 core 64 cores 1 FPGA 4 FPGAs v.s. CPU (1 core) v.s. CPU (64 cores)',
+        protectedTokens: [], layoutRegionId: 'r1', order: 6,
+      },
+      {
+        id: 'msmac-conclusion', kind: 'heading', sourceText: '6 CONCLUSION',
+        protectedTokens: [], layoutRegionId: 'r1', order: 7,
+      },
+    );
+    doc.layoutRegions[0].orderedUnitIds.push(
+      'msmac-table-caption', 'msmac-table-body', 'msmac-table-header', 'msmac-conclusion',
+    );
+
+    const prepared = prepareImmutableStructure(doc);
+    const table = prepared.assetRegions.find((asset) => asset.id === 'msmac-table-caption-asset')!;
+
+    expect(table.rect.y).toBeCloseTo(97.4);
+    expect(table.rect.y + table.rect.h).toBeGreaterThanOrEqual(223);
+    expect(prepared.units.some((unit) => unit.id === 'msmac-table-body')).toBe(false);
+    expect(prepared.units.some((unit) => unit.id === 'msmac-table-header')).toBe(false);
+    expect(prepared.units.some((unit) => unit.id === 'msmac-conclusion')).toBe(true);
   });
 
   it('trims an over-tall Vision table crop before the following prose paragraph', () => {

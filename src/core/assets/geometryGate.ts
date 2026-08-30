@@ -36,6 +36,10 @@ function proseCharacterCount(block: Block, rect: Rect): number | undefined {
   if (!intersecting.length) return 0;
   const indexes = intersecting.map((character) => character.sourceIndex);
   const snippet = (block.text ?? '').slice(Math.min(...indexes), Math.max(...indexes) + 1);
+  // PDF.js may merge the prose above a diagram with labels inside the diagram.
+  // Judge only the characters that actually intersect the crop so a label-only
+  // tail does not inherit the prose classification of the aggregate block.
+  if (looksLikeVisualLabels(snippet)) return 0;
   const chineseCount = snippet.match(/[\u3400-\u9fff]/g)?.length ?? 0;
   const englishWords = snippet.match(/[A-Za-z]{2,}/g) ?? [];
   const functionWords = snippet.match(/\b(?:the|a|an|and|or|of|to|in|for|with|that|this|is|are|was|were|as|by|from|on|at)\b/g) ?? [];

@@ -153,11 +153,12 @@ describe('parser: lines -> blocks', () => {
       line('Table 3 shows the comparison of execution time.', 100),
       line('Figure 9, the sweet spot is 17 parallel units.', 125),
       line('Figure 11 show that our pipeline improves performance.', 150),
+      line('Figure 11. The sub-task size is denoted as k.', 175),
       line('Figure 3: Profiling before and after acceleration', 190),
       line('Table 2: ZK-Tracer PPA Results', 220),
     ], 612, 792);
 
-    for (const prose of ['Table 3 shows', 'Figure 9,', 'Figure 11 show']) {
+    for (const prose of ['Table 3 shows', 'Figure 9,', 'Figure 11 show', 'Figure 11. The']) {
       expect(blocks.find((block) => block.text.includes(prose))?.type).toBe('paragraph');
     }
     expect(blocks.find((block) => block.text.includes('Figure 3:'))?.type).toBe('caption');
