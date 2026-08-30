@@ -61,24 +61,30 @@ function lastFragmentPage(b: WorkBlock): number {
   return b.fragments[b.fragments.length - 1]?.pageIndex ?? b.pageIndex;
 }
 
-/** 两遍法合并:先跨页同栏(优先),再同页左→右栏 */
+function liesAcrossPageBoundary(
+  previous: WorkBlock,
+  next: WorkBlock,
+  pageHeights: ReadonlyMap<number, number>,
+): boolean {
+  const previousRect = previous.fragments.at(-1)?.rect ?? previous.rect;
+  const pageHeight = pageHeights.get(lastFragmentPage(previous)) ?? 792;
+  return previousRect.y + previousRect.h >= pageHeight * 0.72
+    && next.rect.y <= pageHeight * 0.35;
+}
+
+/** 两遍法合并:先接上一页阅读顺序末尾→下一页开头,再接同页左→右栏 */
 function mergePass(
   list: WorkBlock[],
   allowCrossPage: boolean,
   allowCrossCol: boolean,
+  pageHeights: ReadonlyMap<number, number>,
 ): WorkBlock[] {
   const out: WorkBlock[] = [];
-  const seenPageColumns = new Set<string>();
+  const seenPages = new Set<number>();
   for (const b of list) {
-    const pageColumn = `${b.pageIndex}:${b.col}`;
-    const firstInPageColumn = !seenPageColumns.has(pageColumn);
-    seenPageColumns.add(pageColumn);
-    const crossPagePrev = allowCrossPage && firstInPageColumn
-      ? [...out].reverse().find((candidate) =>
-          lastFragmentPage(candidate) === b.pageIndex - 1 && candidate.col === b.col,
-        )
-      : undefined;
-    const prev = crossPagePrev ?? out[out.length - 1];
+    const firstInPage = !seenPages.has(b.pageIndex);
+    seenPages.add(b.pageIndex);
+    const prev = out[out.length - 1];
     if (
       prev &&
       isContinuable(prev) &&
@@ -87,14 +93,15 @@ function mergePass(
     ) {
       const crossPage =
         allowCrossPage &&
-        firstInPageColumn &&
+        firstInPage &&
         b.pageIndex === lastFragmentPage(prev) + 1 &&
-        b.col === prev.col;
+        liesAcrossPageBoundary(prev, b, pageHeights);
       const crossCol =
         allowCrossCol &&
         b.pageIndex === lastFragmentPage(prev) &&
         prev.col === 'left' &&
-        b.col === 'right';
+        b.col === 'right' &&
+        liesAcrossPageBoundary(prev, b, pageHeights);
       if (crossPage || crossCol) {
         const sourceOffset = (prev.text || '').length + 1;
         prev.text = `${prev.text || ''}\n${b.text || ''}`;
@@ -142,8 +149,14 @@ export function buildDoc(pages: ParsedPage[], docId: 'en' | 'zh'): Doc {
     }
   }
 
-  // 2) 续接合并:第一遍跨页同栏,第二遍同页左→右
-  const merged = mergePass(mergePass(seq, true, false), false, true);
+  // 2) 续接合并:第一遍跨页阅读顺序末尾→开头,第二遍同页左→右
+  const pageHeights = new Map(pages.map((page) => [page.no, page.h] as const));
+  const merged = mergePass(
+    mergePass(seq, true, false, pageHeights),
+    false,
+    true,
+    pageHeights,
+  );
 
   // 3) 两遍赋值:先统一换新 id,再建 prev/next 链与章节归属
   //    (不能在单遍里取 merged[i+1].id,否则拿到的是尚未替换的旧 id)

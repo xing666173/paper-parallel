@@ -213,6 +213,12 @@ describe('production pipeline preparation', () => {
       id: 'two-column-references', docId: 'en', type: 'section', pageIndex: 0,
       rect: { x: 50, y: 600, w: 90, h: 14 }, order: 4,
       text: 'References', splitAllowed: true, widthMode: 'column',
+    }, {
+      id: 'right-table-above-references', docId: 'en', type: 'paragraph', pageIndex: 0,
+      rect: { x: 330, y: 40, w: 230, h: 25 }, order: 4.5,
+      text: '421.6MB/s 1.34GB/s 578.0MB/s',
+      characterRects: characters('421.6MB/s 1.34GB/s 578.0MB/s', 330, 40),
+      splitAllowed: true, widthMode: 'column',
     }, ...references.map((reference) => ({
       id: reference.id,
       docId: 'en' as const,
@@ -228,11 +234,18 @@ describe('production pipeline preparation', () => {
     doc.layoutRegions.push({
       id: 'two-column-reference-region', mode: 'double', sourcePage: 0,
       bounds: { x: 50, y: 80, w: 510, h: 610 },
-      orderedUnitIds: ['two-column-references', ...references.map((reference) => reference.id)],
+      orderedUnitIds: [
+        'right-table-above-references', 'two-column-references',
+        ...references.map((reference) => reference.id),
+      ],
     });
     doc.semanticUnits.push({
       id: 'two-column-references', parentId: 'two-column-references', kind: 'heading',
       sourceText: 'References', protectedTokens: [], layoutRegionId: 'two-column-reference-region', order: 4,
+    }, {
+      id: 'right-table-above-references', kind: 'paragraph',
+      sourceText: '421.6MB/s 1.34GB/s 578.0MB/s', protectedTokens: [],
+      layoutRegionId: 'two-column-reference-region', order: 4.5,
     }, ...references.map((reference) => ({
       id: reference.id,
       parentId: 'two-column-references',
@@ -249,6 +262,7 @@ describe('production pipeline preparation', () => {
     ));
 
     expect(rebuilt.map((unit) => unit.sourceText)).toEqual(references.map((reference) => reference.text));
+    expect(prepared.units.some((unit) => unit.id === 'right-table-above-references')).toBe(true);
   });
 
   it('does not absorb lower left-column body text into a right-column bibliography', () => {
@@ -701,6 +715,51 @@ describe('production pipeline preparation', () => {
       .toEqual({ x: 52, y: 415, w: 238, h: 67 });
   });
 
+  it('clamps a coarse column-table crop before the neighbouring prose column', () => {
+    const doc = fixtureDoc();
+    const neighbouringText = 'The neighbouring prose contains several numbers such as 200 MHz and 1.71 GB per second.';
+    doc.blocks.push(
+      {
+        id: 'left-table-caption', docId: 'en', type: 'caption', pageIndex: 0,
+        rect: { x: 55, y: 82, w: 237, h: 9 }, order: 4,
+        text: 'Table 1: Resource and Power Consumption', splitAllowed: false, widthMode: 'column',
+      },
+      {
+        id: 'right-neighbour-prose', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 318, y: 100, w: 242, h: 110 }, order: 5,
+        text: neighbouringText,
+        characterRects: [...neighbouringText].map((ch, sourceIndex) => ({
+          ch, sourceIndex, pageIndex: 0,
+          rect: { x: 318 + sourceIndex * 2.7, y: 100, w: 2.5, h: 8 },
+        })),
+        splitAllowed: true, widthMode: 'column',
+      },
+    );
+    doc.semanticUnits.push(
+      {
+        id: 'left-table-caption', kind: 'table-title', sourceText: 'Table 1: Resource and Power Consumption',
+        protectedTokens: [], layoutRegionId: 'r1', order: 4,
+      },
+      {
+        id: 'right-neighbour-prose', kind: 'paragraph',
+        sourceText: neighbouringText,
+        protectedTokens: [], layoutRegionId: 'r1', order: 5,
+      },
+    );
+    doc.layoutRegions[0].orderedUnitIds.push('left-table-caption', 'right-neighbour-prose');
+
+    const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: [{
+      id: 'vision-left-table', kind: 'table', pageIndex: 0,
+      rect: { x: 49, y: 95, w: 281, h: 117 }, widthMode: 'column',
+      captionUnitId: 'left-table-caption',
+    }] });
+    const table = prepared.assetRegions.find((asset) => asset.id === 'vision-left-table')!;
+
+    expect(table.rect.x + table.rect.w).toBeLessThan(300);
+    expect(prepared.units.find((unit) => unit.id === 'right-neighbour-prose')?.sourceText)
+      .toBe(neighbouringText);
+  });
+
   it('extends a shallow table header crop through an attached visual-label table body', () => {
     const doc = fixtureDoc();
     const tableText = [
@@ -824,6 +883,118 @@ describe('production pipeline preparation', () => {
     expect(asset.rect.y + asset.rect.h).toBeGreaterThanOrEqual(227);
     expect(prepared.units.some((unit) => unit.id === 'math-wide-left')).toBe(false);
     expect(prepared.units.some((unit) => unit.id === 'math-wide-right')).toBe(false);
+  });
+
+  it('combines stacked display formulas and removes only the formula prefix from following prose', () => {
+    const doc = fixtureDoc();
+    doc.blocks = doc.blocks.filter((block) => block.id !== 'fig-caption');
+    doc.semanticUnits = doc.semanticUnits.filter((unit) => unit.id !== 'fig-caption');
+    doc.layoutRegions[0].orderedUnitIds = doc.layoutRegions[0].orderedUnitIds
+      .filter((unitId) => unitId !== 'fig-caption');
+    const charactersForLines = (lines: Array<{ text: string; x: number; y: number }>) => {
+      let sourceIndex = 0;
+      return lines.flatMap((line) => {
+        const characters = [...line.text].map((ch, index) => ({
+          ch, sourceIndex: sourceIndex + index, pageIndex: 0,
+          rect: { x: line.x + index * 4.5, y: line.y, w: 4.2, h: 8 },
+        }));
+        sourceIndex += line.text.length + 1;
+        return characters;
+      });
+    };
+    const leadLines = [
+      { text: 'A reduced scalar set contains many elements.', x: 55, y: 150 },
+      { text: '∑ N', x: 135, y: 180 },
+    ];
+    const leadText = leadLines.map((line) => line.text).join('\n');
+    doc.blocks.push({
+      id: 'formula-lead-prose', docId: 'en', type: 'paragraph', pageIndex: 0,
+      rect: { x: 55, y: 150, w: 220, h: 38 }, order: 9.5,
+      text: leadText, characterRects: charactersForLines(leadLines),
+      splitAllowed: true, widthMode: 'column',
+    });
+    doc.semanticUnits.push({
+      id: 'formula-lead-prose', kind: 'paragraph', sourceText: leadText,
+      protectedTokens: [], layoutRegionId: 'r1', order: 9.5,
+    });
+    doc.layoutRegions[0].orderedUnitIds.push('formula-lead-prose');
+    const first = doc.blocks.find((block) => block.id === 'eq1')!;
+    first.text = 'S = a';
+    first.rect = { x: 130, y: 180, w: 45, h: 8 };
+    first.characterRects = charactersForLines([{ text: first.text, x: 130, y: 180 }]);
+    first.widthMode = 'column';
+    const firstUnit = doc.semanticUnits.find((unit) => unit.id === 'eq1')!;
+    firstUnit.sourceText = first.text;
+    firstUnit.order = 10;
+
+    const longFormulaExplanation = [
+      { text: 'Bucket classification groups the points into different buckets.', x: 55, y: 266 },
+      ...Array.from({ length: 14 }, (_, index) => ({
+        text: `Additional explanatory prose remains translatable after the formula crop ${index + 1}.`,
+        x: 55,
+        y: 278 + index * 10,
+      })),
+    ];
+    const blocks = [
+      {
+        id: 'formula-six-parts', type: 'paragraph' as const, order: 11,
+        lines: [
+          { text: 'i = 1', x: 100, y: 180 },
+          { text: '(6)', x: 270, y: 180 },
+        ],
+      },
+      {
+        id: 'formula-seven', type: 'equation' as const, order: 12,
+        lines: [{ text: 'R = k S', x: 125, y: 207 }],
+      },
+      {
+        id: 'formula-seven-eight-parts', type: 'paragraph' as const, order: 13,
+        lines: [
+          { text: 'k = 0   (7)', x: 92, y: 207 },
+          { text: 'MSM (a, G) = R', x: 65, y: 237 },
+        ],
+      },
+      {
+        id: 'formula-eight-tail-and-prose', type: 'paragraph' as const, order: 14,
+        lines: [
+          { text: 'j = 0', x: 130, y: 247 },
+          { text: '(8)', x: 270, y: 247 },
+          ...longFormulaExplanation,
+        ],
+      },
+    ];
+    for (const candidate of blocks) {
+      const text = candidate.lines.map((line) => line.text).join('\n');
+      const left = Math.min(...candidate.lines.map((line) => line.x));
+      const top = Math.min(...candidate.lines.map((line) => line.y));
+      const right = Math.max(...candidate.lines.map((line) => line.x + line.text.length * 4.5));
+      const bottom = Math.max(...candidate.lines.map((line) => line.y + 8));
+      doc.blocks.push({
+        id: candidate.id, docId: 'en', type: candidate.type, pageIndex: 0,
+        rect: { x: left, y: top, w: right - left, h: bottom - top },
+        order: candidate.order, text, characterRects: charactersForLines(candidate.lines),
+        splitAllowed: true, widthMode: 'column',
+      });
+      doc.semanticUnits.push({
+        id: candidate.id,
+        kind: candidate.type === 'equation' ? 'formula' : 'paragraph',
+        sourceText: text, protectedTokens: [], layoutRegionId: 'r1', order: candidate.order,
+      });
+      doc.layoutRegions[0].orderedUnitIds.push(candidate.id);
+    }
+
+    const prepared = prepareImmutableStructure(doc);
+    const formula = prepared.assetRegions.find((asset) => asset.id === 'eq1')!;
+
+    expect(formula.rect.y).toBeLessThanOrEqual(178);
+    expect(formula.rect.y + formula.rect.h).toBeGreaterThanOrEqual(255);
+    expect(formula.rect.y + formula.rect.h).toBeLessThan(266);
+    expect(prepared.units.some((unit) => unit.id === 'formula-seven')).toBe(false);
+    expect(prepared.units.some((unit) => unit.id === 'formula-seven-eight-parts')).toBe(false);
+    const followingProse = prepared.units.find((unit) => unit.sourceText?.includes('Bucket classification'))?.sourceText;
+    expect(followingProse).toContain('Bucket classification groups the points into different buckets.');
+    expect(followingProse).toContain('Additional explanatory prose remains translatable');
+    expect(followingProse).not.toContain('(8)');
   });
 
   it('removes symbol-font diagram labels after prose while keeping the immutable figure pixels', () => {
@@ -1048,6 +1219,23 @@ describe('production pipeline preparation', () => {
       .toBe('Specifically, as shown in Figure 6,');
   });
 
+  it('preserves a wrapped equation term before explanatory prose when the previous line ends in an operator', () => {
+    const doc = fixtureDoc();
+    const source = [
+      'The coefficients must satisfy the condition 4 a 3 +',
+      '27 b 2 ≠ 0. Here, the parameters define the elliptic curve.',
+    ].join('\n');
+    const block = doc.blocks.find((candidate) => candidate.id === 'p1')!;
+    block.text = source;
+    block.rect = { x: 50, y: 100, w: 230, h: 20 };
+    doc.semanticUnits.find((unit) => unit.id === 'p1')!.sourceText = source;
+
+    const prepared = prepareImmutableStructure(doc);
+
+    expect(prepared.units.find((unit) => unit.id === 'p1')?.sourceText)
+      .toContain('27 b 2 ≠ 0. Here');
+  });
+
   it('preserves short function words and opening punctuation at wrapped prose line starts', () => {
     const doc = fixtureDoc();
     doc.pageCount = 2;
@@ -1070,6 +1258,31 @@ describe('production pipeline preparation', () => {
     const prepared = prepareImmutableStructure(doc);
 
     expect(prepared.units.find((unit) => unit.id === 'p1')?.sourceText).toBe(source);
+  });
+
+  it('preserves decimal and percentage prefixes on wrapped prose lines', () => {
+    const doc = fixtureDoc();
+    doc.pageCount = 2;
+    doc.pages.push({ pageIndex: 1, width: 612, height: 792, columns: [] });
+    const source = [
+      'The first page contains ordinary prose.',
+      '3.63 times in time consumption and 5.06 times in clock cycles.',
+      '7.8% compared with the unoptimized architecture.',
+    ].join('\n');
+    const block = doc.blocks.find((candidate) => candidate.id === 'p1')!;
+    block.text = source;
+    block.fragments = [
+      { pageIndex: 0, rect: block.rect },
+      { pageIndex: 1, rect: { x: 50, y: 100, w: 230, h: 30 } },
+    ];
+    doc.semanticUnits.find((unit) => unit.id === 'p1')!.sourceText = source;
+
+    const prepared = prepareImmutableStructure(doc);
+    const preparedSource = prepared.units.find((unit) => unit.id === 'p1')?.sourceText ?? '';
+
+    expect(preparedSource).toContain('3.63 times');
+    expect(preparedSource).toContain('5.06 times');
+    expect(preparedSource).toContain('7.8%');
   });
 
   it('removes symbol-only extraction lines next to a verified display formula', () => {
@@ -1250,6 +1463,32 @@ describe('production pipeline preparation', () => {
       .toBe('The translated body remains here.');
     expect(prepared.units.some((unit) => unit.id === 'running-author')).toBe(false);
     expect(prepared.regions[0].orderedUnitIds).not.toContain('running-author');
+  });
+
+  it('removes an embedded publisher permission footer without deleting adjacent body prose', () => {
+    const doc = fixtureDoc();
+    const source = [
+      'The discussion begins on the first page.',
+      'Corresponding author: author@example.edu.',
+      'Permission to make digital or hard copies of all or part of this work for personal use is granted.',
+      'Copyrights for components of this work owned by others must be honored.',
+      'DAC ’24, June 23–27, 2024, San Francisco, CA, USA',
+      '© 2024 Copyright held by the owner/author(s). Publication rights licensed to ACM.',
+      'ACM ISBN 979-8-4007-0601-1/24/06. . . $15.00',
+      'https://doi.org/10.1145/3649329.3658259',
+      'The discussion continues on the following page.',
+    ].join('\n');
+    const body = doc.blocks.find((block) => block.id === 'p1')!;
+    body.text = source;
+    body.characterRects = undefined;
+    doc.semanticUnits.find((unit) => unit.id === 'p1')!.sourceText = source;
+
+    const prepared = prepareImmutableStructure(doc);
+
+    expect(prepared.units.find((unit) => unit.id === 'p1')?.sourceText).toBe([
+      'The discussion begins on the first page.',
+      'The discussion continues on the following page.',
+    ].join('\n'));
   });
 
   it('creates a full-width horizontal row for source figures aligned on the same band', () => {
@@ -1495,6 +1734,57 @@ describe('production pipeline preparation', () => {
       rect: { x: 62, y: 90, w: 496, h: 111 },
     }));
     expect(prepared.units.some((unit) => unit.id === 'plot-labels')).toBe(false);
+  });
+
+  it('starts a column figure after prose carried by a cross-column text block', () => {
+    const doc = fixtureDoc();
+    doc.blocks = doc.blocks.filter((block) => block.id !== 'fig-caption');
+    doc.semanticUnits = doc.semanticUnits.filter((unit) => unit.id !== 'fig-caption');
+    doc.layoutRegions[0]!.orderedUnitIds = doc.layoutRegions[0]!.orderedUnitIds
+      .filter((id) => id !== 'fig-caption');
+    const lines = [
+      { text: 'The left column sentence anchors the aggregate block.', x: 50, y: 450 },
+      { text: 'This right column paragraph appears immediately before the large source figure.', x: 330, y: 100 },
+      { text: 'It provides enough natural language evidence to establish the visual boundary.', x: 330, y: 112 },
+      { text: 'to mask latency of data input.', x: 330, y: 124 },
+    ];
+    let sourceIndex = 0;
+    const text = lines.map((line) => line.text).join('\n');
+    const characterRects = lines.flatMap((line) => {
+      const characters = [...line.text].map((ch, index) => ({
+        ch, sourceIndex: sourceIndex + index, pageIndex: 0,
+        rect: { x: line.x + index * 3, y: line.y, w: 2.8, h: 8 },
+      }));
+      sourceIndex += line.text.length + 1;
+      return characters;
+    });
+    doc.blocks.push(
+      {
+        id: 'cross-column-prose', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 50, y: 450, w: 230, h: 12 }, order: 4,
+        fragments: [
+          { pageIndex: 0, rect: { x: 50, y: 450, w: 230, h: 12 } },
+          { pageIndex: 0, rect: { x: 330, y: 100, w: 230, h: 32 } },
+        ],
+        text, characterRects, splitAllowed: true, widthMode: 'column',
+      },
+      {
+        id: 'right-figure-caption', docId: 'en', type: 'caption', pageIndex: 0,
+        rect: { x: 330, y: 400, w: 200, h: 12 }, order: 5,
+        text: 'Figure 8: Right-column architecture.', splitAllowed: false, widthMode: 'column',
+      },
+    );
+    doc.semanticUnits.push(
+      { id: 'cross-column-prose', kind: 'paragraph', sourceText: text, protectedTokens: [], layoutRegionId: 'r1', order: 4 },
+      { id: 'right-figure-caption', kind: 'caption', sourceText: 'Figure 8: Right-column architecture.', protectedTokens: [], layoutRegionId: 'r1', order: 5 },
+    );
+    doc.layoutRegions[0]!.orderedUnitIds.push('cross-column-prose', 'right-figure-caption');
+
+    const prepared = prepareImmutableStructure(doc);
+    const figure = prepared.assetRegions.find((asset) => asset.id === 'right-figure-caption-asset')!;
+
+    expect(figure.rect.y).toBeGreaterThanOrEqual(138);
+    expect(figure.rect.y).toBeLessThan(148);
   });
 
   it('uses a trailing diagram-label cluster inside a mixed prose block as the figure top', () => {
@@ -1816,6 +2106,38 @@ describe('production pipeline preparation', () => {
     expect(prepared.regions[0].orderedUnitIds).toEqual(expect.arrayContaining([
       'algorithm-caption', 'algorithm-caption-body-asset', 'after-algorithm',
     ]));
+  });
+
+  it('keeps a column algorithm crop inside the caption column', () => {
+    const doc = fixtureDoc();
+    doc.blocks = doc.blocks.filter((block) => block.id !== 'fig-caption');
+    doc.semanticUnits = doc.semanticUnits.filter((unit) => unit.id !== 'fig-caption');
+    doc.layoutRegions[0].orderedUnitIds = doc.layoutRegions[0].orderedUnitIds
+      .filter((unitId) => unitId !== 'fig-caption');
+    doc.blocks.push(
+      { id: 'right-algorithm-caption', docId: 'en', type: 'caption', pageIndex: 0, rect: { x: 330, y: 200, w: 200, h: 12 }, order: 4, text: 'Algorithm 1 Reduction', splitAllowed: false, widthMode: 'column' },
+      { id: 'right-algorithm-line-1', docId: 'en', type: 'paragraph', pageIndex: 0, rect: { x: 332, y: 218, w: 198, h: 24 }, order: 5, text: '1: for i ← 1 to n do', splitAllowed: false, widthMode: 'column' },
+      { id: 'right-algorithm-line-2', docId: 'en', type: 'paragraph', pageIndex: 0, rect: { x: 332, y: 246, w: 198, h: 24 }, order: 6, text: '2: return Q', splitAllowed: false, widthMode: 'column' },
+      { id: 'left-unrelated-list', docId: 'en', type: 'paragraph', pageIndex: 0, rect: { x: 50, y: 220, w: 230, h: 48 }, order: 5.5, text: '1: unrelated left-column list\n2: preserve this content', splitAllowed: true, widthMode: 'column' },
+    );
+    doc.semanticUnits.push(
+      { id: 'right-algorithm-caption', kind: 'caption', sourceText: 'Algorithm 1 Reduction', protectedTokens: [], layoutRegionId: 'r1', order: 4 },
+      { id: 'right-algorithm-line-1', kind: 'paragraph', sourceText: '1: for i ← 1 to n do', protectedTokens: [], layoutRegionId: 'r1', order: 5 },
+      { id: 'right-algorithm-line-2', kind: 'paragraph', sourceText: '2: return Q', protectedTokens: [], layoutRegionId: 'r1', order: 6 },
+      { id: 'left-unrelated-list', kind: 'paragraph', sourceText: '1: unrelated left-column list\n2: preserve this content', protectedTokens: [], layoutRegionId: 'r1', order: 5.5 },
+    );
+    doc.layoutRegions[0].orderedUnitIds.push(
+      'right-algorithm-caption', 'right-algorithm-line-1',
+      'left-unrelated-list', 'right-algorithm-line-2',
+    );
+
+    const prepared = prepareImmutableStructure(doc);
+    const algorithm = prepared.assetRegions.find((asset) => asset.id === 'right-algorithm-caption-body-asset')!;
+
+    expect(algorithm.widthMode).toBe('column');
+    expect(algorithm.rect.x).toBeGreaterThanOrEqual(328);
+    expect(algorithm.rect.x + algorithm.rect.w).toBeLessThanOrEqual(532);
+    expect(prepared.units.some((unit) => unit.id === 'left-unrelated-list')).toBe(true);
   });
 
   it('stops a deterministic algorithm crop before a detached figure formula cluster', () => {

@@ -191,7 +191,19 @@ function findOrderedTokenRanges(text: string, needle: string, from: number): {
   let sourceCursor = 0;
   for (const targetToken of target) {
     const relativeIndex = source.slice(sourceCursor)
-      .findIndex((sourceToken) => sourceToken.value === targetToken.value);
+      .findIndex((sourceToken) => {
+        if (sourceToken.value === targetToken.value) return true;
+        const shorter = sourceToken.value.length < targetToken.value.length
+          ? sourceToken.value
+          : targetToken.value;
+        const longer = shorter === sourceToken.value ? targetToken.value : sourceToken.value;
+        // A split PDF block can lose a few leading glyphs at the part boundary
+        // (for example `analysis` becoming `lysis`). Accept only a close suffix
+        // relation; wider or internal fuzzy matches remain disallowed.
+        return shorter.length >= 4
+          && longer.length - shorter.length <= 4
+          && longer.endsWith(shorter);
+      });
     if (relativeIndex < 0) return null;
     const sourceIndex = sourceCursor + relativeIndex;
     matchedSourceIndexes.push(sourceIndex);
@@ -203,7 +215,17 @@ function findOrderedTokenRanges(text: string, needle: string, from: number): {
   const spannedTokenCount = lastIndex - firstIndex + 1;
   // Exact ordered tokens are a strong signal, but cap the amount of skipped
   // source material so repeated words cannot bridge unrelated paragraphs.
-  if (spannedTokenCount > target.length * 3 + 24) return null;
+  if (spannedTokenCount > target.length * 3 + 24) {
+    const skippedText = matchedSourceIndexes.slice(1).flatMap((sourceIndex, index) => {
+      const previousIndex = matchedSourceIndexes[index]!;
+      return sourceIndex > previousIndex + 1
+        ? [text.slice(source[previousIndex]!.end, source[sourceIndex]!.start)]
+        : [];
+    }).join('\n');
+    const publisherBoilerplate = /Permission to make (?:digital or hard|digital|hard) copies\b/i.test(skippedText)
+      && /(?:Copyright held by|ACM ISBN|doi[.]org\/)/i.test(skippedText);
+    if (!publisherBoilerplate) return null;
+  }
 
   const ranges: Array<[number, number]> = [];
   let rangeStartIndex = matchedSourceIndexes[0]!;

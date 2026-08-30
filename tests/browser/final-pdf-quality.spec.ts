@@ -1,6 +1,6 @@
 import { chromium, expect, test } from '@playwright/test';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { assertEveryPdfPageHasContent, assertPdfContainsText } from './helpers/pdfAssertions';
 
@@ -208,6 +208,11 @@ test('real API exact-paper PDF quality acceptance', async () => {
     const countText = await zhControls.locator('strong').innerText();
     const pageCount = Number(countText.match(/\/\s*(\d+)/)?.[1] ?? 0);
     expect(pageCount).toBeGreaterThan(0);
+    const stalePageImages = (await readdir(outputDirectory))
+      .filter((name) => /^page-\d+[.]png$/.test(name));
+    await Promise.all(stalePageImages.map((name) => (
+      rm(path.join(outputDirectory, name), { force: true })
+    )));
     for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
       const canvas = page.getByLabel(`中文译文第 ${pageNumber} 页`, { exact: true });
       await expect(canvas).toBeVisible();

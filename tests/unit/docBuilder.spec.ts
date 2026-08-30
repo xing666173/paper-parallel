@@ -37,7 +37,7 @@ function fixture(): ParsedPage[] {
 }
 
 describe('parser: docBuilder', () => {
-  it('跨页同栏段落续接合并为 1 个块(2 fragments),且不误并右栏段', () => {
+  it('不把尚未到栏底的左栏段落跳过右栏后接到下一页', () => {
     const doc = buildDoc(fixture(), 'en');
     expect(doc.blocks.map((b) => b.type)).toEqual([
       'title',
@@ -48,50 +48,67 @@ describe('parser: docBuilder', () => {
       'figure',
       'paragraph',
       'paragraph',
+      'paragraph',
       'section',
       'paragraph',
       'equation',
       'paragraph',
     ]);
     const twoFrag = doc.blocks.filter((b) => (b.fragments?.length ?? 0) === 2);
-    expect(twoFrag).toHaveLength(1);
-    expect(twoFrag[0].text).toContain('本文提出');
-    expect(twoFrag[0].text).toContain('一种面向');
-    expect(twoFrag[0].pageIndex).toBe(1);
-    // 右栏段 p3 未被误并
+    expect(twoFrag).toHaveLength(0);
+    expect(doc.blocks.find((block) => block.text?.includes('本文提出'))?.text)
+      .not.toContain('一种面向');
     expect(doc.blocks[7].text!).toContain('双缓冲');
   });
 
-  it('连续三页的同栏段落合并为一个三片段块', () => {
+  it('连续三页单栏正文按上一页末尾到下一页开头合并', () => {
     const pages: ParsedPage[] = [1, 2, 3].map((no) => ({
       no,
       w: 612,
       h: 792,
-      layoutMode: 'double',
+      layoutMode: 'single',
       blocks: [
         {
-          id: `left-${no}`,
+          id: `body-${no}`,
           type: 'paragraph',
-          col: 'left',
-          rect: { x: 50, y: 70, w: 240, h: 48 },
+          col: 'full',
+          rect: { x: 50, y: no === 1 ? 700 : 70, w: 500, h: no === 2 ? 640 : 48 },
           text: no === 1 ? '跨页段落第一部分' : no === 2 ? '跨页段落第二部分' : '跨页段落第三部分。',
-        },
-        {
-          id: `right-${no}`,
-          type: 'paragraph',
-          col: 'right',
-          rect: { x: 330, y: 70, w: 240, h: 48 },
-          text: `右栏独立段落 ${no}。`,
         },
       ],
     }));
-
     const doc = buildDoc(pages, 'en');
     const continued = doc.blocks.find((b) => b.text?.includes('跨页段落第一部分'))!;
     expect(continued.fragments).toHaveLength(3);
     expect(continued.text).toContain('跨页段落第二部分');
     expect(continued.text).toContain('跨页段落第三部分');
-    expect(doc.blocks.filter((b) => b.text?.includes('右栏独立段落'))).toHaveLength(3);
+  });
+
+  it('双栏跨页只连接上一页右栏末尾与下一页左栏开头', () => {
+    const pages: ParsedPage[] = [
+      {
+        no: 1, w: 612, h: 792, layoutMode: 'double',
+        blocks: [
+          { id: 'left-1', type: 'paragraph', col: 'left', rect: { x: 50, y: 650, w: 240, h: 60 }, text: '左栏完整段落。' },
+          { id: 'right-1', type: 'paragraph', col: 'right', rect: { x: 330, y: 650, w: 240, h: 60 }, text: '上一页右栏尚未结束的' },
+        ],
+      },
+      {
+        no: 2, w: 612, h: 792, layoutMode: 'double',
+        blocks: [
+          { id: 'left-2', type: 'paragraph', col: 'left', rect: { x: 50, y: 70, w: 240, h: 60 }, text: '正文在下一页左栏继续并结束。' },
+          { id: 'right-2', type: 'paragraph', col: 'right', rect: { x: 330, y: 70, w: 240, h: 60 }, text: '下一页右栏独立段落。' },
+        ],
+      },
+    ];
+
+    const doc = buildDoc(pages, 'en');
+    const continued = doc.blocks.find((block) => block.text?.includes('上一页右栏'))!;
+
+    expect(continued.text).toContain('下一页左栏继续');
+    expect(continued.fragments).toHaveLength(2);
+    expect(continued.text).not.toContain('下一页右栏独立');
+    expect(doc.blocks.find((block) => block.text?.includes('下一页右栏独立'))).toBeDefined();
   });
 
   it('prev/next 链连续,新 id 生效', () => {
@@ -142,11 +159,11 @@ describe('parser: docBuilder', () => {
       no, w: 612, h: 792, layoutMode: 'single',
       blocks: [{
         id: `p-${no}`, type: 'paragraph', col: 'full',
-        rect: { x: 10, y: 20, w: 50, h: 10 },
+        rect: { x: 10, y: no === 1 ? 700 : 20, w: 50, h: 40 },
         text: no === 1 ? 'First' : 'Second.',
         characterRects: [{
           ch: no === 1 ? 'F' : 'S', sourceIndex: 0, pageIndex: 0,
-          rect: { x: 10, y: 20, w: 5, h: 10 },
+          rect: { x: 10, y: no === 1 ? 700 : 20, w: 5, h: 10 },
         }],
       }],
     }));

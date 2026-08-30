@@ -250,7 +250,7 @@ describe('source PDF geometry', () => {
   it('maps one translated sentence across masked page furniture in the same PDF block', () => {
     const prefix = 'However, the DSPs of the VP1502';
     const furniture = 'MSMAC: Accelerating Multi-Scalar Multiplication for Zero-Knowledge Proof';
-    const suffix = 'The total computation of Steps 1 and 2 is reduced.';
+    const suffix = 'The total analysis of Steps 1 and 2 is complete.';
     const text = `${prefix}\n${furniture}\n${suffix}`;
     const furnitureStart = text.indexOf(furniture);
     const suffixStart = text.indexOf(suffix);
@@ -271,6 +271,50 @@ describe('source PDF geometry', () => {
     }];
     const unit = alignmentUnit({
       id: 'mixed-g-2', parentId: 'mixed', sourceBlockId: 'mixed',
+      kind: 'semantic-group', relation: '1:1',
+      sourceText: `${prefix} The total lysis of Steps 1 and 2 is complete.`,
+    });
+
+    const [resolved] = resolveSourceGeometry([unit], doc, []);
+
+    expect(resolved).toMatchObject({
+      status: 'aligned', confidence: 0.92,
+      fallbackReason: 'source-sentence-matched-across-masked-ranges',
+    });
+    expect(resolved.source.flatMap((set) => set.rects).map((rect) => rect.y))
+      .toEqual(expect.arrayContaining([100, 300]));
+    expect(resolved.source.flatMap((set) => set.rects).some((rect) => rect.y === 200)).toBe(false);
+  });
+
+  it('maps a sentence across a long publisher permission footer removed from translation', () => {
+    const prefix = 'Moreover, with increasing demand, the degree of';
+    const publisher = [
+      'Permission to make digital or hard copies of all or part of this work for personal use is granted.',
+      'Copyrights for components of this work owned by others must be honored.',
+      'Copyright held by the owner/author(s). Publication rights licensed to ACM.',
+      'ACM ISBN 979-8-4007-0601-1/24/06.',
+      'https://doi.org/10.1145/3649329.3658259',
+    ].join(' ');
+    const suffix = 'MSM has grown larger.';
+    const text = `${prefix}\n${publisher}\n${suffix}`;
+    const publisherStart = text.indexOf(publisher);
+    const suffixStart = text.indexOf(suffix);
+    const doc = emptyDoc();
+    doc.blocks = [{
+      id: 'publisher-mixed', docId: 'en', type: 'paragraph', pageIndex: 0,
+      rect: { x: 20, y: 100, w: 240, h: 220 }, order: 0,
+      splitAllowed: true, widthMode: 'column', text,
+      characterRects: [...text].map((ch, sourceIndex) => ({
+        ch, sourceIndex, pageIndex: 0,
+        rect: {
+          x: 20 + (sourceIndex % 60) * 3,
+          y: sourceIndex < publisherStart ? 100 : sourceIndex < suffixStart ? 200 : 300,
+          w: 3, h: 10,
+        },
+      })),
+    }];
+    const unit = alignmentUnit({
+      id: 'publisher-mixed-g-1', parentId: 'publisher-mixed', sourceBlockId: 'publisher-mixed',
       kind: 'semantic-group', relation: '1:1', sourceText: `${prefix} ${suffix}`,
     });
 
