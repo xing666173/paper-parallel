@@ -199,6 +199,98 @@ function physicalPages(block: Doc['blocks'][number]): number[] {
   ])];
 }
 
+function proseHeavyFormulaRegion(doc: Doc, asset: DetectedAssetRegion): boolean {
+  if (asset.kind !== 'formula') return false;
+  const text = doc.blocks
+    .flatMap((block) => (block.characterRects ?? [])
+      .filter((character) => {
+        if (character.pageIndex !== asset.pageIndex) return false;
+        const centerX = character.rect.x + character.rect.w / 2;
+        const centerY = character.rect.y + character.rect.h / 2;
+        return centerX >= asset.rect.x && centerX <= asset.rect.x + asset.rect.w
+          && centerY >= asset.rect.y && centerY <= asset.rect.y + asset.rect.h;
+      })
+      .map((character) => ({
+        blockOrder: block.order,
+        sourceIndex: character.sourceIndex,
+        ch: character.ch,
+      })))
+    .sort((left, right) => left.blockOrder - right.blockOrder || left.sourceIndex - right.sourceIndex)
+    .map((character) => character.ch)
+    .join('')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const words = text.match(/[A-Za-z]{3,}/g) ?? [];
+  const functionWords = text.match(/\b(?:the|a|an|and|or|of|to|in|for|with|that|this|is|are|was|were|as|by|from|on|at)\b/gi) ?? [];
+  // Vision often encloses an entire prose line merely because it contains an
+  // inline equation. Keeping that wide rectangle as pixels leaves the prose
+  // untranslated. Reject only regions whose inside text is clearly prose;
+  // the inline-formula geometry pass below will preserve the mathematical
+  // substring instead.
+  return words.length >= 6 && functionWords.length >= 2;
+}
+
+function trimTableBeforeFollowingProse(
+  doc: Doc,
+  asset: DetectedAssetRegion,
+): DetectedAssetRegion {
+  if (asset.kind !== 'table') return asset;
+  const assetBottom = asset.rect.y + asset.rect.h;
+  const naturalLanguageLine = (value: string): boolean => {
+    const words = value.match(/[A-Za-z]{3,}/g) ?? [];
+    const functionWords = value.match(/\b(?:the|a|an|and|or|of|to|in|for|with|that|this|is|are|was|were|as|by|from|on|at|while)\b/gi) ?? [];
+    return words.length >= 8 && functionWords.length >= 2;
+  };
+  const firstProseLineTop = (block: Doc['blocks'][number], fallbackRect: Rect): number | undefined => {
+    const source = block.text ?? '';
+    const lines = source.split(/\r?\n/);
+    let sourceOffset = 0;
+    for (const line of lines) {
+      const start = sourceOffset;
+      const end = start + line.length;
+      sourceOffset = end + 1;
+      if (!naturalLanguageLine(line)) continue;
+      const characters = (block.characterRects ?? []).filter((character) => (
+        character.pageIndex === asset.pageIndex
+        && character.sourceIndex >= start
+        && character.sourceIndex < end
+        && character.ch.trim().length > 0
+      ));
+      const lineRect = unionRects(characters.map((character) => character.rect));
+      if (lineRect) return lineRect.y;
+      // A multi-line aggregate can begin with table rows and end in prose.
+      // Without character geometry there is no safe line-level cut point.
+      if (lines.length > 1) return undefined;
+      return fallbackRect.y;
+    }
+    return undefined;
+  };
+  const proseTop = doc.blocks
+    .map((block) => {
+      const rect = physicalRectOnPage(block, asset.pageIndex);
+      return rect ? { block, rect, proseTop: firstProseLineTop(block, rect) } : undefined;
+    })
+    .filter((candidate): candidate is {
+      block: Doc['blocks'][number]; rect: Rect; proseTop: number;
+    } => candidate !== undefined && candidate.proseTop !== undefined)
+    .filter(({ block, rect, proseTop: candidateProseTop }) => {
+      if (block.type !== 'paragraph') return false;
+      const horizontalOverlap = Math.max(0, Math.min(
+        rect.x + rect.w,
+        asset.rect.x + asset.rect.w,
+      ) - Math.max(rect.x, asset.rect.x));
+      return horizontalOverlap >= Math.min(rect.w, asset.rect.w) * 0.25
+        && candidateProseTop > asset.rect.y + Math.min(24, asset.rect.h * 0.35)
+        && candidateProseTop < assetBottom - 2;
+    })
+    .map(({ proseTop: candidateProseTop }) => candidateProseTop)
+    .sort((left, right) => left - right)[0];
+  if (proseTop === undefined) return asset;
+  const trimmedHeight = proseTop - asset.rect.y - 2;
+  if (trimmedHeight < 12 || trimmedHeight < asset.rect.h * 0.45) return asset;
+  return { ...asset, rect: { ...asset.rect, h: trimmedHeight } };
+}
+
 function normalizedFragmentText(value: string): string {
   return value.toLocaleLowerCase().replace(/\s+/g, '').replace(/[.,;:()[\]{}]/g, '');
 }
@@ -899,6 +991,28 @@ function looksLikeAlgorithmBodyBlock(block: Doc['blocks'][number]): boolean {
   return numberedLines + algorithmKeywords + mathematicalLines >= Math.max(1, Math.ceil(lines.length * 0.25));
 }
 
+function isAlgorithmProseBoundary(block: Doc['blocks'][number]): boolean {
+  if (block.type === 'caption' || block.type === 'section' || block.type === 'title') return true;
+  const text = block.text?.trim() ?? '';
+  if (text.length < 80) return false;
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const firstLine = lines[0] ?? '';
+  const firstLineIsAlgorithm = /^\d+\s*:|^(?:require|ensure|input|output|return|for\b|while\b|if\b|else\b|end\b|\/\/)/i.test(firstLine);
+  const firstLineWords = firstLine.match(/[A-Za-z]{3,}/g)?.length ?? 0;
+  const firstLineFunctionWords = firstLine.match(/\b(?:the|a|an|and|or|of|to|in|for|with|that|this|is|are|was|were|as|by|from|on|at|while)\b/gi)?.length ?? 0;
+  // PDF.js can merge the prose immediately after an algorithm with numbered
+  // instructions that physically continue on the next page. The current-page
+  // leading line is authoritative: do not let later instruction lines turn
+  // already-started prose back into an algorithm crop.
+  if (!firstLineIsAlgorithm && firstLineWords >= 8 && firstLineFunctionWords >= 2) return true;
+  const hasNumberedInstruction = lines.some((line) => /^\d+\s*:/.test(line));
+  const hasAlgorithmHeader = /^(?:require|ensure|input|output)\s*:/i.test(lines[0] ?? '');
+  if (hasNumberedInstruction || hasAlgorithmHeader) return false;
+  const naturalWords = text.match(/[A-Za-z]{3,}/g)?.length ?? 0;
+  const functionWords = text.match(/\b(?:the|a|an|and|or|of|to|in|for|with|that|this|is|are|was|were|as|by|from|on|at)\b/gi)?.length ?? 0;
+  return naturalWords >= 12 && functionWords >= 3;
+}
+
 function detectedAlgorithmAssets(doc: Doc): DetectedAssetRegion[] {
   const blocks = new Map(doc.blocks.map((block) => [block.id, block]));
   const assets: DetectedAssetRegion[] = [];
@@ -913,15 +1027,7 @@ function detectedAlgorithmAssets(doc: Doc): DetectedAssetRegion[] {
       .sort((left, right) => left.rect.y - right.rect.y || left.rect.x - right.rect.x);
     const firstFollowingBoundary = candidates.find((block) => (
       block.rect.y >= captionBottom + 8
-      && (
-        block.type === 'caption'
-        || block.type === 'section'
-        || block.type === 'title'
-        || (
-          !looksLikeAlgorithmBodyBlock(block)
-          && (block.text?.replace(/\s+/g, ' ').trim().length ?? 0) >= 80
-        )
-      )
+      && isAlgorithmProseBoundary(block)
     ));
     const stopY = firstFollowingBoundary?.rect.y ?? Number.POSITIVE_INFINITY;
     const algorithmLikeBlocks = candidates.filter((block) => (
@@ -997,7 +1103,11 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
     // for code. Once a caption-anchored algorithm body is reconstructed from
     // the PDF text geometry, prefer that deterministic crop for this page.
     .filter((asset) => asset.kind !== 'code' || !algorithmPages.has(asset.pageIndex))
-    .map((asset) => ({ ...asset, rect: { ...asset.rect } }))
+    .filter((asset) => !proseHeavyFormulaRegion(doc, asset))
+    .map((asset) => trimTableBeforeFollowingProse(doc, {
+      ...asset,
+      rect: { ...asset.rect },
+    }))
     .concat(algorithmAssets);
   const verifiedCaptionIds = new Set(verifiedAssetRegions
     .map((asset) => asset.captionUnitId)
@@ -1080,6 +1190,19 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
       ? { ...unit, kind: 'reference' as const }
       : unit);
   }
+
+  // A body sentence can continue on a new PDF text line with a citation such
+  // as `[34] as the basic building block ...`. The line classifier sees the
+  // leading bracket and labels it as a bibliography entry even though it is
+  // still ordinary prose. Real bibliography units are parented to the
+  // References heading; recover only unparented, sentence-like false matches.
+  units = units.map((unit) => {
+    if (unit.kind !== 'reference' || unit.parentId || !unit.sourceText) return unit;
+    const wordsAfterCitation = unit.sourceText
+      .replace(/^\s*\[\d+\]\s*/, '')
+      .match(/[A-Za-z]{3,}/g)?.length ?? 0;
+    return wordsAfterCitation >= 5 ? { ...unit, kind: 'paragraph' as const } : unit;
+  });
 
   // PDF text extraction can merge adjacent captions from multiple visual
   // objects into one block (for example Figure 9 + Figure 10, or Figure 9 +

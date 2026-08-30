@@ -22,7 +22,11 @@ function projectAiMessage(event: AiLogEvent): string {
     case 'vision-layout-page-started':
       return `Vision Exp 版式识别：开始分析第 ${event.page}/${event.totalPages} 页`;
     case 'vision-layout-page-phase':
-      return `Vision Exp 版式识别：第 ${event.page}/${event.totalPages} 页首次渲染超时，已释放资源并降低分辨率重试`;
+      return event.phase === 'render-retrying'
+        ? `Vision Exp 版式识别：第 ${event.page}/${event.totalPages} 页首次渲染超时，已释放资源并降低分辨率重试`
+        : event.phase === 'analysis-retrying'
+          ? `Vision Exp 版式识别：第 ${event.page}/${event.totalPages} 页响应无效，正在自动重试`
+          : `Vision Exp 版式识别：第 ${event.page}/${event.totalPages} 页连续响应无效，已降级到 PDF 文字层与本地几何识别`;
     case 'vision-layout-page':
       return `Vision Exp 版式识别：第 ${event.page}/${event.totalPages} 页${event.cached ? '（缓存命中）' : '已完成'}`;
     case 'vision-layout-fallback':

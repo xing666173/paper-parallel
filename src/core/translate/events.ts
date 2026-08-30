@@ -2,7 +2,7 @@ export type AiLogEvent =
   | { type: 'vision-layout-page-started'; at: number; page: number; totalPages: number }
   | {
       type: 'vision-layout-page-phase'; at: number; page: number; totalPages: number;
-      phase: 'render-retrying';
+      phase: 'render-retrying' | 'analysis-retrying' | 'analysis-fallback';
     }
   | { type: 'vision-layout-page'; at: number; page: number; totalPages: number; cached: boolean }
   | {

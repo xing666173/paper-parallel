@@ -15,6 +15,7 @@ export const VISION_LAYOUT_RENDER_SCALE = 2;
 export const VISION_LAYOUT_FALLBACK_RENDER_SCALE = 1.25;
 export const VISION_LAYOUT_LAST_RESORT_RENDER_SCALE = 0.8;
 export const VISION_LAYOUT_RENDER_TIMEOUT_MS = 30_000;
+export const VISION_LAYOUT_REQUEST_ATTEMPTS = 2;
 
 export interface PdfDocumentForVision {
   numPages: number;
@@ -35,7 +36,7 @@ export interface AnalyzePdfLayoutOptions {
   onPagePhase?(event: {
     pageIndex: number;
     totalPages: number;
-    phase: 'render-retrying';
+    phase: 'render-retrying' | 'analysis-retrying' | 'analysis-fallback';
   }): void;
   onPage?(event: { pageIndex: number; totalPages: number; cached: boolean }): void;
 }
@@ -120,23 +121,52 @@ export async function analyzePdfLayoutWithVision(options: AnalyzePdfLayoutOption
 
     options.onPageStart?.({ pageIndex, totalPages: options.pdf.numPages });
     const imageUrl = await renderLayoutPage(pageIndex);
-    const completion = await complete({
-      baseUrl: options.baseUrl,
-      apiKey: options.apiKey,
-      model: VISION_LAYOUT_MODEL,
-      thinkingMode: 'disabled',
-      responseFormat: 'json_object',
-      maxTokens: 2_048,
-      timeoutMs: 90_000,
-      signal: options.signal,
-      messages: [{ role: 'user', content: [
-        { type: 'text', text: buildVisionLayoutPrompt(pageIndex + 1) },
-        { type: 'image_url', image_url: { url: imageUrl, detail: 'original' } },
-      ] }],
+    for (let attempt = 1; attempt <= VISION_LAYOUT_REQUEST_ATTEMPTS; attempt += 1) {
+      try {
+        const retryInstruction = attempt === 1
+          ? ''
+          : '\nThe preceding response was invalid. Return only the exact JSON object requested; no explanation, prefix, suffix, or Markdown.';
+        const completion = await complete({
+          baseUrl: options.baseUrl,
+          apiKey: options.apiKey,
+          model: VISION_LAYOUT_MODEL,
+          thinkingMode: 'disabled',
+          responseFormat: 'json_object',
+          maxTokens: 2_048,
+          timeoutMs: 90_000,
+          signal: options.signal,
+          messages: [{ role: 'user', content: [
+            { type: 'text', text: `${buildVisionLayoutPrompt(pageIndex + 1)}${retryInstruction}` },
+            { type: 'image_url', image_url: { url: imageUrl, detail: 'original' } },
+          ] }],
+        });
+        const analysis = parseVisionPageAnalysis(completion.content, pageIndex);
+        await options.saveCached?.(cacheKey, pageIndex, analysis);
+        results[pageIndex] = analysis;
+        options.onPage?.({ pageIndex, totalPages: options.pdf.numPages, cached: false });
+        return;
+      } catch (error) {
+        if (options.signal?.aborted || (error instanceof Error && error.name === 'AbortError')) throw error;
+        if (attempt < VISION_LAYOUT_REQUEST_ATTEMPTS) {
+          options.onPagePhase?.({
+            pageIndex,
+            totalPages: options.pdf.numPages,
+            phase: 'analysis-retrying',
+          });
+        }
+      }
+    }
+
+    // Vision is an aid, not the sole source of page structure. When one page
+    // repeatedly returns an invalid/transient response, keep the paper usable
+    // by deferring that page to the deterministic PDF text/geometry parser.
+    // Do not cache this placeholder so a later resume can obtain a real result.
+    results[pageIndex] = { pageIndex, layout: 'mixed', regions: [] };
+    options.onPagePhase?.({
+      pageIndex,
+      totalPages: options.pdf.numPages,
+      phase: 'analysis-fallback',
     });
-    const analysis = parseVisionPageAnalysis(completion.content, pageIndex);
-    await options.saveCached?.(cacheKey, pageIndex, analysis);
-    results[pageIndex] = analysis;
     options.onPage?.({ pageIndex, totalPages: options.pdf.numPages, cached: false });
   };
 

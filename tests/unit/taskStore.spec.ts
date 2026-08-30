@@ -84,6 +84,16 @@ describe('project task store', () => {
     });
     expect(store.aiLog.at(-1)?.message).toContain('第 5/8 页首次渲染超时');
     expect(store.lastResponseAt).toBe(11);
+
+    store.recordAiEvent({
+      type: 'vision-layout-page-phase', at: 12, page: 6, totalPages: 8, phase: 'analysis-retrying',
+    });
+    expect(store.aiLog.at(-1)?.message).toContain('第 6/8 页响应无效，正在自动重试');
+
+    store.recordAiEvent({
+      type: 'vision-layout-page-phase', at: 13, page: 6, totalPages: 8, phase: 'analysis-fallback',
+    });
+    expect(store.aiLog.at(-1)?.message).toContain('已降级到 PDF 文字层与本地几何识别');
   });
 
   it('shows page-level progress as soon as final visual review starts', () => {

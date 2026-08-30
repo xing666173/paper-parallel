@@ -81,6 +81,64 @@ describe('vision: pre-layout analysis', () => {
     expect(maxActive).toBe(2);
   });
 
+  it('retries an invalid Vision response and caches only the validated result', async () => {
+    const phases: string[] = [];
+    const saved: unknown[] = [];
+    const complete = vi.fn()
+      .mockResolvedValueOnce({ content: 'not json', usage: { promptTokens: 1, completionTokens: 1 } })
+      .mockResolvedValueOnce({
+        content: '{"page":1,"layout":"double","regions":[]}',
+        usage: { promptTokens: 1, completionTokens: 1 },
+      });
+
+    const result = await analyzePdfLayoutWithVision({
+      pdf: {
+        numPages: 1,
+        getPage: async () => ({
+          getViewport: () => ({ width: 1, height: 1 }),
+          render: () => ({ promise: Promise.resolve() }),
+        }),
+      },
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test', fileHash: 'sha256:invalid-first-response',
+      renderPage: async () => 'data:image/png;base64,PAGE',
+      complete,
+      saveCached: async (_key, _pageIndex, analysis) => { saved.push(analysis); },
+      onPagePhase: ({ phase }) => phases.push(phase),
+    });
+
+    expect(result).toEqual([{ pageIndex: 0, layout: 'double', regions: [] }]);
+    expect(complete).toHaveBeenCalledTimes(2);
+    expect(phases).toEqual(['analysis-retrying']);
+    expect(saved).toEqual(result);
+  });
+
+  it('falls back one repeatedly invalid page to local geometry without caching the placeholder', async () => {
+    const phases: string[] = [];
+    const onPage = vi.fn();
+    const saveCached = vi.fn();
+
+    const result = await analyzePdfLayoutWithVision({
+      pdf: {
+        numPages: 1,
+        getPage: async () => ({
+          getViewport: () => ({ width: 1, height: 1 }),
+          render: () => ({ promise: Promise.resolve() }),
+        }),
+      },
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test', fileHash: 'sha256:invalid-both-responses',
+      renderPage: async () => 'data:image/png;base64,PAGE',
+      complete: async () => ({ content: 'still not json', usage: { promptTokens: 1, completionTokens: 1 } }),
+      saveCached,
+      onPage,
+      onPagePhase: ({ phase }) => phases.push(phase),
+    });
+
+    expect(result).toEqual([{ pageIndex: 0, layout: 'mixed', regions: [] }]);
+    expect(phases).toEqual(['analysis-retrying', 'analysis-fallback']);
+    expect(saveCached).not.toHaveBeenCalled();
+    expect(onPage).toHaveBeenCalledWith({ pageIndex: 0, totalPages: 1, cached: false });
+  });
+
   it('serializes PDF rasterization while Vision requests remain concurrent', async () => {
     const page = { getViewport: () => ({ width: 1, height: 1 }), render: () => ({ promise: Promise.resolve() }) };
     const renderResolvers: Array<() => void> = [];

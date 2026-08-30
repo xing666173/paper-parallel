@@ -115,6 +115,29 @@ describe('production pipeline preparation', () => {
     expect(requests.find((request) => request.blockId === 'refs')?.kind).toBe('heading');
   });
 
+  it('recovers a citation-leading body continuation that was misclassified as a reference', () => {
+    const doc = fixtureDoc();
+    doc.blocks.push({
+      id: 'citation-continuation', docId: 'en', type: 'reference', pageIndex: 0,
+      rect: { x: 330, y: 620, w: 220, h: 16 }, order: 4,
+      text: '[34] as the basic building block. It is a fully pipelined design',
+      splitAllowed: true, widthMode: 'column',
+    });
+    doc.semanticUnits.push({
+      id: 'citation-continuation', kind: 'reference',
+      sourceText: '[34] as the basic building block. It is a fully pipelined design',
+      protectedTokens: ['[34]'], layoutRegionId: 'r1', order: 4,
+    });
+    doc.layoutRegions[0].orderedUnitIds.push('citation-continuation');
+
+    const prepared = prepareImmutableStructure(doc);
+    const recovered = prepared.units.find((unit) => unit.id === 'citation-continuation');
+
+    expect(recovered?.kind).toBe('paragraph');
+    expect(buildTranslationRequestsFromDoc({ ...doc, semanticUnits: prepared.units })
+      .some((request) => request.blockId === 'citation-continuation')).toBe(true);
+  });
+
   it('expands a formula crop to include an adjacent math-only continuation block', () => {
     const doc = fixtureDoc();
     doc.blocks.push({
@@ -999,6 +1022,35 @@ describe('production pipeline preparation', () => {
       .toBe(prepared.regions[0].orderedUnitIds.indexOf('fig-caption') - 1);
   });
 
+  it('rejects a prose-heavy Vision formula rectangle and preserves only its inline equation', () => {
+    const doc = fixtureDoc();
+    const block = doc.blocks.find((candidate) => candidate.id === 'p1')!;
+    const source = 'The NTT computation a = NTT(a) is defined on two arrays.';
+    block.text = source;
+    block.rect = { x: 50, y: 400, w: 500, h: 14 };
+    block.characterRects = [...source].map((ch, sourceIndex) => ({
+      ch, sourceIndex, pageIndex: 0,
+      rect: { x: 50 + sourceIndex * 7, y: 400, w: 7, h: 10 },
+    }));
+    const unit = doc.semanticUnits.find((candidate) => candidate.id === 'p1')!;
+    unit.sourceText = source;
+    unit.protectedTokens = [];
+
+    const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: [{
+      id: 'vision-wide-formula', kind: 'formula', pageIndex: 0,
+      rect: { x: 50, y: 398, w: 500, h: 18 }, widthMode: 'span',
+    }] });
+
+    expect(prepared.assetRegions.some((asset) => asset.id === 'vision-wide-formula')).toBe(false);
+    expect(prepared.assetRegions).toContainEqual(expect.objectContaining({
+      id: 'p1-inline-formula', kind: 'formula',
+    }));
+    expect(prepared.units.find((candidate) => candidate.id === 'p1-inline-before')?.sourceText)
+      .toBe('The NTT computation');
+    expect(prepared.units.find((candidate) => candidate.id === 'p1-inline-after')?.sourceText)
+      .toBe('is defined on two arrays.');
+  });
+
   it('places a captionless Vision formula through its covered semantic unit in a cross-page region', () => {
     const doc = fixtureDoc();
     doc.pageCount = 2;
@@ -1209,6 +1261,74 @@ describe('production pipeline preparation', () => {
     expect(prepared.regions[0].orderedUnitIds).not.toContain('table-body');
   });
 
+  it('trims an over-tall Vision table crop before the following prose paragraph', () => {
+    const doc = fixtureDoc();
+    doc.blocks.push(
+      { id: 'vision-table-caption', docId: 'en', type: 'caption', pageIndex: 0, rect: { x: 330, y: 490, w: 200, h: 14 }, order: 4, text: 'Table 2: Results', splitAllowed: false, widthMode: 'column' },
+      { id: 'vision-table-body', docId: 'en', type: 'paragraph', pageIndex: 0, rect: { x: 330, y: 510, w: 200, h: 48 }, order: 5, text: 'Benchmark CPU Accelerator Speedup 1.0 2.0', splitAllowed: true, widthMode: 'column' },
+      { id: 'vision-table-prose', docId: 'en', type: 'paragraph', pageIndex: 0, rect: { x: 330, y: 575, w: 200, h: 80 }, order: 6, text: 'This ordinary paragraph explains the measured memory access latency and must be translated instead of becoming table pixels.', splitAllowed: true, widthMode: 'column' },
+    );
+    doc.semanticUnits.push(
+      { id: 'vision-table-caption', kind: 'caption', sourceText: 'Table 2: Results', protectedTokens: [], layoutRegionId: 'r1', order: 4 },
+      { id: 'vision-table-body', kind: 'paragraph', sourceText: 'Benchmark CPU Accelerator Speedup 1.0 2.0', protectedTokens: [], layoutRegionId: 'r1', order: 5 },
+      { id: 'vision-table-prose', kind: 'paragraph', sourceText: 'This ordinary paragraph explains the measured memory access latency and must be translated instead of becoming table pixels.', protectedTokens: [], layoutRegionId: 'r1', order: 6 },
+    );
+    doc.layoutRegions[0].orderedUnitIds.push(
+      'vision-table-caption', 'vision-table-body', 'vision-table-prose',
+    );
+
+    const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: [{
+      id: 'vision-over-tall-table', kind: 'table', pageIndex: 0,
+      rect: { x: 328, y: 506, w: 204, h: 110 }, widthMode: 'column',
+      captionUnitId: 'vision-table-caption',
+    }] });
+    const asset = prepared.assetRegions.find((candidate) => candidate.id === 'vision-over-tall-table');
+
+    expect(asset?.rect.h).toBe(54);
+    expect(prepared.units.some((unit) => unit.id === 'vision-table-body')).toBe(false);
+    expect(prepared.units.find((unit) => unit.id === 'vision-table-prose')?.sourceText)
+      .toContain('must be translated');
+  });
+
+  it('preserves trailing table rows when PDF.js merges them with following table notes', () => {
+    const doc = fixtureDoc();
+    const mergedText = [
+      '2^22 1785 3081 1129 6899 10.30 1329 153 1763',
+      '2^23 3831 5686 1659 12119 19.50 2579 306 3431',
+      '(1) MUL in Bellperson is executed in CPU, while that in cuZK is executed in GPU.',
+    ].join('\n');
+    const lineStarts = [0, mergedText.indexOf('\n') + 1, mergedText.lastIndexOf('\n') + 1];
+    const lineYs = [550, 562, 586];
+    const characterRects = [...mergedText].map((ch, sourceIndex) => {
+      const lineIndex = sourceIndex >= lineStarts[2]! ? 2 : sourceIndex >= lineStarts[1]! ? 1 : 0;
+      return {
+        ch, sourceIndex, pageIndex: 0,
+        rect: { x: 330 + (sourceIndex - lineStarts[lineIndex]!) * 2, y: lineYs[lineIndex]!, w: 2, h: 10 },
+      };
+    });
+    doc.blocks.push(
+      { id: 'merged-table-caption', docId: 'en', type: 'caption', pageIndex: 0, rect: { x: 328, y: 490, w: 204, h: 14 }, order: 4, text: 'Table 6: Results', splitAllowed: false, widthMode: 'column' },
+      { id: 'merged-table-tail', docId: 'en', type: 'paragraph', pageIndex: 0, rect: { x: 330, y: 550, w: 200, h: 46 }, order: 5, text: mergedText, characterRects, splitAllowed: true, widthMode: 'column' },
+    );
+    doc.semanticUnits.push(
+      { id: 'merged-table-caption', kind: 'caption', sourceText: 'Table 6: Results', protectedTokens: [], layoutRegionId: 'r1', order: 4 },
+      { id: 'merged-table-tail', kind: 'paragraph', sourceText: mergedText, protectedTokens: [], layoutRegionId: 'r1', order: 5 },
+    );
+    doc.layoutRegions[0].orderedUnitIds.push('merged-table-caption', 'merged-table-tail');
+
+    const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: [{
+      id: 'vision-merged-table', kind: 'table', pageIndex: 0,
+      rect: { x: 328, y: 506, w: 204, h: 100 }, widthMode: 'column',
+      captionUnitId: 'merged-table-caption',
+    }] });
+    const asset = prepared.assetRegions.find((candidate) => candidate.id === 'vision-merged-table');
+
+    expect(asset).toBeDefined();
+    const assetBottom = asset!.rect.y + asset!.rect.h;
+    expect(assetBottom).toBe(584);
+    expect(assetBottom).toBeGreaterThan(572);
+  });
+
   it('reconstructs a complete caption-anchored algorithm and rejects a misplaced Vision code crop', () => {
     const doc = fixtureDoc();
     doc.blocks = doc.blocks.filter((block) => block.id !== 'fig-caption');
@@ -1219,13 +1339,13 @@ describe('production pipeline preparation', () => {
       { id: 'algorithm-caption', docId: 'en', type: 'caption', pageIndex: 0, rect: { x: 50, y: 200, w: 300, h: 12 }, order: 4, text: 'Algorithm 1 Pippenger Algorithm', splitAllowed: false, widthMode: 'span' },
       { id: 'algorithm-body-1', docId: 'en', type: 'paragraph', pageIndex: 0, rect: { x: 60, y: 218, w: 290, h: 36 }, order: 5, text: '1: for i ← 1 to n do\n2: // Initialize buckets', splitAllowed: false, widthMode: 'span' },
       { id: 'algorithm-body-2', docId: 'en', type: 'paragraph', pageIndex: 0, rect: { x: 60, y: 258, w: 250, h: 36 }, order: 6, text: '3: if value ≠ 0 then\n4: return Q', splitAllowed: false, widthMode: 'span' },
-      { id: 'after-algorithm', docId: 'en', type: 'paragraph', pageIndex: 0, rect: { x: 50, y: 315, w: 480, h: 40 }, order: 7, text: 'This ordinary paragraph continues after the complete algorithm and must remain available for translation.', splitAllowed: true, widthMode: 'span' },
+      { id: 'after-algorithm', docId: 'en', type: 'paragraph', pageIndex: 0, rect: { x: 50, y: 315, w: 480, h: 40 }, order: 7, text: 'The result is the vector that we need after completing the algorithm.\nAfter obtaining G = ∑ B, this ordinary paragraph must remain available for translation.\n2: for i ← 1 to n do', splitAllowed: true, widthMode: 'span' },
     );
     doc.semanticUnits.push(
       { id: 'algorithm-caption', kind: 'caption', sourceText: 'Algorithm 1 Pippenger Algorithm', protectedTokens: [], layoutRegionId: 'r1', order: 4 },
       { id: 'algorithm-body-1', kind: 'paragraph', sourceText: '1: for i ← 1 to n do\n2: // Initialize buckets', protectedTokens: [], layoutRegionId: 'r1', order: 5 },
       { id: 'algorithm-body-2', kind: 'paragraph', sourceText: '3: if value ≠ 0 then\n4: return Q', protectedTokens: [], layoutRegionId: 'r1', order: 6 },
-      { id: 'after-algorithm', kind: 'paragraph', sourceText: 'This ordinary paragraph continues after the complete algorithm and must remain available for translation.', protectedTokens: [], layoutRegionId: 'r1', order: 7 },
+      { id: 'after-algorithm', kind: 'paragraph', sourceText: 'The result is the vector that we need after completing the algorithm.\nAfter obtaining G = ∑ B, this ordinary paragraph must remain available for translation.\n2: for i ← 1 to n do', protectedTokens: [], layoutRegionId: 'r1', order: 7 },
     );
     doc.layoutRegions[0].orderedUnitIds.push(
       'algorithm-caption', 'algorithm-body-1', 'algorithm-body-2', 'after-algorithm',
