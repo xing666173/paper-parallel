@@ -111,6 +111,33 @@ describe('generic academic translation protocol', () => {
     expect(validateBatchResponse([source], restored).ok).toBe(true);
   });
 
+  it('does not duplicate a protected value when the provider returns the literal instead of its marker', () => {
+    const source: TranslationBlockRequest = {
+      blockId: 'literal-number', kind: 'paragraph',
+      source: 'The design reaches 2.08 times speedup and 2.94 times at peak.',
+      alignmentMode: 'sentence-candidates',
+      sourceSentences: [{
+        id: 'literal-number-s-1',
+        text: 'The design reaches 2.08 times speedup and 2.94 times at peak.',
+      }],
+      protectedTokens: ['2.08', '2.94'],
+    };
+    const masked = maskProtectedTokensForTranslation([source]);
+    const literalTranslation = '该设计实现了 2.08 倍加速，峰值达到 2.94 倍。';
+    const restored = restoreProtectedTokensFromTranslation({ blocks: [{
+      blockId: source.blockId,
+      translation: literalTranslation,
+      alignmentGroups: [{
+        sourceSentenceIds: ['literal-number-s-1'], targetSegments: [literalTranslation],
+      }],
+      newTerms: [], warnings: [],
+    }] }, masked.replacements, masked.blocks);
+
+    expect(restored.blocks[0]!.translation).toBe(literalTranslation);
+    expect(extractProtectedTokens(restored.blocks[0]!.translation)).toEqual(['2.08', '2.94']);
+    expect(validateBatchResponse([source], restored).ok).toBe(true);
+  });
+
   it('treats whitespace-padded citation lists as one protected token', () => {
     expect(extractProtectedTokens('Prior work [ 1 , 3 , 8 , 13 ] established this result.'))
       .toEqual(['[ 1 , 3 , 8 , 13 ]']);

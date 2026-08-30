@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   analyzePdfLayoutWithVision,
   VISION_LAYOUT_FALLBACK_RENDER_SCALE,
+  VISION_LAYOUT_LAST_RESORT_RENDER_SCALE,
   VISION_LAYOUT_RENDER_SCALE,
 } from '../../src/core/vision/analyze';
 import { PdfPageRenderTimeoutError } from '../../src/core/vision/render';
@@ -153,5 +154,34 @@ describe('vision: pre-layout analysis', () => {
     expect(scales).toEqual([VISION_LAYOUT_RENDER_SCALE, VISION_LAYOUT_FALLBACK_RENDER_SCALE]);
     expect(phases).toEqual(['render-retrying']);
     expect(cleanup).toHaveBeenCalledTimes(2);
+  });
+
+  it('uses a third compact render for pathologically complex PDF pages', async () => {
+    const page = {
+      getViewport: () => ({ width: 1, height: 1 }),
+      render: () => ({ promise: Promise.resolve() }),
+      cleanup: vi.fn(),
+    };
+    const scales: number[] = [];
+    const result = await analyzePdfLayoutWithVision({
+      pdf: { numPages: 1, getPage: async () => page },
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test', fileHash: 'sha256:complex-page',
+      renderPage: async (_page, renderOptions) => {
+        scales.push(renderOptions?.scale ?? 0);
+        if (scales.length < 3) throw new PdfPageRenderTimeoutError(30_000);
+        return 'data:image/png;base64,LAST-RESORT';
+      },
+      complete: async () => ({
+        content: '{"page":1,"layout":"double","regions":[]}',
+        usage: { promptTokens: 1, completionTokens: 1 },
+      }),
+    });
+
+    expect(result[0]?.layout).toBe('double');
+    expect(scales).toEqual([
+      VISION_LAYOUT_RENDER_SCALE,
+      VISION_LAYOUT_FALLBACK_RENDER_SCALE,
+      VISION_LAYOUT_LAST_RESORT_RENDER_SCALE,
+    ]);
   });
 });

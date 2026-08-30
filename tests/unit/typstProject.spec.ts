@@ -39,7 +39,7 @@ describe('Typst project generation', () => {
     expect(project.mainContent).toContain('#pp-unit("sec-1-p-1-g-1-t-1")');
     expect(project.mainContent).toContain('#pp-asset("fig-1", "/assets/fig-1.png", 220pt, span: true)');
     expect(project.mainContent).toContain('#pp-caption[');
-    expect(project.mainContent).toContain('#pagebreak(weak: true)\n#pp-asset-group[');
+    expect(project.mainContent).not.toContain('#pagebreak(weak: true)\n#pp-asset-group[');
     expect(project.mainContent).toContain('footer: context');
     expect(project.mainContent).toContain('"DejaVu Math TeX Gyre"');
     expect(project.mainContent.indexOf('论文标题')).toBeLessThan(project.mainContent.indexOf('#pp-double['));
@@ -66,7 +66,34 @@ describe('Typst project generation', () => {
     expect(project.mainContent).not.toContain('#image(path, width: 100%)');
   });
 
-  it('moves an uncaptioned full-width algorithm or figure as one unit to a fresh page', async () => {
+  it('does not apply the old column-width cap after promoting a span asset group to full width', async () => {
+    const { assets } = await buildAssetManifest([{
+      id: 'algorithm-wide', kind: 'code', pageIndex: 0,
+      rect: { x: 100, y: 180, w: 393.3, h: 276 }, bytes: new Uint8Array([1]),
+      widthMode: 'span', captionUnitId: 'algorithm-caption',
+    }]);
+    const project = await buildTypstProject({
+      metadata: { paperWidth: 595, paperHeight: 842 },
+      regions: [{
+        id: 'r1', mode: 'double', sourcePage: 0,
+        bounds: { x: 50, y: 80, w: 495, h: 680 },
+        orderedUnitIds: ['algorithm-caption', 'algorithm-wide'],
+      }],
+      units: [
+        { id: 'algorithm-caption', kind: 'caption', layoutRegionId: 'r1', order: 0, text: '算法 1' },
+        { id: 'algorithm-wide', kind: 'code', layoutRegionId: 'r1', order: 1, assetId: 'algorithm-wide' },
+      ],
+      assets,
+    });
+
+    expect(project.mainContent).toContain(
+      '#pp-asset("algorithm-wide", "/assets/algorithm-wide.png", 393.3pt, span: true)',
+    );
+    expect(project.mainContent.indexOf('#pp-caption['))
+      .toBeLessThan(project.mainContent.indexOf('#pp-asset("algorithm-wide"'));
+  });
+
+  it('lets an uncaptioned full-width algorithm or figure paginate naturally as one unit', async () => {
     const { assets } = await buildAssetManifest([{
       id: 'algorithm-1', kind: 'code', pageIndex: 0,
       rect: { x: 70, y: 300, w: 468, h: 260 }, bytes: new Uint8Array([1]),
@@ -82,7 +109,8 @@ describe('Typst project generation', () => {
       assets,
     });
 
-    expect(project.mainContent).toContain('#pagebreak(weak: true)\n#pp-asset("algorithm-1"');
+    expect(project.mainContent).not.toContain('#pagebreak(weak: true)\n#pp-asset("algorithm-1"');
+    expect(project.mainContent).toContain('#pp-asset("algorithm-1"');
   });
 
   it('preserves explicit left-to-right source column flow in a double-column region', async () => {
@@ -119,6 +147,7 @@ describe('Typst project generation', () => {
     });
 
     expect(project.mainContent).not.toContain('#pagebreak(weak: true)');
+    expect(project.mainContent.match(/#pp-double\[/g)).toHaveLength(1);
     expect(project.mainContent.indexOf('第一页')).toBeLessThan(project.mainContent.indexOf('第二页'));
   });
 
@@ -149,7 +178,7 @@ describe('Typst project generation', () => {
     expect(project.mainContent.indexOf('#pp-asset(')).toBeLessThan(project.mainContent.indexOf('#pp-caption['));
   });
 
-  it('moves a column-width figure group after prose to the next column', async () => {
+  it('lets a same-column figure group follow prose without forcing a blank column', async () => {
     const { assets } = await buildAssetManifest([{
       id: 'fig', kind: 'figure', pageIndex: 0,
       rect: { x: 50, y: 300, w: 220, h: 180 }, bytes: new Uint8Array([1]),
@@ -169,11 +198,11 @@ describe('Typst project generation', () => {
       assets,
     });
 
-    expect(project.mainContent.indexOf('前置正文')).toBeLessThan(project.mainContent.indexOf('#colbreak()'));
-    expect(project.mainContent.indexOf('#colbreak()')).toBeLessThan(project.mainContent.indexOf('#pp-asset-group['));
+    expect(project.mainContent.indexOf('前置正文')).toBeLessThan(project.mainContent.indexOf('#pp-asset-group['));
+    expect(project.mainContent).not.toContain('#colbreak()');
   });
 
-  it('starts a two-column segment with an immutable asset on a fresh page', async () => {
+  it('does not force a fresh page merely because a two-column segment starts with an asset', async () => {
     const { assets } = await buildAssetManifest([{
       id: 'fig', kind: 'figure', pageIndex: 1,
       rect: { x: 50, y: 80, w: 220, h: 260 }, bytes: new Uint8Array([1]),
@@ -193,8 +222,8 @@ describe('Typst project generation', () => {
       assets,
     });
 
-    expect(project.mainContent).toContain('#pagebreak(weak: true)\n#pp-double[');
-    expect(project.mainContent.indexOf('#pagebreak(weak: true)')).toBeLessThan(project.mainContent.indexOf('#pp-asset-group['));
+    expect(project.mainContent).not.toContain('#pagebreak(weak: true)');
+    expect(project.mainContent).toContain('#pp-asset-group[');
   });
 
   it('renders a horizontal source asset band as one multi-column grid', async () => {
@@ -220,7 +249,7 @@ describe('Typst project generation', () => {
     expect(project.mainContent).toContain('#grid(columns: 3, gutter: 6pt');
     expect(project.mainContent).toContain('155.2pt');
     expect(project.mainContent).not.toContain('[#pagebreak(weak: true)');
-    expect(project.mainContent.match(/#pagebreak\(weak: true\)/g)).toHaveLength(1);
+    expect(project.mainContent).not.toContain('#pagebreak(weak: true)');
   });
 
   it('escapes Typst syntax without changing ordinary protected text', () => {

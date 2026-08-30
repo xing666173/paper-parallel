@@ -115,8 +115,34 @@ describe('vision: page analysis protocol', () => {
     expect(regions.map((region) => region.column)).toEqual(['left', 'right', 'full']);
   });
 
+  it('clips small Vision rounding excursions at the normalized page edge', () => {
+    const regions = parseVisionPageAnalysis({
+      page: 1, layout: 'mixed', regions: [
+        { type: 'figure', bbox: [-4, 100, 404, 200], column: 'left', confidence: 0.9 },
+        { type: 'table', bbox: [600, 700, 405, 310], column: 'right', confidence: 0.9 },
+      ],
+    }, 0).regions;
+
+    expect(regions.map((region) => region.bbox)).toEqual([
+      [0, 100, 400, 200],
+      [600, 700, 400, 300],
+    ]);
+  });
+
+  it('keeps valid page regions when one independent Vision region is malformed', () => {
+    const analysis = parseVisionPageAnalysis({
+      page: 1, layout: 'double', regions: [
+        { type: 'body_text', bbox: [50, 80, 400, 800], column: 'left', confidence: 0.9 },
+        { type: 'figure', bbox: [0, 1, 1201, 20], column: 'full', confidence: 0.9 },
+      ],
+    }, 0);
+
+    expect(analysis.regions).toHaveLength(1);
+    expect(analysis.regions[0]?.type).toBe('body_text');
+  });
+
   it.each([
-    [{ page: 1, layout: 'double', regions: [{ type: 'figure', bbox: [0, 1, 1001, 20], column: 'left', confidence: 1 }] }, 'bbox'],
+    [{ page: 1, layout: 'double', regions: [{ type: 'figure', bbox: [0, 1, 1101, 20], column: 'left', confidence: 1 }] }, 'bbox'],
     [{ page: 1, layout: 'double', regions: [{ type: 'photo', bbox: [1, 1, 20, 20], column: 'left', confidence: 1 }] }, 'type'],
     [{ page: 1, layout: 'columns', regions: [] }, 'layout'],
     [{ page: 2, layout: 'single', regions: [] }, 'page'],

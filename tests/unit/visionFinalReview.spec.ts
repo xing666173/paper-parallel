@@ -3,6 +3,7 @@ import {
   buildTargetSourcePageMap,
   parseVisionFinalPageReport,
   runVisionFinalReview,
+  VISION_FINAL_REVIEW_LAST_RESORT_RENDER_SCALE,
   VISION_FINAL_REVIEW_RENDER_SCALE,
 } from '../../src/core/vision/finalReview';
 import { buildVisionFinalReviewPrompt } from '../../src/core/vision/prompts';
@@ -228,6 +229,33 @@ describe('vision: final PDF review', () => {
     expect(phases).toContain('render-retrying');
     expect(phases).toContain('rendered');
     expect(page.cleanup).toHaveBeenCalled();
+  });
+
+  it('uses a compact third render before marking final review incomplete', async () => {
+    const page = {
+      getViewport: () => ({ width: 1, height: 1 }),
+      render: () => ({ promise: Promise.resolve() }),
+      cleanup: vi.fn(),
+    };
+    const scales: number[] = [];
+    const report = await runVisionFinalReview({
+      sourcePdf: { numPages: 1, getPage: async () => page },
+      targetPdf: { numPages: 1, getPage: async () => page },
+      manifest: { units: [] } as any,
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test',
+      renderPage: async (_page, _role, _index, renderOptions) => {
+        scales.push(renderOptions?.scale ?? 0);
+        if (scales.length < 3) throw new PdfPageRenderTimeoutError(30_000);
+        return 'data:image/png;base64,page';
+      },
+      complete: async () => ({
+        content: '{"target_page":1,"issues":[]}',
+        usage: { promptTokens: 1, completionTokens: 1 },
+      }),
+    });
+
+    expect(report).toMatchObject({ pass: true, reviewedPages: 1 });
+    expect(scales.slice(0, 3)).toEqual([1.5, 1, VISION_FINAL_REVIEW_LAST_RESORT_RENDER_SCALE]);
   });
 
   it('requires a focused second review before a severe visual guess can block the PDF', async () => {

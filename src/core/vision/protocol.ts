@@ -83,6 +83,30 @@ export function parseNormalizedVisionBox(value: unknown, path: string): Normaliz
       [x, y, width, height] = [x1, y1, x2 - x1, y2 - y1];
     }
   }
+  // Vision coordinates are estimates, not exact PDF geometry. Some otherwise
+  // valid responses overshoot a page edge by a few normalized units (usually
+  // because x2/y2 was rounded independently). Intersect only these small
+  // excursions with the page; large or fully off-page boxes remain errors so
+  // a malformed response cannot silently become an immutable paper asset.
+  const edgeTolerance = 100;
+  const right = x + width;
+  const bottom = y + height;
+  const mildlyOutside = x >= -edgeTolerance
+    && y >= -edgeTolerance
+    && right <= 1000 + edgeTolerance
+    && bottom <= 1000 + edgeTolerance;
+  if (mildlyOutside && (x < 0 || y < 0 || right > 1000 || bottom > 1000)) {
+    const clippedLeft = Math.max(0, x);
+    const clippedTop = Math.max(0, y);
+    const clippedRight = Math.min(1000, right);
+    const clippedBottom = Math.min(1000, bottom);
+    [x, y, width, height] = [
+      clippedLeft,
+      clippedTop,
+      clippedRight - clippedLeft,
+      clippedBottom - clippedTop,
+    ];
+  }
   if (x < 0 || y < 0 || width <= 0 || height <= 0 || x + width > 1000 || y + height > 1000) {
     throw new VisionProtocolError(`Vision JSON ${path} 超出 0..1000 页面范围`);
   }
@@ -173,31 +197,43 @@ export function parseVisionPageAnalysis(value: unknown, expectedPageIndex: numbe
   const layout = enumValue(root.layout, ['single', 'double', 'mixed'] as const, 'layout');
   if (!Array.isArray(root.regions)) throw new VisionProtocolError('Vision JSON regions 必须为数组');
 
-  const regions = root.regions.map((input, index): VisionRegion => {
-    const item = record(input, `regions[${index}]`);
-    const parsedConfidence = normalizedConfidence(item.confidence);
-    // Confidence is advisory metadata. Geometry and semantic-type gates below
-    // remain strict, but an unusual provider wrapper (for example
-    // {score: 95} or a prose label) must not abort an otherwise usable page.
-    // Use a conservative midpoint so local reconciliation can still fall back
-    // to the PDF text layer when the region is uncertain.
-    const confidence = parsedConfidence !== undefined && parsedConfidence >= 0 && parsedConfidence <= 1
-      ? parsedConfidence
-      : 0.5;
-    const captionValue = item.caption_bbox ?? item.captionBBox;
-    const bbox = parseLayoutVisionBox(item.bbox, `regions[${index}].bbox`);
-    return {
-      type: enumValue(item.type, [
-        'figure', 'table', 'display_formula', 'code', 'caption', 'header', 'footer', 'body_text',
-      ] as const, `regions[${index}].type`),
-      bbox,
-      column: normalizedColumn(item.column, bbox),
-      ...(captionValue === undefined ? {} : {
-        captionBBox: parseNormalizedVisionBox(captionValue, `regions[${index}].caption_bbox`),
-      }),
-      confidence,
-    };
+  const regions: VisionRegion[] = [];
+  let firstRegionError: VisionProtocolError | undefined;
+  root.regions.forEach((input, index) => {
+    try {
+      const item = record(input, `regions[${index}]`);
+      const parsedConfidence = normalizedConfidence(item.confidence);
+      // Confidence is advisory metadata. Geometry and semantic-type gates below
+      // remain strict, but an unusual provider wrapper (for example
+      // {score: 95} or a prose label) must not abort an otherwise usable page.
+      // Use a conservative midpoint so local reconciliation can still fall back
+      // to the PDF text layer when the region is uncertain.
+      const confidence = parsedConfidence !== undefined && parsedConfidence >= 0 && parsedConfidence <= 1
+        ? parsedConfidence
+        : 0.5;
+      const captionValue = item.caption_bbox ?? item.captionBBox;
+      const bbox = parseLayoutVisionBox(item.bbox, `regions[${index}].bbox`);
+      regions.push({
+        type: enumValue(item.type, [
+          'figure', 'table', 'display_formula', 'code', 'caption', 'header', 'footer', 'body_text',
+        ] as const, `regions[${index}].type`),
+        bbox,
+        column: normalizedColumn(item.column, bbox),
+        ...(captionValue === undefined ? {} : {
+          captionBBox: parseNormalizedVisionBox(captionValue, `regions[${index}].caption_bbox`),
+        }),
+        confidence,
+      });
+    } catch (error) {
+      if (!(error instanceof VisionProtocolError)) throw error;
+      firstRegionError ??= error;
+    }
   });
+  // A page commonly contains dozens of independent Vision regions. One
+  // malformed estimate must not discard every valid region on that page; the
+  // deterministic PDF parser can recover the omitted area. Still reject a
+  // wholly unusable response so schema failures are not hidden.
+  if (root.regions.length > 0 && regions.length === 0 && firstRegionError) throw firstRegionError;
 
   return { pageIndex: expectedPageIndex, layout, regions };
 }

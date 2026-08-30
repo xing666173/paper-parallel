@@ -261,6 +261,154 @@ describe('production pipeline preparation', () => {
       });
   });
 
+  it('preserves multiple inline formulas found inside a paragraph block', () => {
+    const doc = fixtureDoc();
+    const source = 'The relation Q = n k P, where n is the scale. Another equation y 2 = x 3 + ax + b, and the point is valid.';
+    const paragraph = doc.blocks.find((block) => block.id === 'p1')!;
+    paragraph.text = source;
+    paragraph.rect = { x: 50, y: 380, w: 500, h: 30 };
+    paragraph.widthMode = 'span';
+    paragraph.characterRects = [...source].map((ch, index) => ({
+      ch, sourceIndex: index, pageIndex: 0,
+      rect: { x: 50 + index * 4, y: 380, w: 3.8, h: 9 },
+    }));
+    doc.semanticUnits.find((unit) => unit.id === 'p1')!.sourceText = source;
+
+    const prepared = prepareImmutableStructure(doc);
+
+    expect(prepared.units.some((unit) => unit.id === 'p1')).toBe(false);
+    expect(prepared.units.filter((unit) => unit.id.startsWith('p1-inline-formula')))
+      .toHaveLength(2);
+    expect(prepared.assetRegions.filter((asset) => asset.id.startsWith('p1-inline-formula')))
+      .toHaveLength(2);
+    expect(prepared.units.find((unit) => unit.id === 'p1-inline-between-1')?.sourceText)
+      .toBe('where n is the scale. Another equation');
+    expect(prepared.units.find((unit) => unit.id === 'p1-inline-after')?.sourceText)
+      .toBe('and the point is valid.');
+  });
+
+  it('uses the raw formula substring when cleaned prose no longer shares the full block offset', () => {
+    const doc = fixtureDoc();
+    const raw = 'The definition Q = n k P, where n is the scale.\nP\nA scalar product k P = P + P, where P is a point.';
+    const cleaned = 'The definition Q = n k P, where n is the scale. A scalar product k P = P + P, where P is a point.';
+    const paragraph = doc.blocks.find((block) => block.id === 'p1')!;
+    paragraph.text = raw;
+    paragraph.rect = { x: 50, y: 380, w: 500, h: 30 };
+    paragraph.widthMode = 'span';
+    paragraph.characterRects = [...raw].map((ch, index) => ({
+      ch, sourceIndex: index, pageIndex: 0,
+      rect: { x: 50 + index * 4, y: 380, w: 3.8, h: 9 },
+    }));
+    doc.semanticUnits.find((unit) => unit.id === 'p1')!.sourceText = cleaned;
+
+    const prepared = prepareImmutableStructure(doc);
+
+    expect(prepared.assetRegions.filter((asset) => asset.id.startsWith('p1-inline-formula')))
+      .toHaveLength(2);
+    expect(prepared.units.find((unit) => unit.id === 'p1-inline-between-1')?.sourceText)
+      .toContain('A scalar product');
+  });
+
+  it('canonicalizes spaced PDF decimals after geometry extraction', () => {
+    const doc = fixtureDoc();
+    const source = 'The implementation provides 2 . 08 × speedup and reaches 2 . 94 × at best.';
+    const paragraph = doc.blocks.find((block) => block.id === 'p1')!;
+    paragraph.text = source;
+    doc.semanticUnits.find((unit) => unit.id === 'p1')!.sourceText = source;
+
+    const prepared = prepareImmutableStructure(doc);
+    const unit = prepared.units.find((candidate) => candidate.id === 'p1');
+
+    expect(unit?.sourceText).toBe('The implementation provides 2.08×speedup and reaches 2.94×at best.');
+    expect(unit?.protectedTokens).toEqual(['2.08', '2.94']);
+  });
+
+  it('stops an inline formula crop before following sentence prose', () => {
+    const doc = fixtureDoc();
+    const source = 'It convinces verifiers that y = f ( x, w ) is correctly calculated with public input x.';
+    const paragraph = doc.blocks.find((block) => block.id === 'p1')!;
+    paragraph.text = source;
+    paragraph.rect = { x: 50, y: 380, w: 500, h: 12 };
+    paragraph.widthMode = 'span';
+    paragraph.characterRects = [...source].map((ch, index) => ({
+      ch, sourceIndex: index, pageIndex: 0,
+      rect: { x: 50 + index * 5, y: 380, w: 4.8, h: 9 },
+    }));
+    doc.semanticUnits.find((unit) => unit.id === 'p1')!.sourceText = source;
+
+    const prepared = prepareImmutableStructure(doc);
+
+    expect(prepared.units.find((unit) => unit.id === 'p1-inline-after')?.sourceText)
+      .toBe('is correctly calculated with public input x.');
+    const formula = prepared.assetRegions.find((asset) => asset.id === 'p1-inline-formula')!;
+    expect(formula.rect.w).toBeLessThan(80);
+  });
+
+  it('stops an inline formula before a following modal verb', () => {
+    const doc = fixtureDoc();
+    const source = 'Only the input w that satisfies y = f ( x, w ) can make verifiers accept.';
+    const paragraph = doc.blocks.find((block) => block.id === 'p1')!;
+    paragraph.text = source;
+    paragraph.rect = { x: 50, y: 380, w: 500, h: 12 };
+    paragraph.widthMode = 'span';
+    paragraph.characterRects = [...source].map((ch, index) => ({
+      ch, sourceIndex: index, pageIndex: 0,
+      rect: { x: 50 + index * 5, y: 380, w: 4.8, h: 9 },
+    }));
+    doc.semanticUnits.find((unit) => unit.id === 'p1')!.sourceText = source;
+
+    const prepared = prepareImmutableStructure(doc);
+
+    expect(prepared.units.find((unit) => unit.id === 'p1-inline-after')?.sourceText)
+      .toBe('can make verifiers accept.');
+    expect(prepared.assetRegions.find((asset) => asset.id === 'p1-inline-formula')!.rect.w)
+      .toBeLessThan(80);
+  });
+
+  it('stops an inline formula before prose that describes task decomposition', () => {
+    const doc = fixtureDoc();
+    const source = 'We convert the original task Q = n k P into several subtasks, where n is the scale.';
+    const paragraph = doc.blocks.find((block) => block.id === 'p1')!;
+    paragraph.text = source;
+    paragraph.rect = { x: 50, y: 380, w: 500, h: 12 };
+    paragraph.widthMode = 'span';
+    paragraph.characterRects = [...source].map((ch, index) => ({
+      ch, sourceIndex: index, pageIndex: 0,
+      rect: { x: 50 + index * 5, y: 380, w: 4.8, h: 9 },
+    }));
+    doc.semanticUnits.find((unit) => unit.id === 'p1')!.sourceText = source;
+
+    const prepared = prepareImmutableStructure(doc);
+
+    expect(prepared.units.find((unit) => unit.id === 'p1-inline-after')?.sourceText)
+      .toBe('into several subtasks, where n is the scale.');
+    expect(prepared.assetRegions.find((asset) => asset.id === 'p1-inline-formula')!.rect.w)
+      .toBeLessThan(60);
+  });
+
+  it('separates consecutive formulas joined by explanatory prose', () => {
+    const doc = fixtureDoc();
+    const source = "It is defined as a' = NTT(a) with elements a' = sum(a), where a is a scalar.";
+    const paragraph = doc.blocks.find((block) => block.id === 'p1')!;
+    paragraph.text = source;
+    paragraph.rect = { x: 50, y: 380, w: 500, h: 12 };
+    paragraph.widthMode = 'span';
+    paragraph.characterRects = [...source].map((ch, index) => ({
+      ch, sourceIndex: index, pageIndex: 0,
+      rect: { x: 50 + index * 5, y: 380, w: 4.8, h: 9 },
+    }));
+    doc.semanticUnits.find((unit) => unit.id === 'p1')!.sourceText = source;
+
+    const prepared = prepareImmutableStructure(doc);
+
+    expect(prepared.assetRegions.filter((asset) => asset.id.startsWith('p1-inline-formula')))
+      .toHaveLength(2);
+    expect(prepared.units.find((unit) => unit.id === 'p1-inline-between-1')?.sourceText)
+      .toBe('with elements');
+    expect(prepared.units.find((unit) => unit.id === 'p1-inline-after')?.sourceText)
+      .toBe('where a is a scalar.');
+  });
+
   it('expands a formula crop upward across numeric-only extracted lines using character geometry', () => {
     const doc = fixtureDoc();
     const preceding = doc.blocks.find((block) => block.id === 'p1')!;
@@ -914,6 +1062,34 @@ describe('production pipeline preparation', () => {
     });
   });
 
+  it('places a captionless Vision algorithm between surrounding prose instead of appending it', () => {
+    const doc = fixtureDoc();
+    doc.layoutMode = 'single';
+    doc.layoutRegions = [{
+      id: 'body', mode: 'full-width', sourcePage: 0,
+      bounds: { x: 50, y: 80, w: 500, h: 620 }, orderedUnitIds: ['before', 'after'],
+    }];
+    doc.blocks = [
+      { id: 'before', docId: 'en', type: 'paragraph', pageIndex: 0, rect: { x: 50, y: 100, w: 500, h: 70 }, order: 10, text: 'Before the algorithm.', splitAllowed: true, widthMode: 'span' },
+      { id: 'after', docId: 'en', type: 'paragraph', pageIndex: 0, rect: { x: 50, y: 360, w: 500, h: 70 }, order: 11, text: 'After the algorithm.', splitAllowed: true, widthMode: 'span' },
+    ];
+    doc.semanticUnits = [
+      { id: 'before', kind: 'paragraph', sourceText: 'Before the algorithm.', protectedTokens: [], layoutRegionId: 'body', order: 10 },
+      { id: 'after', kind: 'paragraph', sourceText: 'After the algorithm.', protectedTokens: [], layoutRegionId: 'body', order: 11 },
+    ];
+
+    const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: [{
+      id: 'vision-code', kind: 'code', pageIndex: 0,
+      rect: { x: 50, y: 190, w: 500, h: 140 }, widthMode: 'span',
+    }] });
+
+    const body = prepared.regions.find((region) => region.id === 'body')!;
+    expect(body.orderedUnitIds).toEqual(['before', 'vision-code', 'after']);
+    expect(prepared.units.find((unit) => unit.id === 'vision-code')).toMatchObject({
+      kind: 'code', assetId: 'vision-code', layoutRegionId: 'body', order: 10.5,
+    });
+  });
+
   it('uses the repeated page header as the top boundary for side-by-side figures at the page top', () => {
     const doc = fixtureDoc();
     const runningHeader = 'ZK-Tracer: A High-Performance Heterogeneous Accelerator for Zero-Knowledge VM Trace Generation';
@@ -1031,6 +1207,72 @@ describe('production pipeline preparation', () => {
       'table-caption', 'table-caption-asset', 'after-table',
     ]));
     expect(prepared.regions[0].orderedUnitIds).not.toContain('table-body');
+  });
+
+  it('reconstructs a complete caption-anchored algorithm and rejects a misplaced Vision code crop', () => {
+    const doc = fixtureDoc();
+    doc.blocks = doc.blocks.filter((block) => block.id !== 'fig-caption');
+    doc.semanticUnits = doc.semanticUnits.filter((unit) => unit.id !== 'fig-caption');
+    doc.layoutRegions[0].orderedUnitIds = doc.layoutRegions[0].orderedUnitIds
+      .filter((unitId) => unitId !== 'fig-caption');
+    doc.blocks.push(
+      { id: 'algorithm-caption', docId: 'en', type: 'caption', pageIndex: 0, rect: { x: 50, y: 200, w: 300, h: 12 }, order: 4, text: 'Algorithm 1 Pippenger Algorithm', splitAllowed: false, widthMode: 'span' },
+      { id: 'algorithm-body-1', docId: 'en', type: 'paragraph', pageIndex: 0, rect: { x: 60, y: 218, w: 290, h: 36 }, order: 5, text: '1: for i ← 1 to n do\n2: // Initialize buckets', splitAllowed: false, widthMode: 'span' },
+      { id: 'algorithm-body-2', docId: 'en', type: 'paragraph', pageIndex: 0, rect: { x: 60, y: 258, w: 250, h: 36 }, order: 6, text: '3: if value ≠ 0 then\n4: return Q', splitAllowed: false, widthMode: 'span' },
+      { id: 'after-algorithm', docId: 'en', type: 'paragraph', pageIndex: 0, rect: { x: 50, y: 315, w: 480, h: 40 }, order: 7, text: 'This ordinary paragraph continues after the complete algorithm and must remain available for translation.', splitAllowed: true, widthMode: 'span' },
+    );
+    doc.semanticUnits.push(
+      { id: 'algorithm-caption', kind: 'caption', sourceText: 'Algorithm 1 Pippenger Algorithm', protectedTokens: [], layoutRegionId: 'r1', order: 4 },
+      { id: 'algorithm-body-1', kind: 'paragraph', sourceText: '1: for i ← 1 to n do\n2: // Initialize buckets', protectedTokens: [], layoutRegionId: 'r1', order: 5 },
+      { id: 'algorithm-body-2', kind: 'paragraph', sourceText: '3: if value ≠ 0 then\n4: return Q', protectedTokens: [], layoutRegionId: 'r1', order: 6 },
+      { id: 'after-algorithm', kind: 'paragraph', sourceText: 'This ordinary paragraph continues after the complete algorithm and must remain available for translation.', protectedTokens: [], layoutRegionId: 'r1', order: 7 },
+    );
+    doc.layoutRegions[0].orderedUnitIds.push(
+      'algorithm-caption', 'algorithm-body-1', 'algorithm-body-2', 'after-algorithm',
+    );
+
+    const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: [{
+      id: 'vision-misplaced-code', kind: 'code', pageIndex: 0,
+      rect: { x: 50, y: 360, w: 480, h: 90 }, widthMode: 'span',
+    }] });
+
+    expect(prepared.assetRegions).toContainEqual(expect.objectContaining({
+      id: 'algorithm-caption-body-asset', kind: 'code', captionUnitId: 'algorithm-caption', widthMode: 'span',
+    }));
+    expect(prepared.assetRegions.some((asset) => asset.id === 'vision-misplaced-code')).toBe(false);
+    expect(prepared.units.some((unit) => unit.id === 'algorithm-body-1')).toBe(false);
+    expect(prepared.units.some((unit) => unit.id === 'algorithm-body-2')).toBe(false);
+    expect(prepared.units.some((unit) => unit.id === 'after-algorithm')).toBe(true);
+    expect(prepared.regions[0].orderedUnitIds).toEqual(expect.arrayContaining([
+      'algorithm-caption', 'algorithm-caption-body-asset', 'after-algorithm',
+    ]));
+  });
+
+  it('stops a deterministic algorithm crop before a detached figure formula cluster', () => {
+    const doc = fixtureDoc();
+    doc.blocks.push(
+      { id: 'algorithm-caption-2', docId: 'en', type: 'caption', pageIndex: 0, rect: { x: 50, y: 100, w: 300, h: 12 }, order: 10, text: 'Algorithm 2 Reduction', splitAllowed: false, widthMode: 'span' },
+      { id: 'algorithm-line-1', docId: 'en', type: 'paragraph', pageIndex: 0, rect: { x: 55, y: 118, w: 300, h: 22 }, order: 11, text: '1: for i ← 1 to n do', splitAllowed: false, widthMode: 'span' },
+      { id: 'algorithm-line-2', docId: 'en', type: 'paragraph', pageIndex: 0, rect: { x: 55, y: 144, w: 300, h: 22 }, order: 12, text: '2: return Q', splitAllowed: false, widthMode: 'span' },
+      { id: 'detached-figure-formula', docId: 'en', type: 'equation', pageIndex: 0, rect: { x: 120, y: 240, w: 240, h: 40 }, order: 13, text: '∑ P_i → B_i', splitAllowed: false, widthMode: 'span' },
+      { id: 'detached-figure-caption', docId: 'en', type: 'caption', pageIndex: 0, rect: { x: 100, y: 290, w: 300, h: 12 }, order: 14, text: 'Figure 9: Detached figure.', splitAllowed: false, widthMode: 'span' },
+    );
+    doc.semanticUnits.push(
+      { id: 'algorithm-caption-2', kind: 'caption', sourceText: 'Algorithm 2 Reduction', protectedTokens: [], layoutRegionId: 'r1', order: 10 },
+      { id: 'algorithm-line-1', kind: 'paragraph', sourceText: '1: for i ← 1 to n do', protectedTokens: [], layoutRegionId: 'r1', order: 11 },
+      { id: 'algorithm-line-2', kind: 'paragraph', sourceText: '2: return Q', protectedTokens: [], layoutRegionId: 'r1', order: 12 },
+      { id: 'detached-figure-formula', kind: 'formula', sourceText: '∑ P_i → B_i', protectedTokens: [], layoutRegionId: 'r1', order: 13 },
+      { id: 'detached-figure-caption', kind: 'caption', sourceText: 'Figure 9: Detached figure.', protectedTokens: [], layoutRegionId: 'r1', order: 14 },
+    );
+    doc.layoutRegions[0].orderedUnitIds.push(
+      'algorithm-caption-2', 'algorithm-line-1', 'algorithm-line-2',
+      'detached-figure-formula', 'detached-figure-caption',
+    );
+
+    const prepared = prepareImmutableStructure(doc);
+    const algorithm = prepared.assetRegions.find((asset) => asset.id === 'algorithm-caption-2-body-asset');
+    expect(algorithm).toBeDefined();
+    expect(algorithm!.rect.y + algorithm!.rect.h).toBeLessThan(200);
   });
 
   it('splits a PDF text block that contains both a figure caption and a table title', () => {

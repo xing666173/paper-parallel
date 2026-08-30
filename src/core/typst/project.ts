@@ -88,7 +88,15 @@ export async function buildTypstProject(input: TypstProjectInput): Promise<Typst
   if (assetsById.size !== input.assets.length) throw new Error('Duplicate immutable asset ID');
 
   const markerIds: string[] = [];
-  const regionBodies: string[] = [];
+  const regionBodies: Array<{ mode: 'double' | 'root'; content: string }> = [];
+  const pushRegionBody = (mode: 'double' | 'root', content: string): void => {
+    const previous = regionBodies.at(-1);
+    if (mode === 'double' && previous?.mode === 'double') {
+      previous.content = `${previous.content}\n\n${content}`;
+      return;
+    }
+    regionBodies.push({ mode, content });
+  };
   for (const region of input.regions) {
     const segments: Array<{
       mode: LayoutRegion['mode'];
@@ -137,10 +145,15 @@ export async function buildTypstProject(input: TypstProjectInput): Promise<Typst
         })();
       segment.rendered.push({ content, sourceColumn, forceColumnBreakBefore });
     };
-    const renderAsset = (unit: TypstSemanticUnit, asset: ImmutableAsset, rowSize = 1) => {
+    const renderAsset = (
+      unit: TypstSemanticUnit,
+      asset: ImmutableAsset,
+      rowSize = 1,
+      effectiveMode: LayoutRegion['mode'] = region.mode,
+    ) => {
       markerIds.push(unit.id);
       const path = `/assets/${asset.id}.${assetExtension(asset)}`;
-      const width = boundedAssetWidth(asset, region.mode, input.metadata, rowSize);
+      const width = boundedAssetWidth(asset, effectiveMode, input.metadata, rowSize);
       return `#pp-asset(${quote(encodeURIComponent(unit.id))}, ${quote(path)}, ${sourceWidth(width)}, span: ${asset.widthMode === 'span'})`;
     };
 
@@ -164,27 +177,31 @@ export async function buildTypstProject(input: TypstProjectInput): Promise<Typst
         const memberIds = [captionId, ...assetUnits.map((member) => member.unit.id)];
         memberIds.forEach((id) => consumed.add(id));
         const rowSize = assetUnits.length > 1 ? assetUnits.length : horizontalCellCount;
-        const assetCodes = assetUnits.map((member) => renderAsset(member.unit, member.asset, rowSize));
-        const assetsContent = assetCodes.length > 1
-          ? `#grid(columns: ${assetCodes.length}, gutter: 6pt, ${assetCodes.map((code) => `[${code}]`).join(', ')})`
-          : assetCodes[0]!;
-        const captionContent = renderTextUnit(caption, markerIds);
-        const tableOnly = groupedAssets.every((member) => member.kind === 'table');
         const groupMode: LayoutRegion['mode'] = region.mode === 'double'
           && (groupedAssets.length > 1 || groupedAssets.some((member) => member.widthMode === 'span'))
           ? 'full-width'
           : region.mode;
-        const pageBoundary = groupMode !== 'double'
-          && groupedAssets.some((member) => member.widthMode === 'span')
-          ? '#pagebreak(weak: true)\n'
-          : '';
-        const content = `${pageBoundary}#pp-asset-group[\n${tableOnly ? `${captionContent}\n${assetsContent}` : `${assetsContent}\n${captionContent}`}\n]`;
+        const assetCodes = assetUnits.map((member) => (
+          renderAsset(member.unit, member.asset, rowSize, groupMode)
+        ));
+        const assetsContent = assetCodes.length > 1
+          ? `#grid(columns: ${assetCodes.length}, gutter: 6pt, ${assetCodes.map((code) => `[${code}]`).join(', ')})`
+          : assetCodes[0]!;
+        const captionContent = renderTextUnit(caption, markerIds);
+        const captionFirst = groupedAssets.every((member) => (
+          member.kind === 'table' || member.kind === 'code'
+        ));
+        // Full-width immutable groups are emitted at the document root. Typst
+        // can therefore move the complete unbreakable group only when the
+        // remaining page space is insufficient; forcing a pagebreak here left
+        // nearly empty pages before ordinary algorithms and figures.
+        const content = `#pp-asset-group[\n${captionFirst ? `${captionContent}\n${assetsContent}` : `${assetsContent}\n${captionContent}`}\n]`;
         const columns = new Set(memberIds.map((id) => unitsById.get(id)?.sourceColumn).filter(Boolean));
         pushRendered(
           groupMode,
           content,
           columns.size === 1 ? [...columns][0] : 'span',
-          groupMode === 'double',
+          false,
         );
         continue;
       }
@@ -194,16 +211,11 @@ export async function buildTypstProject(input: TypstProjectInput): Promise<Typst
         : region.mode;
       if (unit.assetId) {
         if (!asset) throw new Error(`Unit ${unit.id} references missing asset ${unit.assetId}`);
-        const pageBoundary = unitMode !== 'double'
-          && asset.widthMode === 'span'
-          && asset.kind !== 'formula'
-          ? '#pagebreak(weak: true)\n'
-          : '';
         pushRendered(
           unitMode,
-          `${pageBoundary}${renderAsset(unit, asset, horizontalCellCount)}`,
+          renderAsset(unit, asset, horizontalCellCount, unitMode),
           unit.sourceColumn,
-          unitMode === 'double' && asset.kind !== 'formula',
+          false,
         );
       } else {
         pushRendered(unitMode, renderTextUnit(unit, markerIds), unit.sourceColumn);
@@ -214,23 +226,14 @@ export async function buildTypstProject(input: TypstProjectInput): Promise<Typst
         item.content.replace(/^#pagebreak\(weak: true\)\n/, '')
       )));
       if (cells.length) {
-        // A horizontal band is itself placed at the document root. Individual
-        // span assets may already request a root page boundary, but carrying
-        // that directive into a grid cell is illegal in Typst (pagebreaks are
-        // not allowed inside containers). Keep one boundary around the band.
-        regionBodies.push(`#pagebreak(weak: true)\n#pp-asset-group[\n#grid(columns: ${cells.length}, gutter: 6pt, ${cells.map((cell) => `[${cell}]`).join(', ')})\n]`);
+        // The band is an unbreakable root-level group, so natural pagination
+        // preserves it without wasting the remainder of the previous page.
+        pushRegionBody('root', `#pp-asset-group[\n#grid(columns: ${cells.length}, gutter: 6pt, ${cells.map((cell) => `[${cell}]`).join(', ')})\n]`);
       }
       continue;
     }
     for (const segment of segments) {
-      const wrapper = segment.mode === 'double'
-        ? 'pp-double'
-        : segment.mode === 'full-width' ? 'pp-full-width' : 'pp-single';
       const rendered: string[] = [];
-      const pageBoundary = segment.mode === 'double'
-        && segment.rendered[0]?.forceColumnBreakBefore
-        ? '#pagebreak(weak: true)\n'
-        : '';
       let previousColumn: TypstSemanticUnit['sourceColumn'];
       for (const item of segment.rendered) {
         if (segment.mode === 'double' && rendered.length > 0 && (
@@ -247,14 +250,14 @@ export async function buildTypstProject(input: TypstProjectInput): Promise<Typst
       // unaware of the real page boundary, so Typst can slice them at the
       // footer instead of moving the complete figure/table to the next page.
       // Two-column flow still requires its columns container.
-      regionBodies.push(segment.mode === 'double'
-        ? `${pageBoundary}#${wrapper}[\n${rendered.join('\n\n')}\n]`
-        : rendered.join('\n\n'));
+      pushRegionBody(segment.mode === 'double' ? 'double' : 'root', rendered.join('\n\n'));
     }
   }
 
   if (new Set(markerIds).size !== markerIds.length) throw new Error('Duplicate Typst marker ID');
-  const mainContent = `${buildAcademicTemplate(input.metadata)}\n${regionBodies.join('\n\n')}\n`;
+  const mainContent = `${buildAcademicTemplate(input.metadata)}\n${regionBodies.map((body) => (
+    body.mode === 'double' ? `#pp-double[\n${body.content}\n]` : body.content
+  )).join('\n\n')}\n`;
   const files = new Map<string, Uint8Array>();
   const addFile = (path: string, bytes: Uint8Array): void => {
     if (files.has(path)) throw new Error(`Duplicate Typst project path: ${path}`);

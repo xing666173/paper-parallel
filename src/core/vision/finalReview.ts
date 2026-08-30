@@ -219,6 +219,7 @@ export const VISION_FINAL_REVIEW_CONCURRENCY = 1;
 export const VISION_FINAL_REVIEW_PAGE_TIMEOUT_MS = 210_000;
 export const VISION_FINAL_REVIEW_RENDER_SCALE = 1.5;
 export const VISION_FINAL_REVIEW_FALLBACK_RENDER_SCALE = 1;
+export const VISION_FINAL_REVIEW_LAST_RESORT_RENDER_SCALE = 0.75;
 export const VISION_FINAL_REVIEW_RENDER_TIMEOUT_MS = 30_000;
 
 class VisionPageTimeoutError extends Error {
@@ -315,31 +316,40 @@ export async function runVisionFinalReview(options: RunVisionFinalReviewOptions)
           try { page.cleanup?.(); } catch { /* release is best-effort */ }
         }
       };
-      try {
-        return await renderAttempt(VISION_FINAL_REVIEW_RENDER_SCALE);
-      } catch (error) {
-        if (!(error instanceof PdfPageRenderTimeoutError) || pageSignal.aborted) throw error;
-        options.onPagePhase?.({
-          targetPageIndex, totalPages: options.targetPdf.numPages, phase: 'render-retrying',
-        });
+      const scales = [
+        VISION_FINAL_REVIEW_RENDER_SCALE,
+        VISION_FINAL_REVIEW_FALLBACK_RENDER_SCALE,
+        VISION_FINAL_REVIEW_LAST_RESORT_RENDER_SCALE,
+      ];
+      for (const [index, scale] of scales.entries()) {
         try {
-          return await renderAttempt(VISION_FINAL_REVIEW_FALLBACK_RENDER_SCALE);
-        } catch (retryError) {
-          if (retryError instanceof PdfPageRenderTimeoutError) {
-            options.onPageTimeout?.({
-              targetPageIndex,
-              totalPages: options.targetPdf.numPages,
-              timeoutMs: VISION_FINAL_REVIEW_RENDER_TIMEOUT_MS * 2,
+          return await renderAttempt(scale);
+        } catch (error) {
+          if (!(error instanceof PdfPageRenderTimeoutError) || pageSignal.aborted) throw error;
+          if (index < scales.length - 1) {
+            options.onPagePhase?.({
+              targetPageIndex, totalPages: options.targetPdf.numPages, phase: 'render-retrying',
             });
-            throw new VisionPageTimeoutError(
-              targetPageIndex,
-              options.targetPdf.numPages,
-              VISION_FINAL_REVIEW_RENDER_TIMEOUT_MS * 2,
-            );
+            continue;
           }
-          throw retryError;
+          const elapsedTimeout = VISION_FINAL_REVIEW_RENDER_TIMEOUT_MS * scales.length;
+          options.onPageTimeout?.({
+            targetPageIndex,
+            totalPages: options.targetPdf.numPages,
+            timeoutMs: elapsedTimeout,
+          });
+          throw new VisionPageTimeoutError(
+            targetPageIndex,
+            options.targetPdf.numPages,
+            elapsedTimeout,
+          );
         }
       }
+      throw new VisionPageTimeoutError(
+        targetPageIndex,
+        options.targetPdf.numPages,
+        VISION_FINAL_REVIEW_RENDER_TIMEOUT_MS * scales.length,
+      );
     };
     const content: NonNullable<ChatCompletionOptions['messages'][number]['content']> extends infer _T ? any[] : never = [
       { type: 'text', text: buildVisionFinalReviewPrompt(targetPageIndex + 1, sourcePageIndices.map((page) => page + 1)) },

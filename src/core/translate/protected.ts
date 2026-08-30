@@ -94,9 +94,27 @@ export function restoreProtectedTokensFromTranslation(
         targetSegments: [...group.targetSegments],
       }));
       let changed = false;
+      const claimedLiteralTokens = new Map<string, number>();
       for (const marker of uniqueInOrder(source.protectedTokens)) {
         if (alignmentGroups.some((group) => group.targetSegments.some((segment) => segment.includes(marker)))) {
           continue;
+        }
+        const literal = replacements.get(marker);
+        if (literal) {
+          const literalCount = alignmentGroups.reduce((count, group) => (
+            count + group.targetSegments.reduce((segmentCount, segment) => (
+              segmentCount + occurrenceCount(segment, literal)
+            ), 0)
+          ), 0);
+          const claimed = claimedLiteralTokens.get(literal) ?? 0;
+          // Some providers return the protected value itself instead of the
+          // opaque marker.  Claim that literal occurrence for this marker;
+          // inserting another marker would restore the same number/citation a
+          // second time and visibly corrupt the translated paragraph.
+          if (claimed < literalCount) {
+            claimedLiteralTokens.set(literal, claimed + 1);
+            continue;
+          }
         }
         const sentence = source.sourceSentences.find((candidate) => candidate.text.includes(marker));
         const group = sentence
