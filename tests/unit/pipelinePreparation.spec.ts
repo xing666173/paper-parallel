@@ -2877,6 +2877,41 @@ describe('production pipeline preparation', () => {
     expect(prepared.regions[0].orderedUnitIds).not.toContain('detached-table-reference');
   });
 
+  it('clamps a derived column figure inside the gutter and outer page margin', () => {
+    const doc = fixtureDoc();
+    doc.blocks.push(
+      {
+        id: 'figure-labels', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 330, y: 90, w: 220, h: 80 }, order: 4,
+        text: 'Buffer\nR R R R\nAcc Acc\nFold Fold\nFSU\nHash',
+        splitAllowed: true, widthMode: 'column',
+      },
+      {
+        id: 'safe-column-caption', docId: 'en', type: 'caption', pageIndex: 0,
+        rect: { x: 350, y: 180, w: 176, h: 9 }, order: 5,
+        text: 'Figure 10: Timing of the pipeline', splitAllowed: false, widthMode: 'column',
+      },
+      {
+        id: 'page-edge-aggregate', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 318, y: 200, w: 295, h: 300 }, order: 6,
+        text: 'Ordinary prose whose coarse PDF box leaks beyond the physical page edge.',
+        splitAllowed: true, widthMode: 'column',
+      },
+    );
+    doc.semanticUnits.push(
+      { id: 'figure-labels', kind: 'paragraph', sourceText: 'Buffer\nR R R R\nAcc Acc\nFold Fold\nFSU\nHash', protectedTokens: [], layoutRegionId: 'r1', order: 4 },
+      { id: 'safe-column-caption', kind: 'caption', sourceText: 'Figure 10: Timing of the pipeline', protectedTokens: [], layoutRegionId: 'r1', order: 5 },
+      { id: 'page-edge-aggregate', kind: 'paragraph', sourceText: 'Ordinary prose whose coarse PDF box leaks beyond the physical page edge.', protectedTokens: [], layoutRegionId: 'r1', order: 6 },
+    );
+    doc.layoutRegions[0].orderedUnitIds.push('figure-labels', 'safe-column-caption', 'page-edge-aggregate');
+
+    const prepared = prepareImmutableStructure(doc);
+    const figure = prepared.assetRegions.find((asset) => asset.id === 'safe-column-caption-asset')!;
+
+    expect(figure.rect.x).toBeGreaterThanOrEqual(612 / 2 + 612 * 0.012);
+    expect(figure.rect.x + figure.rect.w).toBeLessThanOrEqual(612 * 0.93);
+  });
+
   it('recovers a cross-page numeric table placed immediately above its split caption', () => {
     const doc = fixtureDoc();
     doc.pages.push({ pageIndex: 1, width: 612, height: 792, columns: [] });

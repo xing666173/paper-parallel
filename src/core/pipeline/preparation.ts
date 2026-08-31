@@ -2122,10 +2122,23 @@ function visualColumnBounds(doc: Doc, anchor: Doc['blocks'][number]): { x: numbe
     )
   ));
   if (!columnBlocks.length) return { x: anchor.rect.x, w: anchor.rect.w };
-  const x = Math.min(...columnBlocks.map((block) => block.rect.x));
-  const right = Math.max(...columnBlocks.map((block) => block.rect.x + block.rect.w));
+  let x = Math.min(...columnBlocks.map((block) => block.rect.x));
+  let right = Math.max(...columnBlocks.map((block) => block.rect.x + block.rect.w));
   if (anchor.widthMode === 'span' && right - x < pageWidth * 0.6) {
     return { x: pageWidth * 0.08, w: pageWidth * 0.84 };
+  }
+  if (anchor.widthMode === 'column') {
+    const midpoint = pageWidth / 2;
+    const gutter = pageWidth * 0.012;
+    const outerMargin = pageWidth * 0.07;
+    if (anchor.rect.x + anchor.rect.w / 2 < midpoint) {
+      x = Math.max(x, outerMargin);
+      right = Math.min(right, midpoint - gutter);
+    } else {
+      x = Math.max(x, midpoint + gutter);
+      right = Math.min(right, pageWidth - outerMargin);
+    }
+    if (right <= x) return { x: anchor.rect.x, w: anchor.rect.w };
   }
   return { x, w: right - x };
 }
