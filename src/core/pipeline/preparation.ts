@@ -3262,6 +3262,43 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
     }
   }
 
+  // PDF text extraction can detach an inline cross-reference at a column
+  // boundary and the semantic classifier can then mistake the tiny fragment
+  // for a table caption. Rejoin only the unambiguous form: a mixed-case bare
+  // `Table N.` immediately after prose ending in “shown/presented in”. Real
+  // IEEE table captions use a title/header and do not complete that sentence.
+  const detachedTableReferenceIds = new Set<string>();
+  for (const reference of units.filter((unit) => (
+    unit.kind === 'caption'
+    && /^Table\s+(?:[IVXLCDM]+|\d+)\s*[.:]?$/u.test(unit.sourceText?.trim() ?? '')
+  ))) {
+    const referenceBlock = blocks.get(reference.id);
+    const region = regions.find((candidate) => candidate.id === reference.layoutRegionId);
+    const referenceIndex = region?.orderedUnitIds.indexOf(reference.id) ?? -1;
+    const previousId = referenceIndex > 0 ? region!.orderedUnitIds[referenceIndex - 1] : undefined;
+    const previous = previousId ? units.find((unit) => unit.id === previousId) : undefined;
+    const previousBlock = previousId ? blocks.get(previousId) : undefined;
+    if (
+      !referenceBlock || !region || !previous || !previousBlock
+      || !['paragraph', 'abstract', 'list-item'].includes(previous.kind)
+      || previousBlock.pageIndex !== referenceBlock.pageIndex
+      || !sameVisualColumn(previousBlock, referenceBlock, doc.pages[referenceBlock.pageIndex]?.width ?? doc.meta.paperWidth)
+      || referenceBlock.rect.y - (previousBlock.rect.y + previousBlock.rect.h) < -1
+      || referenceBlock.rect.y - (previousBlock.rect.y + previousBlock.rect.h) > 6
+      || !/\b(?:shown|presented|summarized|reported|listed|given|provided|described)\s+in\s*$/iu.test(previous.sourceText ?? '')
+    ) continue;
+    previous.sourceText = `${previous.sourceText!.trimEnd()} ${reference.sourceText!.trim()}`;
+    previous.protectedTokens = extractProtectedTokens(previous.sourceText);
+    detachedTableReferenceIds.add(reference.id);
+  }
+  if (detachedTableReferenceIds.size) {
+    units = units.filter((unit) => !detachedTableReferenceIds.has(unit.id));
+    for (const region of regions) {
+      region.orderedUnitIds = region.orderedUnitIds
+        .filter((id) => !detachedTableReferenceIds.has(id));
+    }
+  }
+
   for (const caption of units.filter((unit) => (
     unit.kind === 'caption'
     && isFigureCaptionText(unit.sourceText ?? '')

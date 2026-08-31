@@ -2834,6 +2834,49 @@ describe('production pipeline preparation', () => {
     expect(prepared.units.some((unit) => unit.id === 'isolated-table-body')).toBe(false);
   });
 
+  it('rejoins a detached inline table reference instead of inferring a table asset', () => {
+    const doc = fixtureDoc();
+    doc.blocks = doc.blocks.filter((block) => !['fig-caption', 'eq1'].includes(block.id));
+    doc.semanticUnits = doc.semanticUnits.filter((unit) => !['fig-caption', 'eq1'].includes(unit.id));
+    doc.layoutRegions[0].orderedUnitIds = doc.layoutRegions[0].orderedUnitIds
+      .filter((id) => !['fig-caption', 'eq1'].includes(id));
+    const prose = 'The performance of our work and comparison with other works are shown in';
+    doc.blocks.push(
+      {
+        id: 'comparison-prose', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 50, y: 220, w: 230, h: 52 }, order: 4,
+        text: prose, splitAllowed: true, widthMode: 'column',
+      },
+      {
+        id: 'detached-table-reference', docId: 'en', type: 'caption', pageIndex: 0,
+        rect: { x: 50, y: 274, w: 39, h: 10 }, order: 5,
+        text: 'Table VI.', splitAllowed: false, widthMode: 'column',
+      },
+      {
+        id: 'following-prose', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 50, y: 286, w: 230, h: 80 }, order: 6,
+        text: 'For MSM mode, comparisons are performed with prior work.',
+        splitAllowed: true, widthMode: 'column',
+      },
+    );
+    doc.semanticUnits.push(
+      { id: 'comparison-prose', kind: 'paragraph', sourceText: prose, protectedTokens: [], layoutRegionId: 'r1', order: 4 },
+      { id: 'detached-table-reference', kind: 'caption', sourceText: 'Table VI.', protectedTokens: [], layoutRegionId: 'r1', order: 5 },
+      { id: 'following-prose', kind: 'paragraph', sourceText: 'For MSM mode, comparisons are performed with prior work.', protectedTokens: [], layoutRegionId: 'r1', order: 6 },
+    );
+    doc.layoutRegions[0].orderedUnitIds.push(
+      'comparison-prose', 'detached-table-reference', 'following-prose',
+    );
+
+    const prepared = prepareImmutableStructure(doc);
+
+    expect(prepared.units.find((unit) => unit.id === 'comparison-prose')?.sourceText)
+      .toBe(`${prose} Table VI.`);
+    expect(prepared.units.some((unit) => unit.id === 'detached-table-reference')).toBe(false);
+    expect(prepared.assetRegions.some((asset) => asset.kind === 'table')).toBe(false);
+    expect(prepared.regions[0].orderedUnitIds).not.toContain('detached-table-reference');
+  });
+
   it('extends a caption-derived span table through a right-column label block', () => {
     const doc = fixtureDoc();
     const rightLabels = [
