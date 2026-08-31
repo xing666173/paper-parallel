@@ -33,6 +33,12 @@ describe('translation cache identity', () => {
       buildTranslationCacheKey({ ...base, fileHash: 'sha256:a', promptVersion: 'b:academic-json-v2' }),
     );
   });
+
+  it('encodes malformed PDF surrogate fragments without aborting translation', () => {
+    const malformed = `${base.sourceText}\uD835 and \uDC00`;
+    expect(() => buildTranslationCacheKey({ ...base, sourceText: malformed })).not.toThrow();
+    expect(buildTranslationCacheKey({ ...base, sourceText: malformed })).toContain('%EF%BF%BD');
+  });
 });
 
 describe('vision layout cache key', () => {
