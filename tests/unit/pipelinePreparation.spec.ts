@@ -2877,6 +2877,77 @@ describe('production pipeline preparation', () => {
     expect(prepared.regions[0].orderedUnitIds).not.toContain('detached-table-reference');
   });
 
+  it('recovers a cross-page numeric table placed immediately above its split caption', () => {
+    const doc = fixtureDoc();
+    doc.pages.push({ pageIndex: 1, width: 612, height: 792, columns: [] });
+    const prose = 'the performance vs. area Pareto frontier for both configurations';
+    const rows = [
+      'Prover Send Verifier Total vs. PipeZK',
+      'AES 0.1 0.8 0.1 1.1 7.4x',
+      'SHA 0.3 0.9 0.2 1.3 12.1x',
+      'RSA 1.3 1.0 0.2 2.5 19.6x',
+      'gmean 16.8x',
+    ];
+    const source = [prose, ...rows].join('\n');
+    let sourceIndex = 0;
+    const characterRects = [prose, ...rows].flatMap((line, lineIndex) => {
+      const pageIndex = lineIndex === 0 ? 0 : 1;
+      const y = lineIndex === 0 ? 680 : 50 + (lineIndex - 1) * 16;
+      const chars = [...line].map((ch, index) => ({
+        ch, sourceIndex: sourceIndex + index, pageIndex,
+        rect: { x: 58 + index * 4, y, w: 3.8, h: 9 },
+      }));
+      sourceIndex += line.length + 1;
+      return chars;
+    });
+    doc.blocks.push(
+      {
+        id: 'cross-page-table-body', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 312, y: 670, w: 250, h: 10 }, order: 4,
+        fragments: [
+          { pageIndex: 0, rect: { x: 312, y: 670, w: 250, h: 10 } },
+          { pageIndex: 1, rect: { x: 58, y: 50, w: 226, h: 73 } },
+        ],
+        characterRects, text: source, splitAllowed: true, widthMode: 'column',
+      },
+      {
+        id: 'bottom-table-caption', docId: 'en', type: 'caption', pageIndex: 1,
+        rect: { x: 49, y: 133, w: 252, h: 9 }, order: 5,
+        text: 'TABLE V: Per-benchmark end-to-end runtime in seconds for',
+        splitAllowed: false, widthMode: 'column',
+      },
+      {
+        id: 'bottom-table-caption-tail', docId: 'en', type: 'paragraph', pageIndex: 1,
+        rect: { x: 49, y: 144, w: 204, h: 9 }, order: 6,
+        text: 'NoCap along with end-to-end speedups vs. PipeZK.',
+        splitAllowed: true, widthMode: 'column',
+      },
+    );
+    doc.layoutRegions.push({
+      id: 'page-two-left', mode: 'double', sourcePage: 1,
+      bounds: { x: 49, y: 48, w: 252, h: 110 },
+      orderedUnitIds: ['cross-page-table-body', 'bottom-table-caption', 'bottom-table-caption-tail'],
+    });
+    doc.semanticUnits.push(
+      { id: 'cross-page-table-body', kind: 'paragraph', sourceText: source, protectedTokens: [], layoutRegionId: 'page-two-left', order: 4 },
+      { id: 'bottom-table-caption', kind: 'caption', sourceText: 'TABLE V: Per-benchmark end-to-end runtime in seconds for', protectedTokens: [], layoutRegionId: 'page-two-left', order: 5 },
+      { id: 'bottom-table-caption-tail', kind: 'paragraph', sourceText: 'NoCap along with end-to-end speedups vs. PipeZK.', protectedTokens: [], layoutRegionId: 'page-two-left', order: 6 },
+    );
+
+    const prepared = prepareImmutableStructure(doc);
+    const table = prepared.assetRegions.find((asset) => asset.id === 'bottom-table-caption-asset');
+    const region = prepared.regions.find((candidate) => candidate.id === 'page-two-left')!;
+
+    expect(table).toMatchObject({ kind: 'table', pageIndex: 1, widthMode: 'column' });
+    expect(table!.rect.y).toBeLessThanOrEqual(44);
+    expect(table!.rect.y + table!.rect.h).toBeCloseTo(129);
+    expect(prepared.units.find((unit) => unit.id === 'bottom-table-caption')?.sourceText)
+      .toBe('TABLE V: Per-benchmark end-to-end runtime in seconds for NoCap along with end-to-end speedups vs. PipeZK.');
+    expect(prepared.units.some((unit) => unit.id === 'bottom-table-caption-tail')).toBe(false);
+    expect(region.orderedUnitIds.indexOf('bottom-table-caption-asset'))
+      .toBe(region.orderedUnitIds.indexOf('bottom-table-caption') - 1);
+  });
+
   it('extends a caption-derived span table through a right-column label block', () => {
     const doc = fixtureDoc();
     const rightLabels = [

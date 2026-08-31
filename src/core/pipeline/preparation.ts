@@ -1737,6 +1737,45 @@ function recoverSplitColumnCaption(
   };
 }
 
+/** Rejoin a caption continuation that PDF.js emitted as the next column block. */
+function recoverColumnCaptionContinuation(
+  doc: Doc,
+  caption: Doc['blocks'][number],
+): RecoveredCaptionLane | undefined {
+  const page = doc.pages[caption.pageIndex];
+  const source = caption.text?.trim() ?? '';
+  if (!page || caption.widthMode !== 'column' || /[.!?]\s*$/.test(source)) return undefined;
+  const captionBottom = caption.rect.y + caption.rect.h;
+  const continuation = doc.blocks
+    .filter((block) => {
+      const text = block.text?.trim() ?? '';
+      const gap = block.rect.y - captionBottom;
+      return block.id !== caption.id
+        && block.pageIndex === caption.pageIndex
+        && block.type === 'paragraph'
+        && sameVisualColumn(block, caption, page.width)
+        && Math.abs(block.rect.x - caption.rect.x) <= page.width * 0.04
+        && gap >= -1
+        && gap <= 7
+        && block.rect.h <= 48
+        && /^[A-Za-z(]/.test(text);
+    })
+    .sort((left, right) => left.rect.y - right.rect.y || left.order - right.order)[0];
+  if (!continuation) return undefined;
+  const lane = unionRects([caption.rect, continuation.rect]);
+  if (!lane) return undefined;
+  return {
+    anchor: {
+      ...caption,
+      rect: { x: lane.x, y: caption.rect.y, w: lane.w, h: caption.rect.h },
+      widthMode: 'column',
+    },
+    sourceText: appendCaptionContinuation(source, continuation.text!.trim())
+      .replace(/\s+/g, ' ').trim(),
+    continuationIds: [continuation.id],
+  };
+}
+
 function previousPhysicalContentBottom(
   doc: Doc,
   caption: Doc['blocks'][number],
@@ -1924,6 +1963,44 @@ function looksLikeShortTableCellLabel(block: Doc['blocks'][number]): boolean {
 interface CenteredSpanningTableGeometry {
   rect: Rect;
   bodyIds: string[];
+}
+
+interface PrecedingTableGeometry {
+  rect: Rect;
+}
+
+/** Recover a numeric table placed immediately above its caption. */
+function precedingTableGeometry(
+  doc: Doc,
+  caption: Doc['blocks'][number],
+): PrecedingTableGeometry | undefined {
+  const page = doc.pages[caption.pageIndex];
+  if (!page) return undefined;
+  const candidate = doc.blocks
+    .map((block) => ({ block, rect: physicalRectOnPage(block, caption.pageIndex) }))
+    .filter((entry): entry is { block: Doc['blocks'][number]; rect: Rect } => Boolean(entry.rect))
+    .filter(({ block, rect }) => {
+      if (block.id === caption.id || !looksLikeNumericTableBody(block)) return false;
+      const gap = caption.rect.y - (rect.y + rect.h);
+      const overlap = Math.max(0, Math.min(
+        rect.x + rect.w,
+        caption.rect.x + caption.rect.w,
+      ) - Math.max(rect.x, caption.rect.x));
+      return gap >= -2
+        && gap <= 18
+        && rect.h >= 18
+        && overlap >= Math.min(rect.w, caption.rect.w) * 0.45;
+    })
+    .sort((left, right) => (
+      right.rect.y + right.rect.h - (left.rect.y + left.rect.h)
+      || left.block.order - right.block.order
+    ))[0];
+  if (!candidate) return undefined;
+  const column = visualColumnBounds(doc, caption);
+  const top = Math.max(page.height * 0.04, candidate.rect.y - 6);
+  const bottom = caption.rect.y - 4;
+  if (bottom - top < 18) return undefined;
+  return { rect: { x: column.x, y: top, w: column.w, h: bottom - top } };
 }
 
 /**
@@ -3398,17 +3475,33 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
     const captionBlock = blocks.get(caption.id);
     const region = regions.find((candidate) => candidate.id === caption.layoutRegionId);
     if (!captionBlock || !region) throw new Error(`表题 ${caption.id} 缺少版式坐标`);
+    const recoveredCaption = recoverColumnCaptionContinuation(doc, captionBlock);
+    if (recoveredCaption) {
+      caption.sourceText = recoveredCaption.sourceText;
+      caption.protectedTokens = extractProtectedTokens(recoveredCaption.sourceText);
+      const continuationIds = new Set(recoveredCaption.continuationIds);
+      units = units.filter((unit) => !continuationIds.has(unit.id));
+      for (const candidateRegion of regions) {
+        candidateRegion.orderedUnitIds = candidateRegion.orderedUnitIds
+          .filter((unitId) => !continuationIds.has(unitId));
+      }
+    }
     const pageWidth = doc.pages[captionBlock.pageIndex]?.width ?? doc.meta.paperWidth;
     const captionBottom = captionBlock.rect.y + captionBlock.rect.h;
     const bodyIds: string[] = [];
+    const precedingGeometry = precedingTableGeometry(doc, captionBlock);
     const spanningGeometry = centeredSpanningTableGeometry(doc, captionBlock);
-    let top = spanningGeometry?.rect.y ?? captionBottom + 6;
+    let top = precedingGeometry?.rect.y ?? spanningGeometry?.rect.y ?? captionBottom + 6;
     let bottom: number;
-    let column = spanningGeometry
+    let column = precedingGeometry
+      ? { x: precedingGeometry.rect.x, w: precedingGeometry.rect.w }
+      : spanningGeometry
       ? { x: spanningGeometry.rect.x, w: spanningGeometry.rect.w }
       : visualColumnBounds(doc, captionBlock);
     let widthMode = spanningGeometry ? 'span' as const : captionBlock.widthMode;
-    if (spanningGeometry) {
+    if (precedingGeometry) {
+      bottom = precedingGeometry.rect.y + precedingGeometry.rect.h;
+    } else if (spanningGeometry) {
       bottom = spanningGeometry.rect.y + spanningGeometry.rect.h;
       bodyIds.push(...spanningGeometry.bodyIds);
     } else {
@@ -3480,10 +3573,10 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
     }
     units.push({
       id, kind: 'table', protectedTokens: [], assetId: id,
-      layoutRegionId: caption.layoutRegionId, order: caption.order + 0.1,
+      layoutRegionId: caption.layoutRegionId, order: caption.order + (precedingGeometry ? -0.1 : 0.1),
     });
     const captionIndex = region.orderedUnitIds.indexOf(caption.id);
-    region.orderedUnitIds.splice(captionIndex + 1, 0, id);
+    region.orderedUnitIds.splice(captionIndex + (precedingGeometry ? 0 : 1), 0, id);
   }
 
   for (const asset of verifiedAssetRegions) {
