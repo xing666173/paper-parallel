@@ -8,6 +8,7 @@ import {
 } from './render';
 import { VISION_LAYOUT_MODEL, type PdfDocumentForVision } from './analyze';
 import { parseNormalizedVisionBox } from './protocol';
+import type { TargetLayoutPolicy } from '../typst/template';
 
 export type VisionFinalIssueType =
   | 'missing_text' | 'clipped_text' | 'overlap' | 'unreadable_glyphs'
@@ -210,6 +211,7 @@ export interface RunVisionFinalReviewOptions {
   manifest: AlignmentManifest;
   baseUrl: string;
   apiKey: string;
+  targetLayoutPolicy?: TargetLayoutPolicy;
   signal?: AbortSignal;
   pageTimeoutMs?: number;
   complete?: (options: ChatCompletionOptions) => Promise<ChatCompletionResult>;
@@ -367,7 +369,12 @@ export async function runVisionFinalReview(options: RunVisionFinalReviewOptions)
       );
     };
     const content: NonNullable<ChatCompletionOptions['messages'][number]['content']> extends infer _T ? any[] : never = [
-      { type: 'text', text: buildVisionFinalReviewPrompt(targetPageIndex + 1, sourcePageIndices.map((page) => page + 1)) },
+      { type: 'text', text: buildVisionFinalReviewPrompt(
+        targetPageIndex + 1,
+        sourcePageIndices.map((page) => page + 1),
+        false,
+        options.targetLayoutPolicy,
+      ) },
     ];
     for (const sourcePageIndex of sourcePageIndices) {
       const sourceImage = await renderReviewPage(options.sourcePdf, sourcePageIndex + 1, 'source', sourcePageIndex);
@@ -410,6 +417,7 @@ export async function runVisionFinalReview(options: RunVisionFinalReviewOptions)
           targetPageIndex + 1,
           sourcePageIndices.map((page) => page + 1),
           compact,
+          options.targetLayoutPolicy,
         ) },
         ...content.slice(1),
       ] }],

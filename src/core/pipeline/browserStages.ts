@@ -50,6 +50,7 @@ import {
   parseFormulaOcrResult,
   recognizeFormulaCrop,
 } from '../vision/formulaOcr';
+import type { TargetLayoutPolicy } from '../typst/template';
 
 const SESSION_KEY_STORAGE = 'paper-parallel.deepseek-key-session';
 const LOCAL_KEY_STORAGE = 'paper-parallel.deepseek-key';
@@ -160,6 +161,11 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
     ?? sessionStorage.getItem(SESSION_KEY_STORAGE)
     ?? localStorage.getItem(LOCAL_KEY_STORAGE)
     ?? '';
+  const targetLayoutPolicy: TargetLayoutPolicy = import.meta.env.VITE_PP_TARGET_LAYOUT === 'single-column'
+    ? 'single-column'
+    : 'source-layout';
+  const skipRemoteFinalReview = import.meta.env.MODE === 'test'
+    && import.meta.env.VITE_PP_SKIP_REMOTE_FINAL_REVIEW === '1';
 
   return {
     async parse(input, signal) {
@@ -516,7 +522,10 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
       });
       const typstProject = await buildTypstProject({
         metadata: { paperWidth: doc.meta.paperWidth, paperHeight: doc.meta.paperHeight },
-        regions: prepared.regions, units: typstUnits, assets: current.assets ?? [],
+        regions: prepared.regions,
+        units: typstUnits,
+        assets: current.assets ?? [],
+        targetLayoutPolicy,
       });
       if (import.meta.env.MODE === 'test') {
         (globalThis as typeof globalThis & { __PP_DIAGNOSTIC_TYPST_SOURCE__?: string })
@@ -605,12 +614,15 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
       const targetPdf = await targetLoading.promise;
       let visualReport: VisionFinalReport;
       try {
-        visualReport = await runVisionFinalReview({
+        visualReport = skipRemoteFinalReview
+          ? { pass: true, issues: [], reviewedPages: targetPdf.numPages }
+          : await runVisionFinalReview({
           sourcePdf,
           targetPdf: targetPdf as any,
           manifest,
           baseUrl: options.baseUrl ?? 'https://api.deepseek.com',
           apiKey,
+          targetLayoutPolicy,
           signal,
           onPageStart: (event) => options.onAiEvent?.({
             type: 'vision-review-page-started', at: Date.now(), page: event.targetPageIndex + 1,

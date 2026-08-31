@@ -11,6 +11,10 @@ if (import.meta.env.DEV || import.meta.env.MODE === 'test') {
     path: '/__typst-smoke', name: 'typst-smoke',
     component: () => import('../views/dev/TypstSmokeView.vue'),
   });
+  routes.push({
+    path: '/__raw-typst-prototype', name: 'raw-typst-prototype',
+    component: () => import('../views/dev/RawTypstPrototypeView.vue'),
+  });
 }
 
 export const router = createRouter({

@@ -22,12 +22,15 @@ export function buildVisionLayoutPrompt(pageNumber: number): string {
   ].join('\n');
 }
 
-export const VISION_FINAL_REVIEW_PROMPT_VERSION = 'vision-final-review-v7';
+import type { TargetLayoutPolicy } from '../typst/template';
+
+export const VISION_FINAL_REVIEW_PROMPT_VERSION = 'vision-final-review-v8';
 
 export function buildVisionFinalReviewPrompt(
   targetPageNumber: number,
   sourcePageNumbers: readonly number[],
   compact = false,
+  targetLayoutPolicy: TargetLayoutPolicy = 'source-layout',
 ): string {
   const sourceReference = sourcePageNumbers.length
     ? `The source reference images are pages ${sourcePageNumbers.join(', ')}. The final image is translated target page ${targetPageNumber}.`
@@ -35,7 +38,16 @@ export function buildVisionFinalReviewPrompt(
   const prompt = [
     'You are the final visual quality inspector for a translated academic-paper PDF.',
     sourceReference,
-    'Natural repagination and different Chinese line breaks are allowed. Single-column, double-column, and mixed regions should preserve the source layout mode.',
+    targetLayoutPolicy === 'single-column'
+      ? 'The translated target deliberately reflows all prose into one continuous readable column. Source double-column or mixed layouts must not be copied and their absence is not layout_collapse or layout_drift.'
+      : 'Natural repagination and different Chinese line breaks are allowed. Single-column, double-column, and mixed regions should preserve the source layout mode.',
+    ...(targetLayoutPolicy === 'single-column' ? [
+      'For the target, report layout_collapse only when the intended single reading column itself is broken, overlapped, clipped, fragmented into unintended narrow lanes, or visibly out of semantic order.',
+      'Figures, tables, formulas, code, portrait galleries, and paired visual panels may remain centered, full-width, or arranged in a compact grid; those asset arrangements do not violate the single-column prose policy.',
+      'Judge the target as a polished Chinese academic layout: center the title, author and affiliation block, figures, tables, display formulas, and their captions; left-align section headings with clear hierarchy and spacing; indent ordinary Chinese prose paragraphs by about two CJK characters, but do not indent headings, captions, bibliography entries, or compact metadata.',
+      'Major and minor section headings must have visibly comfortable separation from the following body paragraph. A heading that visually touches or crowds its first body line is layout_drift, even when no glyphs overlap.',
+      'Report layout_drift when these alignment, indentation, or hierarchy rules are visibly violated in a repeated or prominent way.',
+    ] : []),
     'Figures, author portraits/headshots, table bodies, display formulas, code, variables, symbols, and internal figure labels must be visibly intact. Captions may be translated.',
     'Do not report small or fine English labels inside verified immutable assets as unreadable merely because they are dense. Report unreadable_glyphs only for visible corruption such as missing, clipped, overlapped, block, or replacement glyphs; ordinary small source labels are not defects.',
     'Report only visible production defects: missing/clipped/overlapping text, unreadable glyphs, untranslated body prose, collapsed columns, or changed/missing immutable assets. Author biographies are body prose: missing, clipped, or visibly untranslated biography paragraphs are severe. Missing source author portraits are severe asset_missing defects.',

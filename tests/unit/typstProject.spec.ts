@@ -2,14 +2,43 @@ import { describe, expect, it } from 'vitest';
 import { buildAssetManifest } from '../../src/core/assets/extract';
 import { escapeTypstText } from '../../src/core/typst/escape';
 import { buildTypstProject } from '../../src/core/typst/project';
-import { buildAcademicTemplate } from '../../src/core/typst/template';
+import {
+  buildAcademicTemplate,
+  SINGLE_COLUMN_TYPOGRAPHY,
+} from '../../src/core/typst/template';
 
 describe('Typst project generation', () => {
   it('keeps bibliography lines readable while reducing only paragraph spacing', () => {
     const template = buildAcademicTemplate({ paperWidth: 612, paperHeight: 792 });
 
-    expect(template).toContain('set par(spacing: 1pt)');
+    expect(template).toContain('spacing: 1.5pt');
     expect(template).not.toContain('pp-reference(body) = block(above: 0pt, below: 0pt');
+  });
+
+  it('uses Chinese academic paragraph rhythm only for the single-column target', () => {
+    const sourceLayout = buildAcademicTemplate({
+      paperWidth: 612,
+      paperHeight: 792,
+      targetLayoutPolicy: 'source-layout',
+    });
+    const singleColumn = buildAcademicTemplate({
+      paperWidth: 612,
+      paperHeight: 792,
+      targetLayoutPolicy: 'single-column',
+    });
+
+    expect(sourceLayout).toContain('first-line-indent: 0pt');
+    expect(singleColumn).toContain('first-line-indent: (amount: 2em, all: true)');
+    expect(singleColumn).toContain('leading: 1em');
+    expect(singleColumn).toContain('spacing: 0.42em');
+    expect(singleColumn).toContain('#align(center)');
+    expect(singleColumn).toContain('width: 100%');
+    expect(singleColumn).toContain('#let pp-subheading');
+    expect(singleColumn).toContain('hanging-indent: 1.4em');
+    expect(singleColumn).toContain(`above: ${SINGLE_COLUMN_TYPOGRAPHY.majorHeading.abovePt}pt`);
+    expect(singleColumn).toContain(`below: ${SINGLE_COLUMN_TYPOGRAPHY.majorHeading.belowPt}pt`);
+    expect(singleColumn).toContain(`above: ${SINGLE_COLUMN_TYPOGRAPHY.minorHeading.abovePt}pt`);
+    expect(singleColumn).toContain(`below: ${SINGLE_COLUMN_TYPOGRAPHY.minorHeading.belowPt}pt`);
   });
 
   it('emits ordered inherited regions, stable markers and immutable asset files', async () => {
@@ -157,6 +186,58 @@ describe('Typst project generation', () => {
     expect(project.mainContent).not.toContain('#pagebreak(weak: true)');
     expect(project.mainContent.match(/#pp-double\[/g)).toHaveLength(1);
     expect(project.mainContent.indexOf('第一页')).toBeLessThan(project.mainContent.indexOf('第二页'));
+  });
+
+  it('reflows source double-column regions into one readable target column', async () => {
+    const { assets } = await buildAssetManifest([{
+      id: 'fig', kind: 'figure', pageIndex: 0,
+      rect: { x: 50, y: 220, w: 220, h: 130 }, bytes: new Uint8Array([1]),
+      widthMode: 'column', captionUnitId: 'cap',
+    }]);
+    const project = await buildTypstProject({
+      metadata: { paperWidth: 612, paperHeight: 792 },
+      targetLayoutPolicy: 'single-column',
+      regions: [{
+        id: 'r1', mode: 'double', sourcePage: 0,
+        bounds: { x: 50, y: 80, w: 512, h: 600 },
+        orderedUnitIds: ['left', 'right', 'fig', 'cap'],
+      }],
+      units: [
+        { id: 'left', kind: 'paragraph', layoutRegionId: 'r1', order: 0, text: '左栏', sourceColumn: 'left' },
+        { id: 'right', kind: 'paragraph', layoutRegionId: 'r1', order: 1, text: '右栏', sourceColumn: 'right' },
+        { id: 'fig', kind: 'figure', layoutRegionId: 'r1', order: 2, assetId: 'fig', sourceColumn: 'left' },
+        { id: 'cap', kind: 'caption', layoutRegionId: 'r1', order: 3, text: '图 1', sourceColumn: 'left' },
+      ],
+      assets,
+    });
+
+    expect(project.mainContent).not.toContain('#pp-double[');
+    expect(project.mainContent).not.toContain('#colbreak()');
+    expect(project.mainContent).toContain('size: 10.5pt');
+    expect(project.mainContent).toContain('leading: 1em');
+    expect(project.mainContent).toContain('first-line-indent: (amount: 2em, all: true)');
+    expect(project.mainContent).toContain('#pp-asset("fig", "/assets/fig.png", 381.89pt');
+    expect(project.mainContent.indexOf('左栏')).toBeLessThan(project.mainContent.indexOf('右栏'));
+  });
+
+  it('renders numbered subsections with a smaller dedicated heading style', async () => {
+    const project = await buildTypstProject({
+      metadata: { paperWidth: 612, paperHeight: 792 },
+      targetLayoutPolicy: 'single-column',
+      regions: [{
+        id: 'r1', mode: 'double', sourcePage: 0,
+        bounds: { x: 50, y: 80, w: 512, h: 600 },
+        orderedUnitIds: ['section', 'subsection'],
+      }],
+      units: [
+        { id: 'section', kind: 'heading', layoutRegionId: 'r1', order: 0, text: '3 方法' },
+        { id: 'subsection', kind: 'heading', layoutRegionId: 'r1', order: 1, text: '3.1 架构' },
+      ],
+      assets: [],
+    });
+
+    expect(project.mainContent).toContain('#pp-heading[#pp-unit("section")');
+    expect(project.mainContent).toContain('#pp-subheading[#pp-unit("subsection")');
   });
 
   it('keeps an immutable figure and translated caption in one unbreakable group', async () => {

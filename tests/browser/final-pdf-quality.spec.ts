@@ -4,7 +4,9 @@ import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { assertEveryPdfPageHasContent, assertPdfContainsText } from './helpers/pdfAssertions';
 
-const API_KEY = process.env.PP_DEEPSEEK_API_KEY ?? '';
+const OFFLINE_CACHED_RUN = process.env.PP_OFFLINE_CACHED_RUN === '1';
+const OFFLINE_LAYOUT_JSON = process.env.PP_OFFLINE_LAYOUT_JSON ?? '';
+const API_KEY = process.env.PP_DEEPSEEK_API_KEY ?? (OFFLINE_CACHED_RUN ? 'cached-prototype-key' : '');
 const TRANSLATION_MODEL = process.env.PP_TRANSLATION_MODEL ?? 'deepseek-v4-flash';
 const SOURCE_PDF = process.env.PP_SOURCE_PDF
   ?? 'C:/Users/axezt/Desktop/文献/导师文章/18：ZK-Tracer：A High-Performance Heterogeneous Accelerator for Zero-Knowledge VM Trace Generation.pdf';
@@ -122,6 +124,40 @@ test('real API exact-paper PDF quality acceptance', async () => {
   const page = context.pages()[0] ?? await context.newPage();
 
   try {
+    if (OFFLINE_CACHED_RUN) {
+      const offlineLayout = OFFLINE_LAYOUT_JSON
+        ? JSON.parse(await readFile(OFFLINE_LAYOUT_JSON, 'utf8'))
+        : undefined;
+      const analyses = new Map<number, unknown>((offlineLayout?.analyses ?? []).map((analysis: any) => (
+        [Number(analysis.pageIndex) + 1, analysis]
+      )));
+      await page.route('**/models', async (route) => route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ data: [{ id: TRANSLATION_MODEL }] }),
+      }));
+      await page.route('**/chat/completions', async (route) => {
+        const body = route.request().postDataJSON() as any;
+        const prompt = JSON.stringify(body?.messages ?? []);
+        const pageNumber = Number(prompt.match(/source page (\d+)/i)?.[1] ?? 0);
+        const analysis = analyses.get(pageNumber);
+        if (!analysis || !/before translation and typesetting/i.test(prompt)) {
+          await route.abort('failed');
+          return;
+        }
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            choices: [{ message: { content: JSON.stringify({
+              ...(analysis as Record<string, unknown>),
+              page: pageNumber,
+            }) } }],
+            usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+          }),
+        });
+      });
+    }
     await page.goto('/');
     page.on('console', (message) => {
       if (message.text().startsWith('[page heartbeat]')) console.log(message.text());

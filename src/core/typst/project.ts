@@ -2,7 +2,11 @@ import type { ImmutableAsset } from '../assets/types';
 import { verifyAssetHash } from '../assets/hash';
 import type { LayoutRegion, SemanticUnitKind } from '../../types/models';
 import { escapeTypstString, escapeTypstText } from './escape';
-import { buildAcademicTemplate, type AcademicTemplateOptions } from './template';
+import {
+  buildAcademicTemplate,
+  type AcademicTemplateOptions,
+  type TargetLayoutPolicy,
+} from './template';
 
 export interface TypstTargetSegment {
   id: string;
@@ -25,6 +29,8 @@ export interface TypstProjectInput {
   regions: readonly LayoutRegion[];
   units: readonly TypstSemanticUnit[];
   assets: readonly ImmutableAsset[];
+  /** Keep the source regions, or reflow every translated text region as one readable column. */
+  targetLayoutPolicy?: TargetLayoutPolicy;
 }
 
 export interface TypstProject {
@@ -48,7 +54,13 @@ function renderTextUnit(unit: TypstSemanticUnit, markerIds: string[]): string {
   }).join('\n');
   if (unit.kind === 'title') return `#pp-title[${marked}]`;
   if (unit.kind === 'author' || unit.kind === 'affiliation') return `#pp-author[${marked}]`;
-  if (unit.kind === 'heading') return `#pp-heading[${marked}]`;
+  if (unit.kind === 'heading') {
+    const headingText = segments.map((segment) => segment.text).join(' ').trim();
+    const macro = /^\d+\.\d+(?:\.\d+)?(?:\s|$)/.test(headingText)
+      ? 'pp-subheading'
+      : 'pp-heading';
+    return `#${macro}[${marked}]`;
+  }
   if (unit.kind === 'caption' || unit.kind === 'table-title') return `#pp-caption[${marked}]`;
   if (unit.kind === 'reference') return `#pp-reference[${marked}]`;
   return marked;
@@ -68,6 +80,7 @@ function boundedAssetWidth(
   regionMode: LayoutRegion['mode'],
   metadata: AcademicTemplateOptions,
   rowSize = 1,
+  targetLayoutPolicy: TargetLayoutPolicy = 'source-layout',
 ): number {
   const margin = metadata.margin ?? Math.max(36, metadata.paperWidth * 0.1);
   const contentWidth = metadata.paperWidth - margin * 2;
@@ -78,10 +91,25 @@ function boundedAssetWidth(
   const available = rowSize > 1
     ? (contentWidth - gutter * (rowSize - 1)) / rowSize
     : regionAvailable;
+  if (
+    targetLayoutPolicy === 'single-column'
+    && rowSize === 1
+    && asset.widthMode === 'column'
+    && asset.captionUnitId
+    && (asset.kind === 'figure' || asset.kind === 'table' || asset.kind === 'code')
+  ) {
+    // Source-column assets otherwise remain only half a page wide after the
+    // surrounding Chinese text is reflowed into one column.  Crops are made
+    // at high resolution, so a moderate display enlargement improves label
+    // readability without changing the immutable bytes.
+    const readableFloor = contentWidth * (asset.kind === 'table' ? 0.9 : 0.78);
+    return Math.min(contentWidth, Math.max(asset.sourceRect.w, readableFloor));
+  }
   return Math.min(asset.sourceRect.w, available);
 }
 
 export async function buildTypstProject(input: TypstProjectInput): Promise<TypstProject> {
+  const targetLayoutPolicy = input.targetLayoutPolicy ?? 'source-layout';
   const unitsById = new Map(input.units.map((unit) => [unit.id, unit]));
   if (unitsById.size !== input.units.length) throw new Error('Duplicate semantic unit ID');
   const assetsById = new Map(input.assets.map((asset) => [asset.id, asset]));
@@ -98,6 +126,9 @@ export async function buildTypstProject(input: TypstProjectInput): Promise<Typst
     regionBodies.push({ mode, content });
   };
   for (const region of input.regions) {
+    const regionMode: LayoutRegion['mode'] = targetLayoutPolicy === 'single-column'
+      ? (region.presentation === 'horizontal' ? 'full-width' : 'single')
+      : region.mode;
     const segments: Array<{
       mode: LayoutRegion['mode'];
       rendered: Array<{
@@ -149,11 +180,17 @@ export async function buildTypstProject(input: TypstProjectInput): Promise<Typst
       unit: TypstSemanticUnit,
       asset: ImmutableAsset,
       rowSize = 1,
-      effectiveMode: LayoutRegion['mode'] = region.mode,
+      effectiveMode: LayoutRegion['mode'] = regionMode,
     ) => {
       markerIds.push(unit.id);
       const path = `/assets/${asset.id}.${assetExtension(asset)}`;
-      const width = boundedAssetWidth(asset, effectiveMode, input.metadata, rowSize);
+      const width = boundedAssetWidth(
+        asset,
+        effectiveMode,
+        input.metadata,
+        rowSize,
+        targetLayoutPolicy,
+      );
       return `#pp-asset(${quote(encodeURIComponent(unit.id))}, ${quote(path)}, ${sourceWidth(width)}, span: ${asset.widthMode === 'span'})`;
     };
 
@@ -177,10 +214,10 @@ export async function buildTypstProject(input: TypstProjectInput): Promise<Typst
         const memberIds = [captionId, ...assetUnits.map((member) => member.unit.id)];
         memberIds.forEach((id) => consumed.add(id));
         const rowSize = assetUnits.length > 1 ? assetUnits.length : horizontalCellCount;
-        const groupMode: LayoutRegion['mode'] = region.mode === 'double'
+        const groupMode: LayoutRegion['mode'] = regionMode === 'double'
           && (groupedAssets.length > 1 || groupedAssets.some((member) => member.widthMode === 'span'))
           ? 'full-width'
-          : region.mode;
+          : regionMode;
         const assetCodes = assetUnits.map((member) => (
           renderAsset(member.unit, member.asset, rowSize, groupMode)
         ));
@@ -206,9 +243,9 @@ export async function buildTypstProject(input: TypstProjectInput): Promise<Typst
         continue;
       }
 
-      const unitMode = region.mode === 'double' && (asset?.widthMode === 'span' || spanCaptionIds.has(unit.id))
+      const unitMode = regionMode === 'double' && (asset?.widthMode === 'span' || spanCaptionIds.has(unit.id))
         ? 'full-width'
-        : region.mode;
+        : regionMode;
       if (unit.assetId) {
         if (!asset) throw new Error(`Unit ${unit.id} references missing asset ${unit.assetId}`);
         pushRendered(
@@ -255,7 +292,10 @@ export async function buildTypstProject(input: TypstProjectInput): Promise<Typst
   }
 
   if (new Set(markerIds).size !== markerIds.length) throw new Error('Duplicate Typst marker ID');
-  const mainContent = `${buildAcademicTemplate(input.metadata)}\n${regionBodies.map((body) => (
+  const mainContent = `${buildAcademicTemplate({
+    ...input.metadata,
+    targetLayoutPolicy,
+  })}\n${regionBodies.map((body) => (
     body.mode === 'double' ? `#pp-double[\n${body.content}\n]` : body.content
   )).join('\n\n')}\n`;
   const files = new Map<string, Uint8Array>();
