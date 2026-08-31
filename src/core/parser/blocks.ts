@@ -44,14 +44,14 @@ export function isFigureCaptionText(text: string): boolean {
     // often continue with "The ...". The demonstrative-sentence guard in
     // hasCaptionSuffix is intended for body references written as "Figure
     // 11. The ...", not for an explicit abbreviated caption.
-    /^fig[.]\s*(?:\d+|[IVXLCDM]+)\s*[.:：\-–—]/i.test(line.trim())
-    || hasCaptionSuffix(line.trim().match(/^fig(?:ure)?\.?\s*(?:\d+|[IVXLCDM]+)(.*)$/i)?.[1])
+    /^fig[.]\s*(?:\d+(?:[.-]\d+)*|[IVXLCDM]+)\s*[.:：\-–—]/i.test(line.trim())
+    || hasCaptionSuffix(line.trim().match(/^fig(?:ure)?\.?\s*(?:\d+(?:[.-]\d+)*|[IVXLCDM]+)(.*)$/i)?.[1])
   ));
 }
 
 export function isTableCaptionText(text: string): boolean {
   return text.split(/\r?\n/).some((line) => (
-    hasCaptionSuffix(line.trim().match(/^table\s*(?:\d+|[IVXLCDM]+)(.*)$/i)?.[1])
+    hasCaptionSuffix(line.trim().match(/^table\s*(?:\d+(?:[.-]\d+)*|[IVXLCDM]+)(.*)$/i)?.[1])
   ));
 }
 
@@ -59,8 +59,8 @@ function isNumberedCaptionText(text: string): boolean {
   const trimmed = text.trim();
   return isFigureCaptionText(trimmed)
     || isTableCaptionText(trimmed)
-    || hasCaptionSuffix(trimmed.match(/^algorithm\s*(?:\d+|[IVXLCDM]+)(.*)$/i)?.[1])
-    || hasCaptionSuffix(trimmed.match(/^[图表]\s*(?:\d+|[IVXLCDM]+)(.*)$/i)?.[1]);
+    || hasCaptionSuffix(trimmed.match(/^algorithm\s*(?:\d+(?:[.-]\d+)*|[IVXLCDM]+)(.*)$/i)?.[1])
+    || hasCaptionSuffix(trimmed.match(/^[图表]\s*(?:\d+(?:[.-]\d+)*|[IVXLCDM]+)(.*)$/i)?.[1]);
 }
 
 function median(arr: number[]): number {

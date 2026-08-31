@@ -213,6 +213,13 @@ describe('parser: lines -> blocks', () => {
     expect(isFigureCaptionText('Figure 10. The architecture is discussed below.')).toBe(false);
   });
 
+  it('distinguishes a decimal-numbered caption from a prose reference', () => {
+    expect(isFigureCaptionText('Figure 4.4: RVF user-visible architectural state.')).toBe(true);
+    expect(isFigureCaptionText(
+      'Figure 4.4 shows. Additionally, some operations require a specific rounding direction.',
+    )).toBe(false);
+  });
+
   it('recognizes dotted Roman headings and letter-spaced bibliography headings', () => {
     const line = (text: string, y: number) => ({
       y, x1: 45, x2: 285, h: 10, text, items: [], col: 'left' as const,
