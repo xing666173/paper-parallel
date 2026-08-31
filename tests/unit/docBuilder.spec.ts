@@ -37,6 +37,128 @@ function fixture(): ParsedPage[] {
 }
 
 describe('parser: docBuilder', () => {
+  function interleavedColumnBlock(): ParsedPage['blocks'][number] {
+    const leftLines = [
+      'Many protocols have been developed for modern proof systems.',
+      'The prover computes a compact proof for the public verifier.',
+      'This construction is widely used in practical applications.',
+      'The arithmetic circuit is converted into polynomial constraints.',
+      'Each witness value is processed by the protocol in sequence.',
+      'The final result can be checked without revealing private data.',
+    ];
+    const rightLines = [
+      'The hardware implementation incurs a high multiplication cost.',
+      'In order to reduce it the scalar is divided into small windows.',
+      'Each window can be evaluated with a lightweight point adder.',
+      'The intermediate values are accumulated inside local buckets.',
+      'This method reduces memory traffic and improves the throughput.',
+      'The design is then mapped to an efficient accelerator pipeline.',
+    ];
+    const text = leftLines.map((line, index) => `${line} ${rightLines[index]}`).join('\n');
+    const characterRects: NonNullable<ParsedPage['blocks'][number]['characterRects']> = [];
+    let sourceOffset = 0;
+    leftLines.forEach((leftLine, row) => {
+      const rightLine = rightLines[row];
+      [...leftLine].forEach((ch, index) => characterRects.push({
+        ch,
+        sourceIndex: sourceOffset + index,
+        pageIndex: 0,
+        rect: { x: 45 + index * 3.7, y: 100 + row * 12, w: 3.5, h: 9 },
+      }));
+      const rightOffset = sourceOffset + leftLine.length + 1;
+      [...rightLine].forEach((ch, index) => characterRects.push({
+        ch,
+        sourceIndex: rightOffset + index,
+        pageIndex: 0,
+        rect: { x: 330 + index * 3.5, y: 100 + row * 12, w: 3.3, h: 9 },
+      }));
+      sourceOffset += leftLine.length + 1 + rightLine.length + (row < leftLines.length - 1 ? 1 : 0);
+    });
+    return {
+      id: 'interleaved',
+      type: 'paragraph',
+      col: 'full',
+      rect: { x: 45, y: 100, w: 500, h: 69 },
+      text,
+      characterRects,
+    };
+  }
+
+  it('按字符坐标恢复被 PDF 文字层逐行交错的双栏正文', () => {
+    const pages: ParsedPage[] = [{
+      no: 1,
+      w: 612,
+      h: 792,
+      layoutMode: 'double',
+      blocks: [interleavedColumnBlock()],
+    }];
+
+    const doc = buildDoc(pages, 'en');
+
+    expect(doc.blocks).toHaveLength(2);
+    expect(doc.blocks[0].text).toContain('Many protocols have been developed');
+    expect(doc.blocks[0].text).not.toContain('hardware implementation');
+    expect(doc.blocks[1].text).toContain('hardware implementation');
+    expect(doc.blocks[1].text).not.toContain('Many protocols');
+    expect(doc.blocks.map((block) => block.widthMode)).toEqual(['column', 'column']);
+    expect(doc.blocks[0].characterRects?.find((char) => char.ch === 'M')?.sourceIndex).toBe(0);
+    expect(doc.blocks[1].characterRects?.find((char) => char.ch === 'T')?.sourceIndex).toBe(0);
+  });
+
+  it('恢复短交错正文并纠正页面中部的 authors 误分类', () => {
+    const left = 'The design connects from one side of the FPGA.';
+    const right = 'The total memory capacity is available for every core.';
+    const text = `${left} ${right}`;
+    const characterRects = [
+      ...[...left].map((ch, sourceIndex) => ({
+        ch, sourceIndex, pageIndex: 0,
+        rect: { x: 45 + sourceIndex * 3.8, y: 400, w: 3.5, h: 9 },
+      })),
+      ...[...right].map((ch, index) => ({
+        ch, sourceIndex: left.length + 1 + index, pageIndex: 0,
+        rect: { x: 330 + index * 3.7, y: 400, w: 3.5, h: 9 },
+      })),
+    ];
+    const doc = buildDoc([{
+      no: 1, w: 612, h: 792, layoutMode: 'mixed', blocks: [{
+        id: 'short-authors', type: 'authors', col: 'full',
+        rect: { x: 45, y: 400, w: 500, h: 9 }, text, characterRects,
+      }],
+    }], 'en');
+
+    expect(doc.blocks).toHaveLength(2);
+    expect(doc.blocks.map((block) => block.type)).toEqual(['paragraph', 'paragraph']);
+    expect(doc.blocks[0].text).toBe(left);
+    expect(doc.blocks[1].text).toBe(right);
+  });
+
+  it('不把数值密集的跨栏表格拆成双栏正文', () => {
+    const block = interleavedColumnBlock();
+    block.text = `${block.text}\n${Array.from({ length: 60 }, (_, index) => `${index}.0`).join(' ')}`;
+    const doc = buildDoc([{
+      no: 1, w: 612, h: 792, layoutMode: 'mixed', blocks: [block],
+    }], 'en');
+
+    expect(doc.blocks).toHaveLength(1);
+    expect(doc.blocks[0].widthMode).toBe('span');
+  });
+
+  it('不拆分没有中央栏沟的通栏正文', () => {
+    const block = interleavedColumnBlock();
+    block.characterRects = block.characterRects?.map((character) => ({
+      ...character,
+      rect: character.rect.x >= 300
+        ? { ...character.rect, x: character.rect.x - 75 }
+        : character.rect,
+    }));
+    const doc = buildDoc([{
+      no: 1, w: 612, h: 792, layoutMode: 'mixed', blocks: [block],
+    }], 'en');
+
+    expect(doc.blocks).toHaveLength(1);
+    expect(doc.blocks[0].widthMode).toBe('span');
+  });
+
   it('不把尚未到栏底的左栏段落跳过右栏后接到下一页', () => {
     const doc = buildDoc(fixture(), 'en');
     expect(doc.blocks.map((b) => b.type)).toEqual([

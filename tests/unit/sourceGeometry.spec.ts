@@ -247,6 +247,34 @@ describe('source PDF geometry', () => {
     expect(resolved.source[0].rects[0].w).toBeLessThan(doc.blocks[0].rect.w);
   });
 
+  it('maps variables after detached PDF subscripts are reattached for translation', () => {
+    const source = [
+      'W asted , T otal , and perCore are the amounts of',
+      'res', 'res', 'res',
+      'wasted, total, and per core hardware resources, respectively.',
+    ].join('\n');
+    const target = 'Wasted_res , Total_res , and perCore_res are the amounts of wasted, total, and per core hardware resources, respectively.';
+    const doc = emptyDoc();
+    doc.blocks = [{
+      id: 'detached-subscripts', docId: 'en', type: 'paragraph', pageIndex: 0,
+      rect: { x: 20, y: 30, w: 400, h: 50 }, order: 0,
+      splitAllowed: true, widthMode: 'column', text: source,
+      characterRects: [...source].map((ch, sourceIndex) => ({
+        ch, sourceIndex, pageIndex: 0,
+        rect: { x: 20 + (sourceIndex % 55) * 4, y: 30 + Math.floor(sourceIndex / 55) * 12, w: 4, h: 10 },
+      })),
+    }];
+    const unit = alignmentUnit({
+      id: 'detached-subscripts-g-1', parentId: 'detached-subscripts', sourceBlockId: 'detached-subscripts',
+      kind: 'semantic-group', relation: '1:1', sourceText: target,
+    });
+
+    const [resolved] = resolveSourceGeometry([unit], doc, []);
+
+    expect(resolved.source).not.toEqual([]);
+    expect(resolved.status).not.toBe('unmatched');
+  });
+
   it('maps one translated sentence across masked page furniture in the same PDF block', () => {
     const prefix = 'However, the DSPs of the VP1502';
     const furniture = 'MSMAC: Accelerating Multi-Scalar Multiplication for Zero-Knowledge Proof';

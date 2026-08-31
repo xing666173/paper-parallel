@@ -1,4 +1,4 @@
-export const VISION_LAYOUT_PROMPT_VERSION = 'vision-layout-v6';
+export const VISION_LAYOUT_PROMPT_VERSION = 'vision-layout-v7';
 
 export function buildVisionLayoutPrompt(pageNumber: number): string {
   return [
@@ -6,9 +6,9 @@ export function buildVisionLayoutPrompt(pageNumber: number): string {
     `This is source page ${pageNumber}.`,
     'Identify the page layout and only visual assets that must remain pixel-identical in the translated paper.',
     'Set layout=mixed whenever full-width title/abstract/figure regions coexist with two-column body text; do not call such a page single.',
-    'Immutable regions are: figures, table bodies, formulas, and code. Do not include a figure/table caption inside its immutable bbox.',
+    'Immutable regions are: figures, author portrait/headshot photos, table bodies, formulas, and code. Encode each author portrait/headshot as a tight type=figure region with no caption_bbox. Do not include adjacent biography prose in that bbox. Do not include a numbered figure/table caption inside its immutable bbox.',
     'Scan the page from top to bottom and return every display formula, every nontrivial inline formula containing a summation/product/fraction/matrix or multiple subscripted/superscripted symbols, plus every complete algorithm or pseudocode environment; these are not optional or representative samples.',
-    'Return one region per numbered Figure/Table, never a second region for an internal panel or subdiagram.',
+    'Return one region per numbered Figure/Table, never a second region for an internal panel or subdiagram. Return every distinct author portrait as its own uncaptioned figure region.',
     'A figure bbox must contain the complete numbered figure: every panel, diagram title, axis, legend, arrow, and label (including labels such as POLY/MSM above the main drawing). Never crop a figure at an internal row or panel boundary.',
     'A formula bbox must be tight around only the visible formula ink. For an inline formula, exclude the surrounding sentence while preserving the entire mathematical expression.',
     'bbox must otherwise be tight around visible asset ink. Exclude all surrounding prose, headers, whitespace, and the complete caption line.',
@@ -22,7 +22,7 @@ export function buildVisionLayoutPrompt(pageNumber: number): string {
   ].join('\n');
 }
 
-export const VISION_FINAL_REVIEW_PROMPT_VERSION = 'vision-final-review-v6';
+export const VISION_FINAL_REVIEW_PROMPT_VERSION = 'vision-final-review-v7';
 
 export function buildVisionFinalReviewPrompt(
   targetPageNumber: number,
@@ -36,9 +36,9 @@ export function buildVisionFinalReviewPrompt(
     'You are the final visual quality inspector for a translated academic-paper PDF.',
     sourceReference,
     'Natural repagination and different Chinese line breaks are allowed. Single-column, double-column, and mixed regions should preserve the source layout mode.',
-    'Figures, table bodies, display formulas, code, variables, symbols, and internal figure labels must be visibly intact. Captions may be translated.',
+    'Figures, author portraits/headshots, table bodies, display formulas, code, variables, symbols, and internal figure labels must be visibly intact. Captions may be translated.',
     'Do not report small or fine English labels inside verified immutable assets as unreadable merely because they are dense. Report unreadable_glyphs only for visible corruption such as missing, clipped, overlapped, block, or replacement glyphs; ordinary small source labels are not defects.',
-    'Report only visible production defects: missing/clipped/overlapping text, unreadable glyphs, untranslated body prose, collapsed columns, or changed/missing immutable assets.',
+    'Report only visible production defects: missing/clipped/overlapping text, unreadable glyphs, untranslated body prose, collapsed columns, or changed/missing immutable assets. Author biographies are body prose: missing, clipped, or visibly untranslated biography paragraphs are severe. Missing source author portraits are severe asset_missing defects.',
     'A sparse target page can be a valid result of moving a complete immutable figure, table, formula, or algorithm to the next page. Do not call content missing merely from page density. You may report harmless sparse pagination as warning layout_drift; use severe only for visible clipping, overlap, corruption, or an actually blank page.',
     'A visibly duplicated figure, table, formula, or algorithm is a severe asset_changed defect even when both copies are individually intact.',
     'A formula or algorithm degraded into scattered baseline text, disconnected symbols, or mixed prose fragments is a severe formula_changed or unreadable_glyphs defect.',
@@ -68,6 +68,7 @@ export function buildVisionFinalConfirmationPrompt(
     `Candidates: ${JSON.stringify(candidates)}`,
     'For clipped_text, confirm only when glyph strokes are visibly cut by a page, column, crop, or overlapping object boundary. A complete heading or first line near the top margin is not clipped.',
     'For overlap, confirm only when two visible content objects actually cover one another. Small dense labels inside immutable figures are not defects.',
+    'For unreadable_glyphs, confirm only actual replacement boxes, visibly broken or clipped glyph strokes, or scrambled glyph order in translated prose. Fine or low-resolution English labels inside an otherwise intact immutable source figure or table are expected source pixels and are not a defect.',
     'For table_changed, confirm only when the target visibly lost the source table structure. A three-line or otherwise sparsely ruled academic table remains a table when its tabular cues are intact. English text inside this immutable source-pixel table is expected and must not be reported as untranslated_body. If headers, aligned rows/columns, rules, and cell values remain visibly tabular, return no table_changed issue even when font, scale, or page position differs.',
     'For formula_changed, a complete formula may move from inline prose onto its own centered line during reflow. If its operators, variables, limits/subscripts, and reading order remain visibly intact, return no formula_changed or unreadable_glyphs issue merely because it is on a separate line.',
     'Confirm duplicated assets and formulas degraded into scattered baseline text whenever those defects are plainly visible; they are not harmless repagination.',

@@ -40,6 +40,207 @@ type WorkBlock = ParsedPageBlock & {
 const COL_RANK: Record<ColumnKind, number> = { full: 0, left: 1, right: 2 };
 const ATOMIC_TYPES = new Set<Block['type']>(['figure', 'table', 'equation', 'caption']);
 
+function unionCharacterRects(characters: CharacterRect[]): Rect {
+  const x1 = Math.min(...characters.map((char) => char.rect.x));
+  const y1 = Math.min(...characters.map((char) => char.rect.y));
+  const x2 = Math.max(...characters.map((char) => char.rect.x + char.rect.w));
+  const y2 = Math.max(...characters.map((char) => char.rect.y + char.rect.h));
+  return { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
+}
+
+interface CharacterRow {
+  y: number;
+  h: number;
+  characters: CharacterRect[];
+}
+
+function groupCharactersIntoRows(characters: CharacterRect[], sourceText: string): CharacterRow[] {
+  const sorted = [...characters].sort(
+    (a, b) => a.rect.y - b.rect.y || a.rect.x - b.rect.x,
+  );
+  const sourceLineStarts = [0];
+  for (let index = 0; index < sourceText.length; index += 1) {
+    if (sourceText[index] === '\n') sourceLineStarts.push(index + 1);
+  }
+  if (sourceLineStarts.length > 1) {
+    const sourceRows = sourceLineStarts.map((): CharacterRow => ({
+      y: Number.POSITIVE_INFINITY,
+      h: 0,
+      characters: [],
+    }));
+    for (const character of characters) {
+      let lineIndex = 0;
+      for (let index = 1; index < sourceLineStarts.length; index += 1) {
+        if (sourceLineStarts[index]! > character.sourceIndex) break;
+        lineIndex = index;
+      }
+      const row = sourceRows[lineIndex]!;
+      row.characters.push(character);
+      const oldBottom = Number.isFinite(row.y) ? row.y + row.h : character.rect.y;
+      const top = Math.min(row.y, character.rect.y);
+      const bottom = Math.max(oldBottom, character.rect.y + character.rect.h);
+      row.y = top;
+      row.h = bottom - top;
+    }
+    return sourceRows.filter((row) => row.characters.length > 0);
+  }
+  const rows: CharacterRow[] = [];
+  for (const character of sorted) {
+    const center = character.rect.y + character.rect.h / 2;
+    const row = rows.find((candidate) => (
+      Math.abs(center - (candidate.y + candidate.h / 2))
+        <= Math.max(2, Math.min(character.rect.h, candidate.h) * 0.35)
+    ));
+    if (row) {
+      row.characters.push(character);
+      const top = Math.min(row.y, character.rect.y);
+      const bottom = Math.max(row.y + row.h, character.rect.y + character.rect.h);
+      row.y = top;
+      row.h = bottom - top;
+    } else {
+      rows.push({
+        y: character.rect.y,
+        h: character.rect.h,
+        characters: [character],
+      });
+    }
+  }
+  return rows.sort((a, b) => a.y - b.y);
+}
+
+function columnTextFromCharacters(
+  rows: CharacterRow[],
+  sourceText: string,
+  side: 'left' | 'right',
+  midpoint: number,
+): { text: string; characterRects: CharacterRect[]; rect: Rect } | null {
+  let text = '';
+  const characterRects: CharacterRect[] = [];
+
+  for (const row of rows) {
+    const lane = row.characters
+      .filter((character) => (
+        side === 'left'
+          ? character.rect.x + character.rect.w / 2 < midpoint
+          : character.rect.x + character.rect.w / 2 >= midpoint
+      ))
+      .sort((a, b) => a.rect.x - b.rect.x);
+    if (!lane.length) continue;
+    if (text.length) text += '\n';
+
+    let previous: CharacterRect | undefined;
+    for (const character of lane) {
+      if (previous) {
+        const sourceGap = sourceText.slice(previous.sourceIndex + 1, character.sourceIndex);
+        const visualGap = character.rect.x - (previous.rect.x + previous.rect.w);
+        if (/^\s+$/.test(sourceGap) || visualGap > Math.max(1.5, previous.rect.h * 0.18)) {
+          text += ' ';
+        }
+      }
+      characterRects.push({ ...character, sourceIndex: text.length });
+      text += character.ch;
+      previous = character;
+    }
+  }
+
+  if (!characterRects.length) return null;
+  return { text, characterRects, rect: unionCharacterRects(characterRects) };
+}
+
+/**
+ * Some tagged IEEE PDFs expose both visual columns as one text line. The line
+ * classifier consequently labels a whole page-height paragraph as `full` and
+ * its text alternates left/right on every row. Recover the two reading lanes
+ * from character geometry before assigning global block order.
+ */
+function splitInterleavedTwoColumnBlock(
+  block: ParsedPageBlock,
+  pageWidth: number,
+  pageHeight: number,
+): ParsedPageBlock[] {
+  const characters = block.characterRects ?? [];
+  const splittableType = block.type === 'paragraph'
+    || block.type === 'authors'
+    || block.type === 'abstract'
+    || block.type === 'caption'
+    || block.type === 'reference';
+  if (
+    block.col !== 'full'
+    || !splittableType
+    || characters.length < 24
+    || block.rect.w < pageWidth * 0.54
+  ) return [block];
+
+  const naturalWords = block.text.match(/[A-Za-z][A-Za-z'-]*/g)?.length ?? 0;
+  const numericTokens = block.text.match(/\d+(?:[.,]\d+)?/g)?.length ?? 0;
+  if (numericTokens >= 12 && numericTokens > naturalWords * 0.5) return [block];
+
+  const midpoint = pageWidth / 2;
+  const rows = groupCharactersIntoRows(characters, block.text);
+  if (!rows.length) return [block];
+
+  const dualLaneRows = rows.filter((row) => {
+    const left = row.characters.filter(
+      (character) => character.rect.x + character.rect.w / 2 < midpoint,
+    );
+    const right = row.characters.filter(
+      (character) => character.rect.x + character.rect.w / 2 >= midpoint,
+    );
+    if (left.length < 4 || right.length < 4) return false;
+    const leftEdge = Math.max(...left.map((character) => character.rect.x + character.rect.w));
+    const rightEdge = Math.min(...right.map((character) => character.rect.x));
+    return rightEdge - leftEdge >= pageWidth * 0.012;
+  });
+  if (dualLaneRows.length < 1 || dualLaneRows.length / rows.length < 0.18) return [block];
+
+  const left = columnTextFromCharacters(rows, block.text, 'left', midpoint);
+  const right = columnTextFromCharacters(rows, block.text, 'right', midpoint);
+  if (!left || !right) return [block];
+
+  const proseMetrics = (text: string): { words: number; functionWords: number } => {
+    const words = text.match(/[A-Za-z][A-Za-z'-]*/g) ?? [];
+    const functionWords = words.filter((word) => /^(?:a|an|and|as|at|by|for|from|in|is|it|of|on|or|that|the|this|to|was|were|which|with)$/i.test(word));
+    return { words: words.length, functionWords: functionWords.length };
+  };
+  const leftMetrics = proseMetrics(left.text);
+  const rightMetrics = proseMetrics(right.text);
+  const completeLane = (metrics: ReturnType<typeof proseMetrics>) => (
+    metrics.words >= 6 && metrics.functionWords >= 2
+  );
+  const proseFragment = (metrics: ReturnType<typeof proseMetrics>) => (
+    metrics.words >= 3 && metrics.functionWords >= 1
+  );
+  if (!(
+    (completeLane(leftMetrics) && proseFragment(rightMetrics))
+    || (completeLane(rightMetrics) && proseFragment(leftMetrics))
+  )) return [block];
+
+  const recoveredType = block.type === 'authors' && block.rect.y > pageHeight * 0.2
+    ? 'paragraph'
+    : block.type;
+
+  return [
+    {
+      ...block,
+      id: `${block.id}-left`,
+      type: recoveredType,
+      col: 'left',
+      rect: left.rect,
+      text: left.text,
+      characterRects: left.characterRects,
+    },
+    {
+      ...block,
+      id: `${block.id}-right`,
+      type: recoveredType,
+      col: 'right',
+      rect: right.rect,
+      text: right.text,
+      characterRects: right.characterRects,
+    },
+  ];
+}
+
 function isContinuable(b: ParsedPageBlock): boolean {
   return (
     b.type === 'paragraph' &&
@@ -51,7 +252,7 @@ function isContinuable(b: ParsedPageBlock): boolean {
 function startsLikeHeading(b: ParsedPageBlock): boolean {
   const t = (b.text || '').trim();
   return (
-    /^\s*(\d+(\.\d+)*|IV|V|VI|VII|VIII|IX|X)\s+[A-Z\u4e00-\u9fa5]/.test(t) ||
+    /^\s*(\d{1,2}(\.\d+)*|IV|V|VI|VII|VIII|IX|X)\s+[A-Z\u4e00-\u9fa5]/.test(t) ||
     /^(fig(ure)?\.?|table|algorithm)\s*\d+/i.test(t) ||
     /^[图表]\s*\d+/.test(t)
   );
@@ -70,6 +271,17 @@ function liesAcrossPageBoundary(
   const pageHeight = pageHeights.get(lastFragmentPage(previous)) ?? 792;
   return previousRect.y + previousRect.h >= pageHeight * 0.72
     && next.rect.y <= pageHeight * 0.35;
+}
+
+function isRunningPageFurniture(block: ParsedPageBlock, pageHeight: number): boolean {
+  const normalized = (block.text || '').trim().replace(/\s+/g, ' ');
+  if (!normalized) return false;
+  const nearTop = block.rect.y < pageHeight * 0.12;
+  const nearBottom = block.rect.y + block.rect.h > pageHeight * 0.92;
+  if (nearTop && /^(?:\d+|IEEE\s+TRANSACTIONS\b|.+\bet\s+al[.]\s*:\s*.+)$/i.test(normalized)) {
+    return true;
+  }
+  return nearBottom && /^(?:\d+|Authorized licensed use limited to\b)/i.test(normalized);
 }
 
 /** 两遍法合并:先接上一页阅读顺序末尾→下一页开头,再接同页左→右栏 */
@@ -130,7 +342,15 @@ export function buildDoc(pages: ParsedPage[], docId: 'en' | 'zh'): Doc {
   // 1) 每页按阅读顺序展开成带 pageIndex 的全局序列
   const seq: WorkBlock[] = [];
   for (const pg of pages) {
-    const sorted = [...pg.blocks].sort(
+    const recoveredBlocks = (pg.layoutMode === 'single'
+      ? pg.blocks
+      : pg.blocks.flatMap((block) => splitInterleavedTwoColumnBlock(block, pg.w, pg.h)))
+      // Running headers, page numbers and publisher download footers are not
+      // document content. Removing them before the cross-page merge lets the
+      // real first body paragraph continue the previous page instead of being
+      // stranded behind a header block.
+      .filter((block) => !isRunningPageFurniture(block, pg.h));
+    const sorted = [...recoveredBlocks].sort(
       (a, b) => COL_RANK[a.col] - COL_RANK[b.col] || a.rect.y - b.rect.y,
     );
     for (const b of sorted) {

@@ -1,8 +1,9 @@
 import type { AiLogEvent } from '../translate/events';
 import type { ProjectRepository } from '../project/repository';
-import type { AlignmentUnit, TaskSnapshot, Doc, SemanticUnit } from '../../types/models';
+import type { AlignmentUnit, TaskSnapshot, Doc, Rect, SemanticUnit } from '../../types/models';
 import type { ProductionPipelineStages, PipelineValue } from './productionPipeline';
 import { getDocument } from '../pdf/runtime';
+import { extractBitmapRegions } from '../pdf/bitmapRegions';
 import { normalizeTextItem } from '../parser/pdfjsAdapter';
 import { parsePageItems } from '../parser';
 import { buildDoc, type ParsedPage } from '../parser/docBuilder';
@@ -38,7 +39,7 @@ import { buildAlignmentManifest, type AlignmentManifest } from '../align/manifes
 import { runAlignmentGate } from '../quality/alignmentGate';
 import type { ImmutableAsset } from '../assets/types';
 import { analyzePdfLayoutWithVision } from '../vision/analyze';
-import { reconcileVisionLayout } from '../vision/reconcile';
+import { authorPortraitAssetsFromBitmapRegions, reconcileVisionLayout } from '../vision/reconcile';
 import { serializeVisionPageAnalysis } from '../vision/protocol';
 import { inspectCompiledPdf, runPdfContentGate } from '../quality/pdfContentGate';
 import { persistValidatedOutputs } from '../quality/finalPersistence';
@@ -57,6 +58,7 @@ interface BrowserValue extends PipelineValue {
   projectId: string;
   settings: NonNullable<TaskSnapshot['settings']>;
   sourcePdf?: any;
+  sourceBitmapRegions?: Map<number, Rect[]>;
   doc?: Doc;
   prepared?: ReturnType<typeof prepareImmutableStructure>;
   assets?: ImmutableAsset[];
@@ -168,11 +170,14 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
       signal.addEventListener('abort', () => { void loading.destroy(); }, { once: true });
       const pdf = await loading.promise;
       const pages: ParsedPage[] = [];
+      const sourceBitmapRegions = new Map<number, Rect[]>();
       for (let pageIndex = 0; pageIndex < pdf.numPages; pageIndex += 1) {
         if (signal.aborted) throw new DOMException('已停止', 'AbortError');
         const page = await pdf.getPage(pageIndex + 1);
         const viewport = page.getViewport({ scale: 1 });
         const content = await page.getTextContent();
+        const operatorList = await page.getOperatorList();
+        sourceBitmapRegions.set(pageIndex, extractBitmapRegions(operatorList, viewport.transform));
         const items = content.items
           .filter((item: any) => typeof item?.str === 'string')
           .map((item: any) => normalizeTextItem(item, viewport));
@@ -185,7 +190,7 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
       }
       const doc = normalizeDocPages(buildDoc(pages, 'en'));
       if (!doc.blocks.length) throw new Error('PDF 没有可用的文字层，暂不支持扫描件');
-      return { ...current, settings, sourcePdf: pdf, doc };
+      return { ...current, settings, sourcePdf: pdf, sourceBitmapRegions, doc };
     },
 
     async analyzeLayout(input, signal) {
@@ -224,6 +229,28 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
         }),
       });
       const reconciled = reconcileVisionLayout(doc, analyses);
+      const exactPortraitAssets = authorPortraitAssetsFromBitmapRegions(
+        doc,
+        current.sourceBitmapRegions ?? new Map<number, Rect[]>(),
+      );
+      if (exactPortraitAssets.length) {
+        const overlapArea = (left: Rect, right: Rect) => Math.max(0, Math.min(
+          left.x + left.w,
+          right.x + right.w,
+        ) - Math.max(left.x, right.x)) * Math.max(0, Math.min(
+          left.y + left.h,
+          right.y + right.h,
+        ) - Math.max(left.y, right.y));
+        reconciled.assetRegions = reconciled.assetRegions.filter((asset) => (
+          asset.kind !== 'figure'
+          || Boolean(asset.captionUnitId)
+          || !exactPortraitAssets.some((portrait) => (
+            portrait.pageIndex === asset.pageIndex
+            && overlapArea(portrait.rect, asset.rect) / Math.max(1, portrait.rect.w * portrait.rect.h) >= 0.2
+          ))
+        ));
+        reconciled.assetRegions.push(...exactPortraitAssets);
+      }
       if (import.meta.env.MODE === 'test') {
         (globalThis as typeof globalThis & { __PP_DIAGNOSTIC_LAYOUT__?: unknown })
           .__PP_DIAGNOSTIC_LAYOUT__ = {
@@ -349,6 +376,7 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
         glossaryHash: JSON.stringify(glossary),
         blockId: block.blockId,
         sourceText: block.source,
+        protectedTokens: block.protectedTokens,
       });
       const streamHeartbeat = new Map<string, { at: number; phase: 'connected' | 'reasoning' | 'content' }>();
       const result = await runTranslationTask({

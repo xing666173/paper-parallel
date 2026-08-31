@@ -6,10 +6,18 @@ export interface TranslationCacheIdentity {
   glossaryHash: string;
   blockId: string;
   sourceText: string;
+  protectedTokens?: readonly string[];
 }
 
+const TRANSLATION_CACHE_VERSION = 'translation-cache-v2';
+
 export function buildTranslationCacheKey(value: TranslationCacheIdentity): string {
-  return [
+  const parts = [
+    // Invalidate responses produced before protected-number matching learned
+    // to recognize numerals adjacent to Chinese text and hyphenated IDs.
+    // Those cached responses can contain deterministic repair suffixes such
+    // as `图 11 11` or `3.9 倍 3.9` even though the API translation was sound.
+    TRANSLATION_CACHE_VERSION,
     value.fileHash,
     value.promptVersion,
     value.modelId,
@@ -17,7 +25,9 @@ export function buildTranslationCacheKey(value: TranslationCacheIdentity): strin
     value.glossaryHash,
     value.blockId,
     value.sourceText,
-  ]
+  ];
+  if (value.protectedTokens?.length) parts.push(JSON.stringify(value.protectedTokens));
+  return parts
     .map(encodeURIComponent)
     .join(':');
 }

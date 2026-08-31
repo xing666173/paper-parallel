@@ -6,7 +6,7 @@ import type {
   TranslationValidationResult,
 } from './protocol';
 
-const PROTECTED_TOKEN_PATTERN = /⟦[^⟧]+⟧|\[\s*(?:\d+(?:\s*[-,]\s*\d+)*)\s*\]|[-+]?(?:\d+\.\d+|\d+)(?:%|‰)?/g;
+const PROTECTED_TOKEN_PATTERN = /⟦[^⟧]+⟧|\[\s*(?:\d+(?:\s*[-,]\s*\d+)*)\s*\]|(?<![A-Za-z0-9])[-+]?(?:\d+\.\d+|\d+)(?:%|‰)?/g;
 const CITATION_TOKEN_PATTERN = /^\[\s*(?:\d+(?:\s*[-,]\s*\d+)*)\s*\]$/;
 const NUMERIC_TOKEN_PATTERN = /^[-+]?(?:\d+\.\d+|\d+)(?:%|‰)?$/;
 const FLATTENED_UNIT_EXPONENT_PATTERN = /(?:^|[\s(])(?:pm|nm|μm|µm|mm|cm|dm|m|dam|hm|km|in|ft|yd|mi)\s+([23])(?=$|[\s,.;:)])/gu;
@@ -304,7 +304,12 @@ function protectedOccurrenceCount(text: string, token: string): number {
       .filter((candidate) => candidate.replace(/\s+/g, '') === canonical)
       .length;
   }
-  return extracted.filter((candidate) => candidate === token).length;
+  if (NUMERIC_TOKEN_PATTERN.test(token) || /^⟦[^⟧]+⟧$/.test(token)) {
+    return extracted.filter((candidate) => candidate === token).length;
+  }
+  // Explicit protected title terms and product names are ordinary literals,
+  // not members of the numeric/citation extraction grammar.
+  return occurrenceCount(text, token);
 }
 
 function sourceUsesFlattenedUnitExponent(source: string, token: string): boolean {
@@ -321,6 +326,19 @@ function translatedProtectedOccurrenceCount(source: string, translation: string,
 
 function normalizeTargetText(text: string): string {
   return text.normalize('NFKC').replace(/[\s\u3000]+/g, '');
+}
+
+const ENGLISH_FUNCTION_WORDS = new Set([
+  'a', 'an', 'and', 'are', 'as', 'at', 'be', 'been', 'by', 'for', 'from', 'has', 'have',
+  'in', 'into', 'is', 'it', 'of', 'on', 'or', 'that', 'the', 'their', 'these', 'this',
+  'to', 'was', 'were', 'which', 'with',
+]);
+
+function requiresChineseTarget(source: TranslationBlockRequest): boolean {
+  if (source.kind === 'author' || /[\u3400-\u9fff]/u.test(source.source)) return false;
+  const words = source.source.match(/[A-Za-z]+(?:['’-][A-Za-z]+)*/g) ?? [];
+  if (words.length < 5) return false;
+  return words.some((word) => ENGLISH_FUNCTION_WORDS.has(word.toLowerCase()));
 }
 
 function validateSourceMapping(
@@ -370,6 +388,16 @@ export function validateBatchResponse(
 
     if (!translated.translation.trim()) {
       addIssue(issues, source.blockId, 'translation-empty', 'Translation is empty.');
+    }
+
+    if (requiresChineseTarget(source)
+      && (translated.translation.match(/[\u3400-\u9fff]/gu)?.length ?? 0) < 2) {
+      addIssue(
+        issues,
+        source.blockId,
+        'target-language-missing',
+        'English natural-language source must contain a substantive Chinese translation.',
+      );
     }
 
     const protectedTokens = uniqueInOrder([

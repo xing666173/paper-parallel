@@ -62,6 +62,17 @@ describe('production pipeline preparation', () => {
     expect(requests.some((request) => request.blockId === 'eq1')).toBe(false);
   });
 
+  it('protects a leading paper product name and complete title acronyms', () => {
+    const doc = fixtureDoc();
+    const source = 'Falic: An FPGA-Based Multi-Scalar Multiplication (MSM) Accelerator';
+    doc.semanticUnits.find((unit) => unit.id === 'title')!.sourceText = source;
+
+    const request = buildTranslationRequestsFromDoc(doc).find((candidate) => candidate.blockId === 'title');
+
+    expect(request?.protectedTokens).toEqual(['Falic', 'FPGA', 'MSM']);
+    expect(request?.protectedTokens).not.toContain('FPGA-');
+  });
+
   it('merges a late-emitted centered title continuation by first-page geometry', () => {
     const doc = fixtureDoc();
     const title = doc.blocks.find((block) => block.id === 'title')!;
@@ -252,7 +263,8 @@ describe('production pipeline preparation', () => {
     const bodyLines = [
       'A. Author. A paral-',
       'lel paper.',
-      'B. Writer. Second title. https://github.com/',
+      'B. Writer. Second title.',
+      '[Online]. Available: https://github.com/',
       'org/repo , Accessed: 2024-12-',
       '09.',
     ];
@@ -260,7 +272,7 @@ describe('production pipeline preparation', () => {
       {
         id: 'reference-body', docId: 'en', type: 'paragraph', pageIndex: 0,
         rect: { x: 100, y: 630, w: 380, h: 60 }, order: 4,
-        text: bodyLines.join('\n'), characterRects: characterRows(bodyLines, 100, [630, 642, 660, 672, 684]),
+        text: bodyLines.join('\n'), characterRects: characterRows(bodyLines, 100, [630, 642, 660, 672, 684, 696]),
         splitAllowed: true, widthMode: 'column',
       },
       {
@@ -306,7 +318,7 @@ describe('production pipeline preparation', () => {
 
     expect(references.map((unit) => unit.sourceText)).toEqual([
       '[A1] A. Author. A parallel paper.',
-      '[B2] B. Writer. Second title. https://github.com/org/repo , Accessed: 2024-12-09.',
+      '[B2] B. Writer. Second title. [Online]. Available: https://github.com/org/repo , Accessed: 2024-12-09.',
     ]);
     expect(prepared.units.some((unit) => unit.id === 'reference-body')).toBe(false);
     expect(prepared.units.some((unit) => unit.id === 'reference-labels')).toBe(false);
@@ -1652,6 +1664,81 @@ describe('production pipeline preparation', () => {
       .toBe('Specifically, as shown in Figure 6,');
   });
 
+  it('reattaches repeated detached PDF subscripts to their prose variables', () => {
+    const doc = fixtureDoc();
+    const source = [
+      'W asted , T otal , and perCore are the amounts of',
+      'res', 'res', 'res',
+      'wasted, total, and per-core resources, respectively.',
+      'The smaller P erCore leads to less W asted because one',
+      'res', 'res',
+      'core leaves fewer resources unused.',
+    ].join('\n');
+    const block = doc.blocks.find((candidate) => candidate.id === 'p1')!;
+    block.text = source;
+    block.rect = { x: 50, y: 100, w: 230, h: 70 };
+    doc.semanticUnits.find((unit) => unit.id === 'p1')!.sourceText = source;
+
+    const prepared = prepareImmutableStructure(doc);
+    const normalized = prepared.units.find((unit) => unit.id === 'p1')?.sourceText;
+
+    expect(normalized).toContain('Wasted_res , Total_res , and perCore_res');
+    expect(normalized).toContain('smaller PerCore_res leads to less Wasted_res');
+    expect(normalized).not.toMatch(/(?:^|\n)res(?:\n|$)/);
+  });
+
+  it('removes a detached piecewise-brace glyph beside a verified formula', () => {
+    const doc = fixtureDoc();
+    const source = 'The resource model is defined in Equation (1).\n⎧';
+    const block = doc.blocks.find((candidate) => candidate.id === 'p1')!;
+    block.text = source;
+    block.rect = { x: 50, y: 100, w: 230, h: 24 };
+    doc.semanticUnits.find((unit) => unit.id === 'p1')!.sourceText = source;
+
+    const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: [{
+      id: 'vision-formula-1', kind: 'formula', pageIndex: 0,
+      rect: { x: 50, y: 118, w: 230, h: 24 }, widthMode: 'column',
+    }] });
+
+    expect(prepared.units.find((unit) => unit.id === 'p1')?.sourceText)
+      .toBe('The resource model is defined in Equation (1).');
+  });
+
+  it('removes the fragmented tail of a piecewise resource formula below its immutable first row', () => {
+    const doc = fixtureDoc();
+    const block = doc.blocks.find((candidate) => candidate.id === 'p1')!;
+    block.text = 'res\nres\nres\nT otal\n(1)\n⎩ N = \u0002\nres \u0003\nP erCore\nres';
+    block.rect = { x: 69.804, y: 382.1686, w: 218.84, h: 32.0444 };
+    block.fragments = [{ pageIndex: 0, rect: { ...block.rect } }];
+    doc.semanticUnits.find((unit) => unit.id === 'p1')!.sourceText = block.text;
+
+    const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: [{
+      id: 'resource-formula', kind: 'formula', pageIndex: 0,
+      rect: { x: 69.804, y: 376.3263, w: 174.2, h: 9.9626 }, widthMode: 'column',
+    }] });
+
+    expect(prepared.units.some((unit) => unit.id === 'p1')).toBe(false);
+    expect(prepared.regions[0].orderedUnitIds).not.toContain('p1');
+  });
+
+  it('removes a fragmented formula tail after its neighboring formula is detected deterministically', () => {
+    const doc = fixtureDoc();
+    const residual = doc.blocks.find((candidate) => candidate.id === 'p1')!;
+    residual.text = 'res\nres\nres\nT otal\n(1)\n⎩ N = \u0002\nres \u0003\nP erCore\nres';
+    residual.rect = { x: 69.804, y: 382.1686, w: 218.84, h: 32.0444 };
+    doc.semanticUnits.find((unit) => unit.id === 'p1')!.sourceText = residual.text;
+    const formula = doc.blocks.find((candidate) => candidate.id === 'eq1')!;
+    formula.text = '⎨ W asted = T otal − N × P erCore';
+    formula.rect = { x: 69.804, y: 376.3263, w: 174.2, h: 9.9626 };
+    const formulaUnit = doc.semanticUnits.find((unit) => unit.id === 'eq1')!;
+    formulaUnit.sourceText = formula.text;
+
+    const prepared = prepareImmutableStructure(doc);
+
+    expect(prepared.assetRegions).toContainEqual(expect.objectContaining({ id: 'eq1', kind: 'formula' }));
+    expect(prepared.units.some((unit) => unit.id === 'p1')).toBe(false);
+  });
+
   it('preserves a wrapped equation term before explanatory prose when the previous line ends in an operator', () => {
     const doc = fixtureDoc();
     const source = [
@@ -1969,6 +2056,104 @@ describe('production pipeline preparation', () => {
     expect(order.indexOf('fig-caption-asset')).toBe(order.indexOf('fig-caption') - 1);
   });
 
+  it('keeps a biography page two-column and groups staggered author portraits into one gallery row', () => {
+    const doc = fixtureDoc();
+    doc.blocks = doc.blocks.filter((candidate) => !['fig-caption', 'eq1'].includes(candidate.id));
+    doc.semanticUnits = doc.semanticUnits.filter((candidate) => !['fig-caption', 'eq1'].includes(candidate.id));
+    doc.layoutRegions[0]!.orderedUnitIds = doc.layoutRegions[0]!.orderedUnitIds
+      .filter((id) => !['fig-caption', 'eq1'].includes(id));
+    const biographies = [
+      'Alice Smith received the Ph.D. degree from Example University.',
+      'Bob Jones received the M.S. degree from Example University.',
+      'Carol Lee received the B.Eng. degree from Example University.',
+      'David Wu received the Ph.D. degree from Example University.',
+    ].join('\n');
+    const block = doc.blocks.find((candidate) => candidate.id === 'p1')!;
+    block.text = biographies;
+    block.rect = { x: 180, y: 80, w: 360, h: 560 };
+    doc.semanticUnits.find((unit) => unit.id === 'p1')!.sourceText = biographies;
+    const portraits = [80, 230, 380, 530].map((y, index) => ({
+      id: `portrait-${index + 1}`, kind: 'figure' as const, pageIndex: 0,
+      rect: { x: index < 2 ? 50 : 470, y, w: 72, h: 88 }, widthMode: 'column' as const,
+    }));
+
+    const prepared = prepareImmutableStructure(doc, {
+      pageLayouts: new Map([[0, 'single']]),
+      verifiedAssetRegions: portraits,
+    });
+
+    const gallery = prepared.regions.find((region) => region.presentation === 'horizontal');
+    expect(gallery?.orderedUnitIds).toEqual(portraits.map((portrait) => portrait.id));
+    expect(prepared.regions.find((region) => region.id === 'r1')?.mode).toBe('double');
+  });
+
+  it('recovers a centered full-width table and starts the following column figure after it', () => {
+    const doc = fixtureDoc();
+    doc.blocks = [
+      {
+        id: 'table-ii-caption', docId: 'en', type: 'caption', pageIndex: 0,
+        rect: { x: 290, y: 65, w: 34, h: 8 }, order: 1,
+        text: 'TABLE II', splitAllowed: false, widthMode: 'column',
+      },
+      {
+        id: 'table-ii-left', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 50, y: 105, w: 60, h: 9 }, order: 2,
+        text: 'BN128',
+        splitAllowed: true, widthMode: 'column',
+      },
+      {
+        id: 'table-ii-left-tail', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 50, y: 135, w: 90, h: 55 }, order: 2.5,
+        text: 'MNT4-298\nBLS12-381\nMNT4-753',
+        splitAllowed: true, widthMode: 'column',
+      },
+      {
+        id: 'table-ii-right', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 420, y: 100, w: 120, h: 118 }, order: 3,
+        text: '3\n200\n4\n1\n100\n4\n200\n6\n2\n100\n3\n180\n4\n1\n100',
+        splitAllowed: true, widthMode: 'column',
+      },
+      {
+        id: 'table-iii-boundary', docId: 'en', type: 'caption', pageIndex: 0,
+        rect: { x: 150, y: 245, w: 40, h: 8 }, order: 4,
+        text: 'TABLE III', splitAllowed: false, widthMode: 'column',
+      },
+      {
+        id: 'figure-10-caption', docId: 'en', type: 'caption', pageIndex: 0,
+        rect: { x: 330, y: 388, w: 210, h: 8 }, order: 5,
+        text: 'Fig. 10. Computing power improvement.', splitAllowed: false, widthMode: 'column',
+      },
+    ];
+    doc.semanticUnits = [
+      { id: 'table-ii-caption', kind: 'caption', sourceText: 'TABLE II', protectedTokens: [], layoutRegionId: 'r1', order: 1 },
+      { id: 'table-ii-left', kind: 'paragraph', sourceText: doc.blocks[1]!.text, protectedTokens: [], layoutRegionId: 'r1', order: 2 },
+      { id: 'table-ii-left-tail', kind: 'paragraph', sourceText: doc.blocks[2]!.text, protectedTokens: [], layoutRegionId: 'r1', order: 2.5 },
+      { id: 'table-ii-right', kind: 'paragraph', sourceText: doc.blocks[3]!.text, protectedTokens: [], layoutRegionId: 'r1', order: 3 },
+      { id: 'figure-10-caption', kind: 'caption', sourceText: 'Fig. 10. Computing power improvement.', protectedTokens: [], layoutRegionId: 'r1', order: 5 },
+    ];
+    doc.layoutRegions = [{
+      id: 'r1', mode: 'double', sourcePage: 0,
+      bounds: { x: 50, y: 65, w: 490, h: 331 },
+      orderedUnitIds: ['table-ii-caption', 'table-ii-left', 'table-ii-left-tail', 'table-ii-right', 'figure-10-caption'],
+    }];
+
+    const prepared = prepareImmutableStructure(doc);
+    const table = prepared.assetRegions.find((asset) => asset.id === 'table-ii-caption-asset')!;
+    const figure = prepared.assetRegions.find((asset) => asset.id === 'figure-10-caption-asset')!;
+
+    expect(table).toMatchObject({ widthMode: 'span' });
+    expect(table.rect.x).toBeLessThanOrEqual(50);
+    expect(table.rect.x + table.rect.w).toBeGreaterThanOrEqual(540);
+    expect(table.rect.y).toBeCloseTo(74);
+    expect(table.rect.y + table.rect.h).toBeGreaterThanOrEqual(224);
+    expect(table.rect.y + table.rect.h).toBeLessThan(245);
+    expect(figure.rect.y).toBeGreaterThanOrEqual(224);
+    expect(figure.rect.x).toBeGreaterThan(300);
+    expect(prepared.units.some((unit) => unit.id === 'table-ii-left')).toBe(false);
+    expect(prepared.units.some((unit) => unit.id === 'table-ii-left-tail')).toBe(false);
+    expect(prepared.units.some((unit) => unit.id === 'table-ii-right')).toBe(false);
+  });
+
   it('uses reconciled Vision assets instead of guessing from caption gaps and excludes visual labels from translation', () => {
     const doc = fixtureDoc();
     doc.blocks.push({
@@ -2058,6 +2243,68 @@ describe('production pipeline preparation', () => {
     expect(secondFigure.rect.y).toBeLessThan(260);
   });
 
+  it('does not extend a following figure through text already owned by a verified table', () => {
+    const doc = fixtureDoc();
+    const tableText = [
+      'Curve FPGA LUT REG DSP BRAM URAM Core No Freq CLK',
+      'BN128 U200 663K 56.1 982K 41.5 1560 22.8',
+      'BN128 U250 946K 54.7 1370K 39.6 2532 20.6',
+      'MNT4 298 715K 60.5 950K 40.2 1824 26.7',
+      'BLS12 381 799K 67.6 955K 40.4 1995 29.2',
+      'MNT4 753 1081K 62.6 1277K 37.0 4242 34.5',
+    ].join('\n');
+    let sourceIndex = 0;
+    const tableLines = tableText.split('\n');
+    doc.blocks.push(
+      {
+        id: 'verified-table-caption', docId: 'en', type: 'caption', pageIndex: 0,
+        rect: { x: 282, y: 65, w: 35, h: 8 }, order: 10,
+        text: 'TABLE II', splitAllowed: false, widthMode: 'column',
+      },
+      {
+        id: 'verified-table-body', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 301, y: 92, w: 241, h: 126 }, order: 11,
+        text: tableText, splitAllowed: true, widthMode: 'column',
+        characterRects: tableLines.flatMap((line, lineIndex) => {
+          const chars = [...line].map((ch, index) => ({
+            ch, sourceIndex: sourceIndex + index, pageIndex: 0,
+            rect: { x: 301 + index * 3.6, y: 92 + lineIndex * 20, w: 3.4, h: 8 },
+          }));
+          sourceIndex += line.length + 1;
+          return chars;
+        }),
+      },
+      {
+        id: 'following-figure-caption', docId: 'en', type: 'caption', pageIndex: 0,
+        rect: { x: 305, y: 388, w: 210, h: 8 }, order: 12,
+        text: 'Fig. 10. Computing power improvement.', splitAllowed: false, widthMode: 'column',
+      },
+    );
+    doc.semanticUnits.push(
+      { id: 'verified-table-caption', kind: 'caption', sourceText: 'TABLE II', protectedTokens: [], layoutRegionId: 'r1', order: 10 },
+      { id: 'verified-table-body', kind: 'paragraph', sourceText: tableText, protectedTokens: [], layoutRegionId: 'r1', order: 11 },
+      { id: 'following-figure-caption', kind: 'caption', sourceText: 'Fig. 10. Computing power improvement.', protectedTokens: [], layoutRegionId: 'r1', order: 12 },
+    );
+    doc.layoutRegions[0]!.orderedUnitIds.push(
+      'verified-table-caption', 'verified-table-body', 'following-figure-caption',
+    );
+
+    const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: [
+      {
+        id: 'verified-table', kind: 'table', pageIndex: 0,
+        rect: { x: 26, y: 86, w: 542, h: 93 }, widthMode: 'span',
+        captionUnitId: 'verified-table-caption',
+      },
+      {
+        id: 'following-figure', kind: 'figure', pageIndex: 0,
+        rect: { x: 309, y: 230, w: 255, h: 155 }, widthMode: 'column',
+        captionUnitId: 'following-figure-caption',
+      },
+    ] });
+
+    expect(prepared.assetRegions.find((asset) => asset.id === 'following-figure')?.rect.y).toBe(230);
+  });
+
   it('rejects a prose-heavy Vision formula rectangle and preserves only its inline equation', () => {
     const doc = fixtureDoc();
     const block = doc.blocks.find((candidate) => candidate.id === 'p1')!;
@@ -2105,6 +2352,30 @@ describe('production pipeline preparation', () => {
     }] });
 
     expect(prepared.assetRegions.some((asset) => asset.id === 'vision-false-formula')).toBe(false);
+    expect(prepared.units.find((unit) => unit.id === 'p1')?.sourceText).toBe(source);
+  });
+
+  it('rejects a column-wide Vision formula rectangle around an IEEE subsection heading', () => {
+    const doc = fixtureDoc();
+    const block = doc.blocks.find((candidate) => candidate.id === 'p1')!;
+    const source = 'B. FPGA Hardware Resource Utilization';
+    block.type = 'section';
+    block.text = source;
+    block.rect = { x: 50, y: 400, w: 240, h: 12 };
+    block.characterRects = [...source].map((ch, sourceIndex) => ({
+      ch, sourceIndex, pageIndex: 0,
+      rect: { x: 50 + sourceIndex * 5, y: 400, w: 4.8, h: 9 },
+    }));
+    const unit = doc.semanticUnits.find((candidate) => candidate.id === 'p1')!;
+    unit.kind = 'heading';
+    unit.sourceText = source;
+
+    const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: [{
+      id: 'vision-false-heading-formula', kind: 'formula', pageIndex: 0,
+      rect: { x: 45, y: 396, w: 250, h: 20 }, widthMode: 'column',
+    }] });
+
+    expect(prepared.assetRegions.some((asset) => asset.id === 'vision-false-heading-formula')).toBe(false);
     expect(prepared.units.find((unit) => unit.id === 'p1')?.sourceText).toBe(source);
   });
 
@@ -2313,6 +2584,81 @@ describe('production pipeline preparation', () => {
 
     expect(figure.rect.y).toBeGreaterThanOrEqual(138);
     expect(figure.rect.y).toBeLessThan(148);
+  });
+
+  it('recovers a column caption polluted by prose from the opposite column', () => {
+    const doc = fixtureDoc();
+    doc.blocks = doc.blocks.filter((block) => block.id !== 'fig-caption');
+    doc.semanticUnits = doc.semanticUnits.filter((unit) => unit.id !== 'fig-caption');
+    doc.layoutRegions[0]!.orderedUnitIds = doc.layoutRegions[0]!.orderedUnitIds
+      .filter((id) => id !== 'fig-caption');
+    const leftCaption = 'Figure 9: Left strategy where';
+    const rightProse = 'Right prose continues';
+    const polluted = `${leftCaption} ${rightProse}`;
+    const characters = [
+      ...[...leftCaption].map((ch, sourceIndex) => ({
+        ch, sourceIndex, pageIndex: 0,
+        rect: { x: 50 + sourceIndex * 3, y: 500, w: 2.8, h: 8 },
+      })),
+      ...[...rightProse].map((ch, index) => ({
+        ch, sourceIndex: leftCaption.length + 1 + index, pageIndex: 0,
+        rect: { x: 330 + index * 3, y: 500, w: 2.8, h: 8 },
+      })),
+    ];
+    doc.blocks.push(
+      {
+        id: 'left-prior-content', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 50, y: 300, w: 230, h: 100 }, order: 4,
+        text: '10 20 30', splitAllowed: true, widthMode: 'column',
+      },
+      {
+        id: 'polluted-caption', docId: 'en', type: 'caption', pageIndex: 0,
+        rect: { x: 50, y: 500, w: 510, h: 10 }, order: 5,
+        text: polluted, characterRects: characters, splitAllowed: false, widthMode: 'span',
+      },
+      {
+        id: 'caption-continuation-1', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 50, y: 510, w: 230, h: 10 }, order: 6,
+        text: 'Core 0 remains in one clock strat-', splitAllowed: true, widthMode: 'span',
+      },
+      {
+        id: 'caption-continuation-2', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 50, y: 520, w: 230, h: 10 }, order: 7,
+        text: 'egy.', splitAllowed: true, widthMode: 'column',
+      },
+      {
+        id: 'right-prose-behind-caption', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 330, y: 300, w: 230, h: 220 }, order: 8,
+        text: 'The opposite column continues through the caption baseline without belonging to the figure.',
+        splitAllowed: true, widthMode: 'column',
+      },
+    );
+    doc.semanticUnits.push(
+      { id: 'left-prior-content', kind: 'paragraph', sourceText: '10 20 30', protectedTokens: [], layoutRegionId: 'r1', order: 4 },
+      { id: 'polluted-caption', kind: 'caption', sourceText: polluted, protectedTokens: [], layoutRegionId: 'caption-region', order: 5 },
+      { id: 'caption-continuation-1', kind: 'paragraph', sourceText: 'Core 0 remains in one clock strat-', protectedTokens: [], layoutRegionId: 'caption-region', order: 6 },
+      { id: 'caption-continuation-2', kind: 'paragraph', sourceText: 'egy.', protectedTokens: [], layoutRegionId: 'r1', order: 7 },
+      { id: 'right-prose-behind-caption', kind: 'paragraph', sourceText: 'The opposite column continues through the caption baseline without belonging to the figure.', protectedTokens: [], layoutRegionId: 'r1', order: 8 },
+    );
+    doc.layoutRegions[0]!.orderedUnitIds.push(
+      'left-prior-content', 'caption-continuation-2', 'right-prose-behind-caption',
+    );
+    doc.layoutRegions.push({
+      id: 'caption-region', mode: 'full-width', sourcePage: 0,
+      bounds: { x: 50, y: 500, w: 510, h: 30 },
+      orderedUnitIds: ['polluted-caption', 'caption-continuation-1'],
+    });
+
+    const prepared = prepareImmutableStructure(doc);
+    const caption = prepared.units.find((unit) => unit.id === 'polluted-caption');
+    const figure = prepared.assetRegions.find((asset) => asset.id === 'polluted-caption-asset');
+
+    expect(caption?.sourceText)
+      .toBe('Figure 9: Left strategy where Core 0 remains in one clock strategy.');
+    expect(prepared.units.some((unit) => unit.id.startsWith('caption-continuation-'))).toBe(false);
+    expect(prepared.units.some((unit) => unit.id === 'right-prose-behind-caption')).toBe(true);
+    expect(figure).toMatchObject({ widthMode: 'column', rect: { y: 406 } });
+    expect(figure!.rect.x + figure!.rect.w).toBeLessThan(doc.pages[0]!.width / 2 + 8);
   });
 
   it('uses a trailing diagram-label cluster inside a mixed prose block as the figure top', () => {
@@ -2827,6 +3173,55 @@ describe('production pipeline preparation', () => {
     ]));
   });
 
+  it('preserves every line of a first-page title that straddles the generic top margin', () => {
+    const doc = fixtureDoc();
+    const title = doc.blocks.find((block) => block.id === 'title')!;
+    const source = 'Falic: An FPGA-Based Multi-Scalar Multiplication\nAccelerator for Zero-Knowledge Proof';
+    title.text = source;
+    title.rect = { x: 50, y: 55, w: 500, h: 45 };
+    title.characterRects = [...source].map((ch, sourceIndex) => ({
+      ch, sourceIndex, pageIndex: 0,
+      rect: {
+        x: 50 + (sourceIndex % 50) * 8,
+        y: sourceIndex < source.indexOf('\n') ? 58 : 84,
+        w: 7.5, h: 12,
+      },
+    }));
+    doc.semanticUnits.find((unit) => unit.id === 'title')!.sourceText = source;
+
+    const prepared = prepareImmutableStructure(doc);
+
+    expect(prepared.units.find((unit) => unit.id === 'title')?.sourceText).toBe(source);
+  });
+
+  it('drops a multi-block IEEE first-page editorial and affiliation footnote', () => {
+    const doc = fixtureDoc();
+    const notes = [
+      { id: 'received-note', type: 'paragraph' as const, y: 520, text: 'Manuscript received 25 January 2024; revised 4 August 2024. This work was supported by the NSFC.' },
+      { id: 'corresponding-note', type: 'section' as const, y: 600, text: 'X. Fu. (Corresponding author: Zhibin Yu.)' },
+      { id: 'affiliation-note', type: 'paragraph' as const, y: 620, text: 'Yongkui Yang is with Shenzhen Institute of Advanced Technology (e-mail: author@example.edu).' },
+      { id: 'rights-note', type: 'paragraph' as const, y: 734, text: 'See https://www.ieee.org/publications/rights/index.html for more information.' },
+    ];
+    doc.blocks.push(...notes.map((note, index) => ({
+      id: note.id, docId: 'en' as const, type: note.type, pageIndex: 0,
+      rect: { x: 50, y: note.y, w: 240, h: 20 }, order: 4 + index,
+      text: note.text, splitAllowed: true, widthMode: 'column' as const,
+    })));
+    doc.semanticUnits.push(...notes.map((note, index) => ({
+      id: note.id,
+      kind: note.type === 'section' ? 'heading' as const : 'paragraph' as const,
+      sourceText: note.text, protectedTokens: [], layoutRegionId: 'r1', order: 4 + index,
+    })));
+    doc.layoutRegions[0].orderedUnitIds.push(...notes.map((note) => note.id));
+
+    const prepared = prepareImmutableStructure(doc);
+
+    for (const note of notes) {
+      expect(prepared.units.some((unit) => unit.id === note.id)).toBe(false);
+      expect(prepared.regions[0].orderedUnitIds).not.toContain(note.id);
+    }
+  });
+
   it('drops source page numbers so the target PDF can paginate and number itself naturally', () => {
     const doc = fixtureDoc();
     doc.blocks.push({
@@ -2867,6 +3262,26 @@ describe('production pipeline preparation', () => {
     );
     expect(buildTranslationRequestsFromDoc({ ...doc, semanticUnits: prepared.units })
       .find((request) => request.blockId === 'section-2-4')?.protectedTokens).toEqual(['2.4']);
+  });
+
+  it('repairs a single letter-spaced small-caps word in a heading only', () => {
+    const doc = fixtureDoc();
+    doc.blocks.push({
+      id: 'references', docId: 'en', type: 'section', pageIndex: 0,
+      rect: { x: 60, y: 420, w: 140, h: 16 }, order: 4,
+      text: 'R EFERENCES', splitAllowed: false, widthMode: 'column',
+    });
+    doc.semanticUnits.push({
+      id: 'references', kind: 'heading', sourceText: 'R EFERENCES',
+      protectedTokens: [], layoutRegionId: 'r1', order: 4,
+    });
+    doc.layoutRegions[0].orderedUnitIds.push('references');
+
+    const prepared = prepareImmutableStructure(doc);
+
+    expect(prepared.units.find((unit) => unit.id === 'references')?.sourceText).toBe('REFERENCES');
+    expect(prepared.units.find((unit) => unit.id === 'p1')?.sourceText)
+      .toBe('First result. Second result.');
   });
 });
 

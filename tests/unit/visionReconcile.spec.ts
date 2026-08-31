@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { reconcileVisionLayout } from '../../src/core/vision/reconcile';
+import {
+  authorPortraitAssetsFromBitmapRegions,
+  reconcileVisionLayout,
+} from '../../src/core/vision/reconcile';
 import type { Doc } from '../../src/types/models';
 
 describe('vision: deterministic layout reconciliation', () => {
@@ -362,6 +365,66 @@ describe('vision: deterministic layout reconciliation', () => {
     expect(result.assetRegions).toEqual([]);
     expect(result.unresolved.map((item) => item.reason)).toEqual([
       'low-confidence', 'page-edge-touch',
+    ]);
+  });
+
+  it('accepts a low-confidence cluster of uncaptioned author portraits on a biography page', () => {
+    const doc = fixtureDoc();
+    doc.blocks = [{
+      id: 'bios', docId: 'en', type: 'paragraph', pageIndex: 0,
+      rect: { x: 180, y: 80, w: 360, h: 500 }, order: 0,
+      text: [
+        'Alice Smith received the Ph.D. degree from Example University.',
+        'Bob Jones received the M.S. degree from Example University.',
+        'Carol Lee received the B.Eng. degree from Example University.',
+      ].join('\n'), splitAllowed: true, widthMode: 'span',
+    }];
+    doc.semanticUnits = [{
+      id: 'bios', kind: 'paragraph', sourceText: doc.blocks[0]!.text,
+      protectedTokens: [], layoutRegionId: 'region-1', order: 0,
+    }];
+    doc.layoutRegions[0]!.orderedUnitIds = ['bios'];
+
+    const result = reconcileVisionLayout(doc, [{
+      pageIndex: 0, layout: 'double', regions: [
+        { type: 'figure', bbox: [40, 120, 130, 130], column: 'left', confidence: 0.5 },
+        { type: 'figure', bbox: [40, 360, 130, 130], column: 'left', confidence: 0.5 },
+        { type: 'figure', bbox: [40, 600, 130, 130], column: 'left', confidence: 0.5 },
+        { type: 'figure', bbox: [500, 80, 130, 130], column: 'right', confidence: 0.5 },
+        { type: 'figure', bbox: [500, 320, 130, 130], column: 'right', confidence: 0.5 },
+        { type: 'figure', bbox: [500, 560, 130, 130], column: 'right', confidence: 0.5 },
+      ],
+    }]);
+
+    expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions).toHaveLength(6);
+    expect(result.assetRegions.every((asset) => asset.kind === 'figure' && !asset.captionUnitId)).toBe(true);
+  });
+
+  it('uses exact raster XObject rectangles for a cluster of author portraits', () => {
+    const doc = fixtureDoc();
+    doc.blocks = [{
+      id: 'bios', docId: 'en', type: 'paragraph', pageIndex: 0,
+      rect: { x: 45, y: 70, w: 510, h: 620 }, order: 0,
+      text: [
+        'Alice Smith received the Ph.D. degree from Example University.',
+        'Bob Jones received the M.S. degree from Example University.',
+        'Carol Lee received the B.Eng. degree from Example University.',
+      ].join('\n'), splitAllowed: true, widthMode: 'span',
+    }];
+    const exact = [
+      { x: 42, y: 176, w: 72, h: 90 }, { x: 42, y: 340, w: 72, h: 90 },
+      { x: 42, y: 458, w: 72, h: 90 }, { x: 305, y: 67, w: 72, h: 90 },
+      { x: 305, y: 169, w: 72, h: 90 }, { x: 305, y: 305, w: 72, h: 90 },
+    ];
+
+    const assets = authorPortraitAssetsFromBitmapRegions(doc, new Map([[0, exact]]));
+
+    expect(assets).toHaveLength(6);
+    expect(assets.map((asset) => asset.rect)).toEqual(exact);
+    expect(assets.map((asset) => asset.id)).toEqual([
+      'bitmap-p1-portrait-1', 'bitmap-p1-portrait-2', 'bitmap-p1-portrait-3',
+      'bitmap-p1-portrait-4', 'bitmap-p1-portrait-5', 'bitmap-p1-portrait-6',
     ]);
   });
 

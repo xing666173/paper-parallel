@@ -168,6 +168,70 @@ function withAdjacentCaptionClearance(rect: Rect, caption: Rect | undefined, typ
   return rect;
 }
 
+function isAuthorBiographyPage(doc: Doc, pageIndex: number): boolean {
+  const text = doc.blocks
+    .filter((block) => block.pageIndex === pageIndex)
+    .map((block) => block.text ?? '')
+    .join('\n');
+  const degreeSignals = text.match(/\breceived\b[\s\S]{0,160}?\bdegree\b/gi) ?? [];
+  return degreeSignals.length >= 3;
+}
+
+function isPortraitRect(page: { width: number; height: number }, rect: Rect): boolean {
+  const widthRatio = rect.w / page.width;
+  const heightRatio = rect.h / page.height;
+  const aspect = rect.w / Math.max(1, rect.h);
+  return widthRatio >= 0.08 && widthRatio <= 0.22
+    && heightRatio >= 0.08 && heightRatio <= 0.22
+    && aspect >= 0.55 && aspect <= 1.5;
+}
+
+/**
+ * Author headshots in publisher PDFs are usually raster XObjects. Prefer their
+ * exact paint rectangles over approximate multimodal boxes: the latter can
+ * include a biography line or miss the top of a face by tens of points.
+ */
+export function authorPortraitAssetsFromBitmapRegions(
+  doc: Doc,
+  bitmapRegions: ReadonlyMap<number, readonly Rect[]>,
+): DetectedAssetRegion[] {
+  const assets: DetectedAssetRegion[] = [];
+  for (const [pageIndex, regions] of bitmapRegions) {
+    const page = doc.pages[pageIndex];
+    if (!page || !isAuthorBiographyPage(doc, pageIndex)) continue;
+    const portraits = regions
+      .filter((rect) => isPortraitRect(page, rect))
+      .sort((left, right) => left.x - right.x || left.y - right.y);
+    if (portraits.length < 3) continue;
+    portraits.forEach((rect, index) => assets.push({
+      id: `bitmap-p${pageIndex + 1}-portrait-${index + 1}`,
+      kind: 'figure', pageIndex, rect: { ...rect }, widthMode: 'column',
+    }));
+  }
+  return assets;
+}
+
+function portraitClusterIndices(
+  doc: Doc,
+  pageIndex: number,
+  analysis: VisionPageAnalysis,
+): Set<number> {
+  if (!isAuthorBiographyPage(doc, pageIndex)) return new Set();
+  const candidates = analysis.regions
+    .map((region, index) => ({ region, index }))
+    .filter(({ region }) => {
+      if (region.type !== 'figure' || region.captionBBox || region.confidence < 0.45) return false;
+      const [, , width, height] = region.bbox;
+      const aspect = width / Math.max(1, height);
+      return width >= 80 && width <= 180
+        && height >= 80 && height <= 180
+        && aspect >= 0.6 && aspect <= 1.5;
+    });
+  return candidates.length >= 3
+    ? new Set(candidates.map(({ index }) => index))
+    : new Set();
+}
+
 function withoutFollowingTableCaption(
   doc: Doc,
   pageIndex: number,
@@ -425,6 +489,33 @@ function formulaProseLike(block: Doc['blocks'][number]): boolean {
   return text.length >= 45 && words >= 6;
 }
 
+function implausibleFormulaInk(doc: Doc, pageIndex: number, rect: Rect): boolean {
+  const page = doc.pages[pageIndex]!;
+  const characters = doc.blocks
+    .flatMap((block) => (block.characterRects ?? []).map((character) => ({
+      ...character, blockOrder: block.order,
+    })))
+    .filter((character) => {
+      if (character.pageIndex !== pageIndex || !character.ch.trim()) return false;
+      const centerX = character.rect.x + character.rect.w / 2;
+      const centerY = character.rect.y + character.rect.h / 2;
+      return centerX >= rect.x && centerX <= rect.x + rect.w
+        && centerY >= rect.y && centerY <= rect.y + rect.h;
+    })
+    .sort((left, right) => left.blockOrder - right.blockOrder || left.sourceIndex - right.sourceIndex);
+  const text = characters.map((character) => character.ch).join('').replace(/\s+/g, ' ').trim();
+  const naturalWords = text.match(/[A-Za-z]{3,}/g) ?? [];
+  const functionWords = text.match(
+    /\b(?:the|a|an|and|or|of|to|in|for|with|that|this|is|are|was|were|as|by|from|on|at|shown)\b/gi,
+  ) ?? [];
+  const hasMath = /[=+*/∑∏∫√≤≥≈≠<>×÷\d]|(?:^|\s)-(?:\s|$)/u.test(text);
+  if (naturalWords.length >= 3 && functionWords.length >= 1 && !hasMath) return true;
+  // Wide, one-line Vision boxes with no PDF ink are commonly hallucinated
+  // strips across a column gutter or publisher footer. A real raster-only
+  // formula normally has a materially taller tight box.
+  return characters.length === 0 && rect.w >= page.width * 0.35 && rect.h <= 28;
+}
+
 function withoutAdjacentFormulaProse(
   doc: Doc,
   pageIndex: number,
@@ -474,6 +565,7 @@ export function reconcileVisionLayout(
   for (const page of doc.pages) {
     const analysis = byPage.get(page.pageIndex)!;
     const implausibleFormulaIndices = implausibleFormulaClusterIndices(analysis);
+    const portraitIndices = portraitClusterIndices(doc, page.pageIndex, analysis);
     analysis.regions.forEach((vision, regionIndex) => {
       if (!(vision.type in ASSET_KIND)) return;
       if (implausibleFormulaIndices.has(regionIndex)) {
@@ -485,7 +577,7 @@ export function reconcileVisionLayout(
         });
         return;
       }
-      if (vision.confidence < minimumConfidence) {
+      if (vision.confidence < minimumConfidence && !portraitIndices.has(regionIndex)) {
         unresolved.push({ pageIndex: page.pageIndex, regionIndex, type: vision.type, reason: 'low-confidence' });
         return;
       }
@@ -499,6 +591,10 @@ export function reconcileVisionLayout(
         unresolved.push({ pageIndex: page.pageIndex, regionIndex, type: vision.type, reason: 'caption-unmatched' });
         return;
       }
+      if (vision.type === 'display_formula' && implausibleFormulaInk(doc, page.pageIndex, rect)) {
+        unresolved.push({ pageIndex: page.pageIndex, regionIndex, type: vision.type, reason: 'body-prose-density' });
+        return;
+      }
       const captionBoundaries = vision.type === 'table' && caption
         ? [caption.rect]
         : [caption?.rect, captionRect];
@@ -508,6 +604,21 @@ export function reconcileVisionLayout(
       rect = withoutTopMarginFurniture(doc, page.pageIndex, rect, vision.type);
       rect = withoutTrailingProse(doc, page.pageIndex, rect, vision.type);
       rect = withPrecedingTextClearance(doc, page.pageIndex, rect, vision.type);
+      if (vision.type === 'figure' || vision.type === 'table') {
+        const foreignCaption = doc.blocks.find((block) => (
+          block.pageIndex === page.pageIndex
+          && block.id !== caption?.id
+          && (vision.type === 'figure' ? isFigureCaptionText(block.text ?? '') : isTableCaptionText(block.text ?? ''))
+          && intersectionArea(rect, block.rect) / Math.max(1, block.rect.w * block.rect.h) >= 0.2
+        ));
+        if (foreignCaption) {
+          // The Vision box is attached to the wrong numbered caption. Reject
+          // it so the deterministic caption-gap recovery can rebuild both
+          // neighbouring figures independently instead of duplicating one.
+          unresolved.push({ pageIndex: page.pageIndex, regionIndex, type: vision.type, reason: 'caption-overlap' });
+          return;
+        }
+      }
       const asset: DetectedAssetRegion = {
         id: `vision-p${page.pageIndex + 1}-${vision.type.replace('display_', '')}-${regionIndex + 1}`,
         kind: ASSET_KIND[vision.type as keyof typeof ASSET_KIND],
@@ -523,8 +634,11 @@ export function reconcileVisionLayout(
         block.pageIndex === page.pageIndex && intersectionArea(block.rect, rect) > 0
       ));
       const geometry = validateImmutableRegion(asset, page, intersecting, caption?.rect);
-      if (!geometry.pass) {
-        unresolved.push({ pageIndex: page.pageIndex, regionIndex, type: vision.type, reason: geometry.issues[0]! });
+      const blockingGeometryIssues = portraitIndices.has(regionIndex)
+        ? geometry.issues.filter((issue) => issue !== 'body-prose-density')
+        : geometry.issues;
+      if (blockingGeometryIssues.length) {
+        unresolved.push({ pageIndex: page.pageIndex, regionIndex, type: vision.type, reason: blockingGeometryIssues[0]! });
         return;
       }
       assetRegions.push(asset);

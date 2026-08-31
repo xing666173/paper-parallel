@@ -275,6 +275,71 @@ describe('generic academic translation protocol', () => {
     ]);
   });
 
+  it('rejects an unchanged English biography returned as its translation', () => {
+    const source: TranslationBlockRequest = {
+      blockId: 'bio', kind: 'paragraph',
+      source: 'Xuehai Qian is a professor at the University of Southern California.',
+      alignmentMode: 'sentence-candidates',
+      sourceSentences: [{
+        id: 'bio-s-1',
+        text: 'Xuehai Qian is a professor at the University of Southern California.',
+      }],
+      protectedTokens: [],
+    };
+    const response: TranslationResponse = { blocks: [{
+      blockId: 'bio', translation: source.source,
+      alignmentGroups: [{ sourceSentenceIds: ['bio-s-1'], targetSegments: [source.source] }],
+      newTerms: [], warnings: [],
+    }] };
+
+    const result = validateBatchResponse([source], response);
+
+    expect(result.ok).toBe(false);
+    expect(result.issues.map((issue) => issue.code)).toContain('target-language-missing');
+  });
+
+  it('does not require Chinese characters for author-name blocks', () => {
+    const source: TranslationBlockRequest = {
+      blockId: 'authors', kind: 'author', source: 'Xuehai Qian and Zhibin Yu',
+      alignmentMode: 'sentence-candidates',
+      sourceSentences: [{ id: 'authors-s-1', text: 'Xuehai Qian and Zhibin Yu' }],
+      protectedTokens: [],
+    };
+    const response: TranslationResponse = { blocks: [{
+      blockId: 'authors', translation: source.source,
+      alignmentGroups: [{ sourceSentenceIds: ['authors-s-1'], targetSegments: [source.source] }],
+      newTerms: [], warnings: [],
+    }] };
+
+    expect(validateBatchResponse([source], response).ok).toBe(true);
+  });
+
+  it('treats a hyphenated identifier suffix as unsigned while preserving real negative numbers', () => {
+    expect(extractProtectedTokens('MNT4-753 uses -12 units and BLS12-381 uses 20%.'))
+      .toEqual(['753', '-12', '381', '20%']);
+  });
+
+  it('recognizes protected numerals immediately after translated Chinese labels', () => {
+    expect(extractProtectedTokens('图11显示提升3.9倍。')).toEqual(['11', '3.9']);
+  });
+
+  it('validates explicit protected title terms as ordinary literal occurrences', () => {
+    const source: TranslationBlockRequest = {
+      blockId: 'title', kind: 'title',
+      source: 'Falic: An FPGA-Based Accelerator',
+      alignmentMode: 'sentence-candidates',
+      sourceSentences: [{ id: 'title-s-1', text: 'Falic: An FPGA-Based Accelerator' }],
+      protectedTokens: ['Falic', 'FPGA'],
+    };
+    const translation = 'Falic：一种基于FPGA的加速器';
+
+    expect(validateBatchResponse([source], { blocks: [{
+      blockId: 'title', translation,
+      alignmentGroups: [{ sourceSentenceIds: ['title-s-1'], targetSegments: [translation] }],
+      newTerms: [], warnings: [],
+    }] }).ok).toBe(true);
+  });
+
   it('counts complete numeric tokens and permits extra numerals introduced from number words', () => {
     const source: TranslationBlockRequest = {
       blockId: 'numeric-words', kind: 'paragraph',

@@ -24,13 +24,17 @@ export interface ParsedLine {
 
 const Y_TOLERANCE = 4;   // 同一行 y 容差(px)
 const X_GAP = 24;        // 同一基线内 x 间隙阈值:超过即视为另一栏的另一行
-const CENTER_GUTTER_MIN = 16;
+// IEEE two-column PDFs commonly leave only about 12pt between the final glyph
+// of the left lane and the first glyph of the right lane. Keeping this above
+// 16pt silently merges both physical lines and corrupts every later stage.
+const CENTER_GUTTER_MIN = 10;
 
 function crossesPageCenter(prev: SimpleTextItem, next: SimpleTextItem, pageW?: number): boolean {
   if (!pageW) return false;
   const center = pageW / 2;
   const gap = next.x - (prev.x + prev.w);
-  return gap > CENTER_GUTTER_MIN && prev.x + prev.w < center && next.x > center;
+  const gutterThreshold = Math.max(CENTER_GUTTER_MIN, pageW * 0.018);
+  return gap > gutterThreshold && prev.x + prev.w < center && next.x > center;
 }
 
 /**

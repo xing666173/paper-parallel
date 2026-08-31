@@ -84,6 +84,32 @@ describe('cancellable translation coordinator', () => {
     expect(events[0]).toBe('cache-hit');
   });
 
+  it('revalidates stale cache entries and retranslates an unchanged English paragraph', async () => {
+    const source = block('bio', 'Xuehai Qian is a professor at the University of Southern California.');
+    const stale = translated('bio', source.source);
+    const requested: string[][] = [];
+    const saved: string[] = [];
+
+    const result = await runTranslationTask({
+      projectId: 'p1', modelId: 'deepseek-v4-flash',
+      batches: [batch('batch-1', [source])], concurrency: 1, maxRetries: 0,
+      request: async (pending) => {
+        requested.push(pending.blocks.map((item) => item.blockId));
+        return {
+          blocks: [translated('bio', 'Xuehai Qian 是南加州大学的一名教授。')],
+          usage: { promptTokens: 5, completionTokens: 2 },
+        };
+      },
+      findCached: async () => stale,
+      saveValidated: async (record) => { saved.push(record.translation); },
+      onEvent: () => undefined,
+    });
+
+    expect(requested).toEqual([['bio']]);
+    expect(saved).toEqual(['Xuehai Qian 是南加州大学的一名教授。']);
+    expect(result.cachedBlockIds).toEqual([]);
+  });
+
   it('retries an invalid batch without persisting the rejected response', async () => {
     let attempts = 0;
     const saved: string[] = [];

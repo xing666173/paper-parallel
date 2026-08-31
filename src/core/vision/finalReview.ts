@@ -80,7 +80,16 @@ function calibratedSeverity(
   // passed the global marker/content/hash gates before this review. Keep the
   // model's missing-text/asset observations as useful warnings, while visible
   // clipping, overlap, corruption and changed assets remain blocking.
-  if (type === 'asset_missing' || type === 'missing_text') return 'warning';
+  if (type === 'asset_missing') {
+    // Page-local movement is common for numbered figures and tables, but
+    // author portraits/headshots are uncaptioned assets that otherwise have
+    // no deterministic text marker. Missing them anywhere in the final author
+    // section is a real document-level loss and must remain blocking.
+    if (/\b(?:author\s+)?(?:portrait|headshot|photo)s?\b|头像|肖像/i.test(evidence)
+      && confidence >= 0.85) return 'severe';
+    return 'warning';
+  }
+  if (type === 'missing_text') return 'warning';
   if (severity === 'severe') return severity;
   if (confidence >= 0.8
     && (type === 'asset_changed' || type === 'formula_changed' || type === 'table_changed')) return 'severe';
@@ -216,7 +225,7 @@ export interface RunVisionFinalReviewOptions {
 }
 
 export const VISION_FINAL_REVIEW_CONCURRENCY = 1;
-export const VISION_FINAL_REVIEW_PAGE_TIMEOUT_MS = 210_000;
+export const VISION_FINAL_REVIEW_PAGE_TIMEOUT_MS = 300_000;
 export const VISION_FINAL_REVIEW_RENDER_SCALE = 1.5;
 export const VISION_FINAL_REVIEW_FALLBACK_RENDER_SCALE = 1;
 export const VISION_FINAL_REVIEW_LAST_RESORT_RENDER_SCALE = 0.75;
@@ -375,8 +384,12 @@ export async function runVisionFinalReview(options: RunVisionFinalReviewOptions)
       responseFormat: 'json_object',
       stream: false,
       maxTokens: compact ? 384 : 768,
-      timeoutMs: 30_000,
-      hardTimeoutMs: compact ? 30_000 : 45_000,
+      // Non-streaming multimodal inference emits no response bytes while the
+      // model is inspecting up to three high-resolution pages. A 30-second
+      // inactivity window aborts healthy requests before their first byte.
+      // The surrounding per-page 210-second deadline remains the hard guard.
+      timeoutMs: compact ? 75_000 : 90_000,
+      hardTimeoutMs: compact ? 90_000 : 120_000,
       signal: pageSignal,
       onStreamProgress: (progress) => {
         if (progress.phase === 'connected') {
@@ -396,85 +409,104 @@ export async function runVisionFinalReview(options: RunVisionFinalReviewOptions)
       ] }],
       });
     };
-    let completion: ChatCompletionResult;
-    try {
-      completion = await requestReview(false);
-    } catch (error) {
-      if (!(error instanceof Error)
-        || !['DeepSeekOutputLimitError', 'DeepSeekTimeoutError', 'TypeError'].includes(error.name)) throw error;
-      options.onPagePhase?.({ targetPageIndex, totalPages: options.targetPdf.numPages, phase: 'retrying' });
-      completion = await requestReview(true);
-    }
+    const requestReviewResilient = async (compact: boolean): Promise<ChatCompletionResult> => {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          return await requestReview(compact || attempt > 0);
+        } catch (error) {
+          const recoverable = error instanceof Error
+            && ['DeepSeekOutputLimitError', 'DeepSeekTimeoutError', 'TypeError'].includes(error.name);
+          if (!recoverable || attempt >= 2 || pageSignal.aborted) throw error;
+          options.onPagePhase?.({ targetPageIndex, totalPages: options.targetPdf.numPages, phase: 'retrying' });
+        }
+      }
+      throw new Error('Vision 成品质检请求失败');
+    };
+    let completion = await requestReviewResilient(false);
     options.onPagePhase?.({ targetPageIndex, totalPages: options.targetPdf.numPages, phase: 'returned' });
     if (pageSignal.aborted) throw new DOMException('已停止', 'AbortError');
-    let pageReport: VisionFinalPageReport;
-    try {
-      pageReport = parseVisionFinalPageReport(completion.content, targetPageIndex);
-    } catch (error) {
-      options.onPageInvalid?.({
-        targetPageIndex,
-        totalPages: options.targetPdf.numPages,
-        reason: error instanceof Error ? error.message : '未知响应格式错误',
-      });
-      // JSON mode still occasionally returns a prose wrapper or malformed
-      // object. This is a recoverable model-format failure, so request one
-      // compact severe-only report before failing the completed document.
-      options.onPagePhase?.({ targetPageIndex, totalPages: options.targetPdf.numPages, phase: 'retrying' });
-      completion = await requestReview(true);
-      options.onPagePhase?.({ targetPageIndex, totalPages: options.targetPdf.numPages, phase: 'returned' });
+    let pageReport: VisionFinalPageReport | undefined;
+    for (let parseAttempt = 0; parseAttempt < 3 && !pageReport; parseAttempt += 1) {
       try {
         pageReport = parseVisionFinalPageReport(completion.content, targetPageIndex);
-      } catch (retryError) {
+      } catch (error) {
         options.onPageInvalid?.({
           targetPageIndex,
           totalPages: options.targetPdf.numPages,
-          reason: retryError instanceof Error ? retryError.message : '未知响应格式错误',
+          reason: error instanceof Error ? error.message : '未知响应格式错误',
         });
-        throw retryError;
+        // JSON mode can still return a prose wrapper or truncated object.
+        // This is a recoverable model-format failure; allow two compact
+        // severe-only retries before failing the completed document.
+        if (parseAttempt >= 2) throw error;
+        options.onPagePhase?.({ targetPageIndex, totalPages: options.targetPdf.numPages, phase: 'retrying' });
+        completion = await requestReviewResilient(true);
+        options.onPagePhase?.({ targetPageIndex, totalPages: options.targetPdf.numPages, phase: 'returned' });
       }
     }
+    if (!pageReport) throw new Error('Vision 成品质检 JSON 无法解析');
     const severeCandidates = pageReport.issues.filter(isBlockingIssue);
     if (severeCandidates.length) {
-      let contentReported = false;
-      const confirmation = await complete({
-        baseUrl: options.baseUrl,
-        apiKey: options.apiKey,
-        model: VISION_LAYOUT_MODEL,
-        thinkingMode: 'disabled',
-        responseFormat: 'json_object',
-        stream: false,
-        maxTokens: 384,
-        timeoutMs: 30_000,
-        hardTimeoutMs: 45_000,
-        signal: pageSignal,
-        onStreamProgress: (progress) => {
-          if (progress.phase === 'connected') {
-            options.onPagePhase?.({ targetPageIndex, totalPages: options.targetPdf.numPages, phase: 'connected' });
-          } else if (progress.phase === 'content' && !contentReported) {
-            contentReported = true;
-            options.onPagePhase?.({ targetPageIndex, totalPages: options.targetPdf.numPages, phase: 'content' });
-          }
-        },
-        messages: [{ role: 'user', content: [
-          {
-            type: 'text',
-            text: buildVisionFinalConfirmationPrompt(
-              targetPageIndex + 1,
-              severeCandidates.map((issue) => ({
-                type: issue.type,
-                bbox: issue.bbox,
-                evidence: issue.evidence,
-              })),
-            ),
+      const requestConfirmation = () => {
+        let contentReported = false;
+        return complete({
+          baseUrl: options.baseUrl,
+          apiKey: options.apiKey,
+          model: VISION_LAYOUT_MODEL,
+          thinkingMode: 'disabled',
+          responseFormat: 'json_object',
+          stream: false,
+          maxTokens: 384,
+          // A focused confirmation still carries the same high-resolution
+          // source and target images. Give it the same inactivity allowance
+          // as a compact first-pass review and let the page deadline remain
+          // the absolute guard.
+          timeoutMs: 90_000,
+          hardTimeoutMs: 120_000,
+          signal: pageSignal,
+          onStreamProgress: (progress) => {
+            if (progress.phase === 'connected') {
+              options.onPagePhase?.({ targetPageIndex, totalPages: options.targetPdf.numPages, phase: 'connected' });
+            } else if (progress.phase === 'content' && !contentReported) {
+              contentReported = true;
+              options.onPagePhase?.({ targetPageIndex, totalPages: options.targetPdf.numPages, phase: 'content' });
+            }
           },
-          // Changed-asset candidates require the same source references used
-          // by the first pass. A target-only confirmation can mistake a
-          // compact but intact ruled table for prose merely because its
-          // typography differs from the surrounding translated text.
-          ...content.slice(1),
-        ] }],
-      });
-      const confirmationReport = parseVisionFinalPageReport(confirmation.content, targetPageIndex);
+          messages: [{ role: 'user', content: [
+            {
+              type: 'text',
+              text: buildVisionFinalConfirmationPrompt(
+                targetPageIndex + 1,
+                severeCandidates.map((issue) => ({
+                  type: issue.type,
+                  bbox: issue.bbox,
+                  evidence: issue.evidence,
+                })),
+              ),
+            },
+            // Changed-asset candidates require the same source references used
+            // by the first pass. A target-only confirmation can mistake a
+            // compact but intact ruled table for prose merely because its
+            // typography differs from the surrounding translated text.
+            ...content.slice(1),
+          ] }],
+        });
+      };
+      let confirmationReport: VisionFinalPageReport | undefined;
+      for (let attempt = 0; attempt < 3 && !confirmationReport; attempt += 1) {
+        try {
+          const confirmation = await requestConfirmation();
+          confirmationReport = parseVisionFinalPageReport(confirmation.content, targetPageIndex);
+        } catch (error) {
+          const recoverable = error instanceof Error && (
+            ['DeepSeekOutputLimitError', 'DeepSeekTimeoutError', 'TypeError'].includes(error.name)
+            || error.message.startsWith('Vision 成品质检')
+          );
+          if (!recoverable || attempt >= 2 || pageSignal.aborted) throw error;
+          options.onPagePhase?.({ targetPageIndex, totalPages: options.targetPdf.numPages, phase: 'retrying' });
+        }
+      }
+      if (!confirmationReport) throw new Error('Vision 成品质检确认响应无效');
       const candidateTypes = new Set(severeCandidates.map((issue) => issue.type));
       pageReport = {
         targetPageIndex,

@@ -21,6 +21,35 @@ const IMMUTABLE_KINDS = new Set<SemanticUnitKind>([
   'figure', 'table', 'formula', 'code', 'page-furniture',
 ]);
 
+function isAuthorBiographyPage(doc: Doc, pageIndex: number): boolean {
+  const text = doc.blocks
+    .filter((block) => block.pageIndex === pageIndex)
+    .map((block) => block.text ?? '')
+    .join('\n');
+  return (text.match(/\breceived\b[\s\S]{0,160}?\bdegree\b/gi) ?? []).length >= 3;
+}
+
+function isPortraitAsset(doc: Doc, asset: DetectedAssetRegion): boolean {
+  if (asset.kind !== 'figure' || asset.captionUnitId) return false;
+  const page = doc.pages[asset.pageIndex];
+  if (!page) return false;
+  const widthRatio = asset.rect.w / page.width;
+  const heightRatio = asset.rect.h / page.height;
+  const aspect = asset.rect.w / Math.max(1, asset.rect.h);
+  return widthRatio >= 0.08 && widthRatio <= 0.22
+    && heightRatio >= 0.08 && heightRatio <= 0.22
+    && aspect >= 0.55 && aspect <= 1.5;
+}
+
+function authorPortraitPages(doc: Doc, assets: readonly DetectedAssetRegion[]): Set<number> {
+  const counts = new Map<number, number>();
+  for (const asset of assets) {
+    if (!isPortraitAsset(doc, asset) || !isAuthorBiographyPage(doc, asset.pageIndex)) continue;
+    counts.set(asset.pageIndex, (counts.get(asset.pageIndex) ?? 0) + 1);
+  }
+  return new Set([...counts].filter(([, count]) => count >= 3).map(([pageIndex]) => pageIndex));
+}
+
 function translationKind(kind: SemanticUnitKind): TranslationBlockKind {
   if (kind === 'author') return 'author';
   if (kind === 'affiliation') return 'affiliation';
@@ -39,13 +68,22 @@ export function buildTranslationRequestsFromDoc(doc: Doc): TranslationBlockReque
     .filter((unit) => unit.kind !== 'reference' && !IMMUTABLE_KINDS.has(unit.kind) && Boolean(unit.sourceText?.trim()))
     .map((unit) => {
       const candidates = buildSourceSentenceCandidates(unit.id, unit.sourceText!);
+      const titleTerms = unit.kind === 'title'
+        ? [
+            unit.sourceText!.match(/^\s*([A-Z][A-Za-z0-9-]{2,})\s*:/)?.[1],
+            ...(unit.sourceText!.match(/\b[A-Z][A-Z0-9]{1,}(?:-[A-Z0-9]{2,})*\b/g) ?? []),
+          ].filter((term): term is string => Boolean(term))
+        : [];
       return {
         blockId: unit.id,
         kind: translationKind(unit.kind),
         source: unit.sourceText!,
         alignmentMode: candidates.mode,
         sourceSentences: candidates.sentences,
-        protectedTokens: extractProtectedTokens(unit.sourceText!),
+        protectedTokens: [...new Set([
+          ...extractProtectedTokens(unit.sourceText!),
+          ...titleTerms,
+        ])],
       };
     });
 }
@@ -189,6 +227,110 @@ function mergeFirstPageTitleContinuations(
   return units.filter((unit) => !continuationIds.has(unit.id));
 }
 
+function visualCharacterRowText(characters: readonly CharacterRect[]): string {
+  const ordered = [...characters]
+    .filter((character) => character.ch.trim().length > 0)
+    .sort((left, right) => left.rect.x - right.rect.x || left.sourceIndex - right.sourceIndex);
+  const seen = new Set<string>();
+  let result = '';
+  let previous: CharacterRect | undefined;
+  for (const character of ordered) {
+    const key = [
+      Math.round(character.rect.x * 10), Math.round(character.rect.y * 10),
+      Math.round(character.rect.w * 10), character.ch,
+    ].join(':');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (previous) {
+      const gap = character.rect.x - (previous.rect.x + previous.rect.w);
+      if (gap > Math.max(1.5, Math.min(previous.rect.h, character.rect.h) * 0.18)) result += ' ';
+    }
+    result += character.ch;
+    previous = character;
+  }
+  return result.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Small-caps IEEE headings are occasionally emitted as several overlapping
+ * text blocks on the same visual baseline. Reconstruct that baseline from
+ * character geometry and remove only those heading glyphs from the following
+ * prose block, leaving its body lines translatable.
+ */
+function repairSplitHeadingRows(
+  doc: Doc,
+  inputUnits: SemanticUnit[],
+  regions: LayoutRegion[],
+  blocks: ReadonlyMap<string, Doc['blocks'][number]>,
+): SemanticUnit[] {
+  let units = inputUnits;
+  const emptied = new Set<string>();
+  for (const heading of [...units].filter((unit) => unit.kind === 'heading' && Boolean(unit.sourceText))) {
+    const headingBlock = blocks.get(heading.sourceBlockId ?? heading.id);
+    if (!headingBlock || !/^\s*(?:\d{1,2}(?:\.\d+)*|[IVXLCDM]+)\./.test(heading.sourceText!)) continue;
+    const headingCharacters = (headingBlock.characterRects ?? [])
+      .filter((character) => character.pageIndex === headingBlock.pageIndex && character.ch.trim());
+    if (!headingCharacters.length) continue;
+    const rowTop = Math.min(...headingCharacters.map((character) => character.rect.y));
+    const rowBottom = Math.max(...headingCharacters.map((character) => character.rect.y + character.rect.h));
+    const rowCenter = (rowTop + rowBottom) / 2;
+    const pageWidth = doc.pages[headingBlock.pageIndex]?.width ?? doc.meta.paperWidth;
+    const candidates = [...blocks.values()].filter((candidate) => (
+      candidate.pageIndex === headingBlock.pageIndex
+      && ['section', 'paragraph'].includes(candidate.type)
+      && sameVisualColumn(candidate, headingBlock, pageWidth)
+      && (candidate.characterRects ?? []).some((character) => {
+        const center = character.rect.y + character.rect.h / 2;
+        return character.pageIndex === headingBlock.pageIndex && Math.abs(center - rowCenter) <= 3.5;
+      })
+    ));
+    const rowCharacters = candidates.flatMap((candidate) => (
+      (candidate.characterRects ?? []).filter((character) => {
+        const center = character.rect.y + character.rect.h / 2;
+        return character.pageIndex === headingBlock.pageIndex && Math.abs(center - rowCenter) <= 3.5;
+      })
+    ));
+    const reconstructed = visualCharacterRowText(rowCharacters);
+    const headingWords = reconstructed.match(/[A-Za-z\u3400-\u9fff]{2,}/g) ?? [];
+    if (!/^\s*(?:\d{1,2}(?:\.\d+)*|[IVXLCDM]+)\./.test(reconstructed)
+      || headingWords.length < 2 || reconstructed.length > 120) continue;
+    heading.sourceText = reconstructed;
+    heading.protectedTokens = extractProtectedTokens(reconstructed);
+
+    for (const candidate of candidates) {
+      if (candidate.id === headingBlock.id || !candidate.text || !candidate.characterRects?.length) continue;
+      const unit = units.find((item) => (item.sourceBlockId ?? item.id) === candidate.id);
+      if (!unit?.sourceText || unit.sourceText !== candidate.text) continue;
+      const masked = new Uint8Array(candidate.text.length);
+      for (const character of candidate.characterRects) {
+        const center = character.rect.y + character.rect.h / 2;
+        if (character.pageIndex !== headingBlock.pageIndex || Math.abs(center - rowCenter) > 3.5) continue;
+        for (let index = Math.max(0, character.sourceIndex);
+          index < Math.min(candidate.text.length, character.sourceIndex + character.ch.length);
+          index += 1) masked[index] = 1;
+      }
+      const cleaned = [...candidate.text]
+        .map((character, index) => masked[index] ? ' ' : character)
+        .join('')
+        .split(/\r?\n/)
+        .map((line) => line.replace(/[ \t]+/g, ' ').trim())
+        .filter(Boolean)
+        .join('\n');
+      if (!cleaned) emptied.add(unit.id);
+      else {
+        unit.sourceText = cleaned;
+        unit.protectedTokens = extractProtectedTokens(cleaned);
+      }
+    }
+  }
+  if (!emptied.size) return units;
+  for (const region of regions) {
+    region.orderedUnitIds = region.orderedUnitIds.filter((unitId) => !emptied.has(unitId));
+  }
+  units = units.filter((unit) => !emptied.has(unit.id));
+  return units;
+}
+
 function repairHeadingRegionOrder(
   doc: Doc,
   units: SemanticUnit[],
@@ -316,6 +458,7 @@ function proseHeavyFormulaRegion(doc: Doc, asset: DetectedAssetRegion): boolean 
   const words = text.match(/[A-Za-z]{3,}/g) ?? [];
   const functionWords = text.match(/\b(?:the|a|an|and|or|of|to|in|for|with|that|this|is|are|was|were|as|by|from|on|at)\b/gi) ?? [];
   const alphabeticCharacters = text.match(/[A-Za-z]/g)?.length ?? 0;
+  const hasStrongMath = /[=+*/∑∫√≤≥≈≠×÷\d]|(?:^|\s)-(?:\s|$)/u.test(text);
   // Vision often encloses an entire prose line merely because it contains an
   // inline equation. Keeping that wide rectangle as pixels leaves the prose
   // untranslated. Reject only regions whose inside text is clearly prose;
@@ -327,7 +470,12 @@ function proseHeavyFormulaRegion(doc: Doc, asset: DetectedAssetRegion): boolean 
     // Four natural words plus a function word are already incompatible with
     // a tight display-formula crop. Formula symbols embedded in a sentence
     // are reconstructed later from their character geometry.
-    || (words.length >= 3 && functionWords.length >= 1 && alphabeticCharacters >= 18);
+    || (words.length >= 3 && functionWords.length >= 1 && alphabeticCharacters >= 18)
+    // Short IEEE headings and prose tails are another recurring false
+    // positive: Vision encloses a whole column-width line because an inline
+    // footnote marker or italic heading resembles mathematics. A true formula
+    // crop of this width still carries an operator or a digit.
+    || (!hasStrongMath && (words.length >= 3 || alphabeticCharacters >= 14));
 }
 
 function trimTableBeforeFollowingProse(
@@ -522,7 +670,7 @@ function withoutScatteredMathLines(source: string): string {
       if (!line) return false;
       if (naturalWordCount(line) >= 2) return true;
       if (line.length > 40) return true;
-      return !(/[=+\-*/∑∫√≤≥≈≠⌈⌉λ𝑎-𝑧𝛼-𝜔α-ωΑ-Ω\d]/u.test(line)
+      return !(/[=+\-*/∑∫√≤≥≈≠⌈⌉⎧⎨⎩⎫⎬⎭λ𝑎-𝑧𝛼-𝜔α-ωΑ-Ω\d]/u.test(line)
         || /^(?:[A-Za-z]\s*){1,4}$/u.test(line));
     });
   const cleaned = filtered.map((line, lineIndex) => {
@@ -547,7 +695,7 @@ function withoutScatteredMathLines(source: string): string {
       // with its remaining terms followed by explanatory prose on this line.
       // That prefix is part of the equation, not an unrelated PDF glyph run.
       if (/[=+\-*/]\s*$/.test(filtered[lineIndex - 1]?.trim() ?? '')) return line;
-      const mathematicalPrefix = /[=+*/∑∫√≤≥≈≠⌈⌉λ𝑎-𝑧𝛼-𝜔α-ωΑ-Ω\d]/u.test(fragmentPrefix)
+      const mathematicalPrefix = /[=+*/∑∫√≤≥≈≠⌈⌉⎧⎨⎩⎫⎬⎭λ𝑎-𝑧𝛼-𝜔α-ωΑ-Ω\d]/u.test(fragmentPrefix)
         || (shortWords.length > 0 && shortWords.every((word) => word.length === 1));
       if (!mathematicalPrefix) return line;
       return line.slice(firstWord.index);
@@ -572,10 +720,55 @@ function hasScatteredMathLinesAroundProse(source: string): boolean {
   const isMathFragment = (line: string): boolean => {
     const naturalWords = line.match(/[A-Za-z]{3,}/g)?.length ?? 0;
     if (naturalWords >= 2 || line.length > 40) return false;
-    return /[=+\-*/∑∫√≤≥≈≠⌈⌉λ𝑎-𝑧𝛼-𝜔α-ωΑ-Ω\d]/u.test(line)
+    return /[=+\-*/∑∫√≤≥≈≠⌈⌉⎧⎨⎩⎫⎬⎭λ𝑎-𝑧𝛼-𝜔α-ωΑ-Ω\d]/u.test(line)
       || /^(?:[A-Za-z]\s*){1,4}$/u.test(line);
   };
   return lines.slice(0, naturalProseIndex).filter(isMathFragment).length >= 2;
+}
+
+function normalizeDetachedSubscriptLines(source: string): string {
+  const lines = source.split(/\r?\n/);
+  const sentenceWords = new Set([
+    'the', 'this', 'that', 'these', 'those', 'when', 'where', 'while', 'although',
+    'however', 'therefore', 'because', 'since', 'for', 'from', 'with', 'without',
+    'into', 'onto', 'each', 'one', 'we', 'it', 'our',
+  ]);
+  const result: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const marker = lines[index + 1]?.trim();
+    if (!marker || !/^[A-Za-z]{2,6}$/.test(marker)) {
+      result.push(lines[index]!);
+      continue;
+    }
+    let markerCount = 0;
+    while (lines[index + markerCount + 1]?.trim().toLocaleLowerCase() === marker.toLocaleLowerCase()) {
+      markerCount += 1;
+    }
+    // Detached subscripts emitted by PDF.js occur as repeated identical rows
+    // after the variables on the preceding prose line. Requiring at least two
+    // prevents ordinary one-word wrapped lines from being rewritten.
+    if (markerCount < 2) {
+      result.push(lines[index]!);
+      continue;
+    }
+    const collapsed = lines[index]!.replace(/\b([A-Z])\s+([a-z][A-Za-z]{2,})\b/g, '$1$2');
+    const variablePattern = /\b(?:[A-Z][a-zA-Z]{2,}|[a-z]+[A-Z][A-Za-z]*)\b/g;
+    const candidates = [...collapsed.matchAll(variablePattern)]
+      .filter((match) => !sentenceWords.has(match[0].toLocaleLowerCase()));
+    if (candidates.length < markerCount) {
+      result.push(lines[index]!);
+      continue;
+    }
+    let candidateIndex = 0;
+    const normalized = collapsed.replace(variablePattern, (word) => {
+      if (sentenceWords.has(word.toLocaleLowerCase()) || candidateIndex >= markerCount) return word;
+      candidateIndex += 1;
+      return `${word}_${marker}`;
+    });
+    result.push(normalized);
+    index += markerCount;
+  }
+  return result.join('\n').trim();
 }
 
 function nearVerifiedFormula(
@@ -605,7 +798,15 @@ function isFormulaExtractionFragment(block: Doc['blocks'][number], asset: Detect
   if (!rect) return false;
   const text = block.text?.trim() ?? '';
   const naturalWords = text.match(/[A-Za-z]{3,}/g)?.length ?? 0;
-  if (naturalWords > 2 || !/[=+\-*/∑∫√≤≥≈≠⌈⌉λ𝑎-𝑧𝛼-𝜔α-ωΑ-Ω\d]/u.test(text)) return false;
+  const functionWords = text.match(
+    /\b(?:the|a|an|and|or|of|to|in|for|with|that|this|is|are|was|were|as|by|from|on|at)\b/gi,
+  ) ?? [];
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const fragmentedFormula = functionWords.length === 0
+    && lines.length >= 3
+    && lines.filter((line) => line.length <= 16).length / lines.length >= 0.7;
+  if ((naturalWords > 2 && !fragmentedFormula)
+    || !/[=+\-*/∑∫√≤≥≈≠⌈⌉⎧⎨⎩λ𝑎-𝑧𝛼-𝜔α-ωΑ-Ω\d]/u.test(text)) return false;
   return intersectionArea(rect, asset.rect) / Math.max(1, rect.w * rect.h) >= 0.05;
 }
 
@@ -777,7 +978,13 @@ function withoutEmbeddedMarginFurniture(doc: Doc, block: Doc['blocks'][number], 
       const page = doc.pages[character.pageIndex];
       if (!page) return false;
       const centerY = character.rect.y + character.rect.h / 2;
-      return centerY < page.height * 0.1 || centerY > page.height * 0.92;
+      const outsideOwningBlock = character.pageIndex !== block.pageIndex
+        || centerY < block.rect.y - 12
+        || centerY > block.rect.y + block.rect.h + 12;
+      // Ordinary body text in IEEE papers legitimately begins near 8% of the
+      // page height. It is furniture only when its geometry is an embedded
+      // outlier from this block (typically a next-page running header).
+      return outsideOwningBlock && (centerY < page.height * 0.1 || centerY > page.height * 0.92);
     }).length;
     return { line, furniture: characters.length > 0 && nearMargin / characters.length >= 0.8 };
   });
@@ -1357,8 +1564,8 @@ function detachedFormulaGlyphs(
   ));
 }
 
-function normalizePdfNumericSpacing(source: string): string {
-  return source
+function normalizePdfNumericSpacing(source: string, allowSingleSmallCaps = false): string {
+  const normalized = source
     // Symbol-font vector accents can surface as C0 control codes (notably
     // U+0003) in PDF.js text. They cannot be rendered by Typst and otherwise
     // become visible replacement squares. The surrounding variable and
@@ -1369,7 +1576,20 @@ function normalizePdfNumericSpacing(source: string): string {
     // punctuation intact while preventing `2 . 08` from becoming four
     // independent protected tokens that are later appended to `2.08`.
     .replace(/(?<=\d)\s*[.]\s*(?=\d)/g, '.')
-    .replace(/(?<=\d)\s*([%‰×])\s*/g, '$1');
+    .replace(/(?<=\d)\s*([%‰×])\s*/g, '$1')
+    // Preserve hyphenated technical identifiers across a visual PDF line
+    // wrap. Otherwise `MNT4-\n753` becomes two protected-number contexts and
+    // a model that correctly emits `MNT4-753` can be "repaired" with a second
+    // stray 753 at the end of the sentence.
+    .replace(/\b([A-Za-z]+\d*)-[ \t]*\r?\n[ \t]*(\d+)\b/g, '$1-$2');
+  return normalized.split(/\r?\n/).map((line) => {
+    const splitSmallCaps = line.match(/\b[A-Z]\s+[A-Z]{2,}\b/g) ?? [];
+    if (splitSmallCaps.length < (allowSingleSmallCaps ? 1 : 2)) return line;
+    // Small-caps fonts are often extracted as `P ERFORMANCE C OMPARISON`.
+    // Require two such words on the same line so normal phrases like `A FPGA`
+    // are not collapsed into a false identifier.
+    return line.replace(/\b([A-Z])\s+([A-Z]{2,})\b/g, '$1$2');
+  }).join('\n');
 }
 
 const MAX_TRANSLATION_UNIT_CHARACTERS = 1_800;
@@ -1426,6 +1646,115 @@ function sameVisualColumn(
   pageWidth: number,
 ): boolean {
   return visualColumn(left, pageWidth) === visualColumn(right, pageWidth);
+}
+
+interface RecoveredCaptionLane {
+  anchor: Doc['blocks'][number];
+  sourceText: string;
+  continuationIds: string[];
+}
+
+function appendCaptionContinuation(source: string, continuation: string): string {
+  if (source.endsWith('-') && /^[a-z]/.test(continuation)) {
+    return `${source.slice(0, -1)}${continuation}`;
+  }
+  return `${source} ${continuation}`;
+}
+
+/**
+ * Some two-column PDFs emit the left caption and the right prose baseline as
+ * one span block. A narrow continuation directly below the caption is strong
+ * physical evidence that the real caption belongs to only one column.
+ */
+function recoverSplitColumnCaption(
+  doc: Doc,
+  caption: Doc['blocks'][number],
+): RecoveredCaptionLane | undefined {
+  const page = doc.pages[caption.pageIndex];
+  if (!page || caption.widthMode !== 'span' || caption.rect.w < page.width * 0.65) return undefined;
+  const firstCharacter = (caption.characterRects ?? [])
+    .filter((character) => character.pageIndex === caption.pageIndex && character.ch.trim())
+    .sort((left, right) => left.sourceIndex - right.sourceIndex)[0];
+  const captionOnLeft = (firstCharacter?.rect.x ?? caption.rect.x) < page.width / 2;
+  const candidates = doc.blocks
+    .filter((block) => {
+      if (block.id === caption.id || block.pageIndex !== caption.pageIndex) return false;
+      const centerX = block.rect.x + block.rect.w / 2;
+      const verticalGap = block.rect.y - (caption.rect.y + caption.rect.h);
+      return block.rect.w <= page.width * 0.55
+        && (centerX < page.width / 2) === captionOnLeft
+        && Math.abs(block.rect.x - caption.rect.x) <= page.width * 0.08
+        && verticalGap >= -2
+        && verticalGap <= 42
+        && block.rect.h <= 24
+        && Boolean(block.text?.trim());
+    })
+    .sort((left, right) => left.rect.y - right.rect.y || left.rect.x - right.rect.x);
+  if (!candidates.length) return undefined;
+
+  const continuations: Doc['blocks'] = [];
+  let previousBottom = caption.rect.y + caption.rect.h;
+  let combinedText = '';
+  for (const candidate of candidates) {
+    if (candidate.rect.y > previousBottom + 12 || /[.!?]\s*$/.test(combinedText)) break;
+    continuations.push(candidate);
+    combinedText = appendCaptionContinuation(combinedText, candidate.text!.trim()).trim();
+    previousBottom = candidate.rect.y + candidate.rect.h;
+  }
+  if (!continuations.length) return undefined;
+
+  const laneCharacters = (caption.characterRects ?? []).filter((character) => {
+    const centerX = character.rect.x + character.rect.w / 2;
+    return character.pageIndex === caption.pageIndex
+      && (centerX < page.width / 2) === captionOnLeft
+      && character.ch.trim();
+  });
+  let captionText = caption.text?.trim() ?? '';
+  if (laneCharacters.length) {
+    const start = Math.min(...laneCharacters.map((character) => character.sourceIndex));
+    const end = Math.max(...laneCharacters.map((character) => character.sourceIndex)) + 1;
+    const laneText = (caption.text ?? '').slice(start, end).trim();
+    if (isFigureCaptionText(laneText) || isTableCaptionText(laneText)) captionText = laneText;
+  }
+  for (const continuation of continuations) {
+    captionText = appendCaptionContinuation(captionText, continuation.text!.trim());
+  }
+
+  const laneRects = [
+    ...laneCharacters.map((character) => character.rect),
+    ...continuations.map((block) => block.rect),
+  ];
+  const lane = unionRects(laneRects);
+  if (!lane) return undefined;
+  return {
+    anchor: {
+      ...caption,
+      rect: { x: lane.x, y: caption.rect.y, w: lane.w, h: caption.rect.h },
+      widthMode: 'column',
+    },
+    sourceText: captionText.replace(/\s+/g, ' ').trim(),
+    continuationIds: continuations.map((block) => block.id),
+  };
+}
+
+function previousPhysicalContentBottom(
+  doc: Doc,
+  caption: Doc['blocks'][number],
+): number | undefined {
+  const page = doc.pages[caption.pageIndex];
+  if (!page) return undefined;
+  const captionTop = caption.rect.y;
+  const boundaries = doc.blocks.flatMap((block) => {
+    if (block.id === caption.id || block.pageIndex !== caption.pageIndex) return [];
+    const bottom = block.rect.y + block.rect.h;
+    if (bottom > captionTop - 18 || block.rect.y < page.height * 0.08) return [];
+    const overlap = Math.max(0, Math.min(
+      block.rect.x + block.rect.w,
+      caption.rect.x + caption.rect.w,
+    ) - Math.max(block.rect.x, caption.rect.x));
+    return overlap / Math.max(1, Math.min(block.rect.w, caption.rect.w)) >= 0.25 ? [bottom] : [];
+  });
+  return boundaries.sort((left, right) => right - left)[0];
 }
 
 function previousProseBottomInCaptionColumn(
@@ -1528,14 +1857,30 @@ function trailingVisualLabelClusterTop(block: Doc['blocks'][number]): number | u
   return Math.max(1, Math.min(...characters.map((character) => character.rect.y)) - 6);
 }
 
-function extendFigureThroughPrecedingVisualLabels(doc: Doc, asset: DetectedAssetRegion): void {
+function extendFigureThroughPrecedingVisualLabels(
+  doc: Doc,
+  asset: DetectedAssetRegion,
+  allAssets: readonly DetectedAssetRegion[],
+): void {
   if (asset.kind !== 'figure' || !asset.captionUnitId) return;
   const caption = doc.blocks.find((block) => block.id === asset.captionUnitId);
   if (!caption || embeddedCaptionText(caption.text ?? '', 'figure') !== (caption.text ?? '').trim()) return;
   const pageWidth = doc.pages[asset.pageIndex]?.width ?? doc.meta.paperWidth;
+  const protectedTableBlockIds = new Set(doc.blocks
+    .filter((block) => allAssets.some((other) => (
+      other !== asset
+      && other.kind === 'table'
+      && other.pageIndex === asset.pageIndex
+      && block.rect.x < other.rect.x + other.rect.w
+      && block.rect.x + block.rect.w > other.rect.x
+      && block.rect.y < other.rect.y + other.rect.h
+      && block.rect.y + block.rect.h > other.rect.y
+    )))
+    .map((block) => block.id));
   const candidates = doc.blocks
     .filter((block) => (
       block.id !== caption.id
+      && !protectedTableBlockIds.has(block.id)
       && block.pageIndex === asset.pageIndex
       && sameVisualColumn(block, caption, pageWidth)
       && block.rect.y < caption.rect.y
@@ -1562,10 +1907,142 @@ function looksLikeNumericTableBody(block: Doc['blocks'][number]): boolean {
     && numericTokens >= Math.max(4, wordTokens * 0.6);
 }
 
+function looksLikeShortTableCellLabel(block: Doc['blocks'][number]): boolean {
+  const text = block.text?.trim() ?? '';
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const numericTokens = text.match(/\d+(?:[.,]\d+)?/g)?.length ?? 0;
+  const naturalWords = text.match(/[A-Za-z]{2,}/g)?.length ?? 0;
+  return block.type !== 'caption'
+    && lines.length >= 1
+    && lines.length <= 4
+    && text.length <= 80
+    && numericTokens >= 1
+    && naturalWords <= 8
+    && !/[.!?;:]\s*$/.test(text);
+}
+
+interface CenteredSpanningTableGeometry {
+  rect: Rect;
+  bodyIds: string[];
+}
+
+/**
+ * A spanning table title can be emitted as a tiny block whose centre falls a
+ * few points into one column, while the duplicate full table text aggregate is
+ * removed during parser normalization. Recover the physical table from the
+ * numeric label blocks that remain on both sides of the centre gutter.
+ */
+function centeredSpanningTableGeometry(
+  doc: Doc,
+  caption: Doc['blocks'][number],
+): CenteredSpanningTableGeometry | undefined {
+  const page = doc.pages[caption.pageIndex];
+  if (!page || caption.widthMode !== 'column') return undefined;
+  const midpoint = page.width / 2;
+  const captionCenter = caption.rect.x + caption.rect.w / 2;
+  if (Math.abs(captionCenter - midpoint) > page.width * 0.065) return undefined;
+
+  const captionBottom = caption.rect.y + caption.rect.h;
+  const nextCaption = doc.blocks
+    .filter((block) => (
+      block.id !== caption.id
+      && block.pageIndex === caption.pageIndex
+      && block.type === 'caption'
+      && block.rect.y >= captionBottom + 24
+    ))
+    .sort((left, right) => left.rect.y - right.rect.y)[0];
+  const searchBottom = nextCaption?.rect.y ?? Math.min(page.height * 0.55, captionBottom + page.height * 0.3);
+  const candidates = doc.blocks.filter((block) => (
+    block.id !== caption.id
+    && block.pageIndex === caption.pageIndex
+    && block.rect.y >= captionBottom - 2
+    && block.rect.y + block.rect.h <= searchBottom + 2
+    && (looksLikeNumericTableBody(block) || looksLikeShortTableCellLabel(block))
+  ));
+  const left = candidates.filter((block) => block.rect.x + block.rect.w / 2 < midpoint);
+  const right = candidates.filter((block) => block.rect.x + block.rect.w / 2 >= midpoint);
+  if (!left.length || !right.length) return undefined;
+
+  const tableBottom = Math.max(...candidates.map((block) => block.rect.y + block.rect.h)) + 6;
+  if (tableBottom <= captionBottom + 12) return undefined;
+  const x = Math.min(
+    page.width * 0.07,
+    Math.min(...candidates.map((block) => block.rect.x)) - 6,
+  );
+  const rightEdge = Math.max(
+    page.width * 0.93,
+    Math.max(...candidates.map((block) => block.rect.x + block.rect.w)) + 6,
+  );
+  return {
+    rect: {
+      x,
+      y: captionBottom + 1,
+      w: rightEdge - x,
+      h: Math.min(tableBottom, searchBottom - 4) - (captionBottom + 1),
+    },
+    bodyIds: candidates.map((block) => block.id),
+  };
+}
+
+/** Stop a following figure after the contiguous numeric body of a preceding table. */
+function precedingTableBodyBottom(
+  doc: Doc,
+  figureCaption: Doc['blocks'][number],
+): number | undefined {
+  const page = doc.pages[figureCaption.pageIndex];
+  if (!page) return undefined;
+  const pageWidth = page.width;
+  const tableCaption = doc.blocks
+    .filter((block) => (
+      block.pageIndex === figureCaption.pageIndex
+      && block.type === 'caption'
+      && isTableCaptionText(block.text ?? '')
+      && block.rect.y + block.rect.h < figureCaption.rect.y - 24
+      && (
+        sameVisualColumn(block, figureCaption, pageWidth)
+        || Math.abs(block.rect.x + block.rect.w / 2 - pageWidth / 2) <= pageWidth * 0.065
+      )
+    ))
+    .sort((left, right) => right.rect.y - left.rect.y)[0];
+  if (!tableCaption) return undefined;
+
+  const captionBottom = tableCaption.rect.y + tableCaption.rect.h;
+  const candidates = doc.blocks
+    .filter((block) => (
+      block.id !== tableCaption.id
+      && block.pageIndex === figureCaption.pageIndex
+      && block.rect.y >= captionBottom - 2
+      && block.rect.y + block.rect.h < figureCaption.rect.y - 18
+      && looksLikeNumericTableBody(block)
+      && (
+        sameVisualColumn(block, figureCaption, pageWidth)
+        || tableCaption.rect.x < pageWidth / 2 && tableCaption.rect.x + tableCaption.rect.w > pageWidth / 2
+      )
+    ))
+    .sort((left, right) => left.rect.y - right.rect.y);
+  if (!candidates.length || candidates[0]!.rect.y > captionBottom + 48) return undefined;
+
+  let bottom = captionBottom;
+  let consumed = 0;
+  for (const candidate of candidates) {
+    if (consumed && candidate.rect.y > bottom + 14) break;
+    bottom = Math.max(bottom, candidate.rect.y + candidate.rect.h);
+    consumed += 1;
+  }
+  return consumed ? bottom : undefined;
+}
+
 function visualColumnBounds(doc: Doc, anchor: Doc['blocks'][number]): { x: number; w: number } {
   const pageWidth = doc.pages[anchor.pageIndex]?.width ?? doc.meta.paperWidth;
   const columnBlocks = doc.blocks.filter((block) => (
-    block.pageIndex === anchor.pageIndex && sameVisualColumn(block, anchor, pageWidth)
+    block.pageIndex === anchor.pageIndex
+    && sameVisualColumn(block, anchor, pageWidth)
+    && !(
+      anchor.widthMode === 'column'
+      && block.rect.w < pageWidth * 0.15
+      && block.rect.x < pageWidth / 2
+      && block.rect.x + block.rect.w > pageWidth / 2
+    )
   ));
   if (!columnBlocks.length) return { x: anchor.rect.x, w: anchor.rect.w };
   const x = Math.min(...columnBlocks.map((block) => block.rect.x));
@@ -1615,8 +2092,19 @@ function detectedPageFurnitureIds(doc: Doc): Set<string> {
     const pageHeight = doc.pages[block.pageIndex]?.height ?? doc.meta.paperHeight;
     const nearMargin = block.rect.y < pageHeight * 0.12
       || block.rect.y + block.rect.h > pageHeight * 0.92;
-    if (!nearMargin) continue;
     const normalized = block.text?.trim().replace(/\s+/g, ' ') ?? '';
+    // IEEE first-page editorial notes and affiliation footnotes are outside
+    // the paper's reading flow. They can begin well above the physical bottom
+    // margin and continue through several blocks, so margin proximity alone
+    // is not a sufficient precondition.
+    if (
+      block.pageIndex === 0
+      && block.rect.y >= pageHeight * 0.65
+      && /(?:Manuscript received|This work was supported|Recommended for acceptance|Corresponding author|\bis with\b.*(?:University|Institute|Company)|e-?mail\s*:|Digital Object Identifier|Personal use is permitted|See\s+https?:\/\/www[.]ieee[.]org\/publications\/rights)/i.test(normalized)
+    ) {
+      ids.add(block.id);
+    }
+    if (!nearMargin) continue;
     if (/^(?:page\s*)?(?:\d+|[ivxlcdm]+)(?:\s*(?:\/|of)\s*\d+)?$/i.test(normalized)) {
       ids.add(block.id);
     }
@@ -1790,7 +2278,17 @@ function splitMergedCaptionText(source: string): Array<{ kind: 'figure' | 'table
   })).filter((segment) => segment.text.length > 0);
 }
 
-const BIBLIOGRAPHY_HEADING = /^(references|bibliography|参考文献)\s*$/i;
+function isBibliographyHeading(source: string | undefined): boolean {
+  const compact = (source ?? '').trim().replace(/\s+/g, '');
+  return /^(?:references|bibliography|参考文献)$/i.test(compact);
+}
+
+function authorBiographyStart(source: string | undefined): number | undefined {
+  if (!source) return undefined;
+  const match = source.match(/(?:^|\n)(?=[A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){1,3}(?:\s+\([^\n)]*IEEE[^\n)]*\))?\s+received\b)/m);
+  if (match?.index === undefined) return undefined;
+  return match.index + (match[0].startsWith('\n') ? 1 : 0);
+}
 
 type BibliographyCharacter = CharacterRect & {
   blockId: string;
@@ -1851,7 +2349,7 @@ function rebuildBibliographyFromGeometry(
   blocks: ReadonlyMap<string, Doc['blocks'][number]>,
 ): SemanticUnit[] {
   const heading = inputUnits
-    .filter((unit) => unit.kind === 'heading' && BIBLIOGRAPHY_HEADING.test(unit.sourceText?.trim() ?? ''))
+    .filter((unit) => unit.kind === 'heading' && isBibliographyHeading(unit.sourceText))
     .map((unit) => ({ unit, block: physicalHeadingBlock(unit, blocks) }))
     .filter((candidate): candidate is { unit: SemanticUnit; block: Doc['blocks'][number] } => Boolean(candidate.block))
     .sort((left, right) => left.block.pageIndex - right.block.pageIndex || left.block.rect.y - right.block.rect.y)[0];
@@ -1870,10 +2368,11 @@ function rebuildBibliographyFromGeometry(
 
   const headingPage = doc.pages[heading.block.pageIndex];
   const headingPageMidpoint = (headingPage?.width ?? doc.meta.paperWidth) / 2;
+  const bibliographyEntryStart = /^\[(?=[^\]\r\n]*\d)[A-Za-z0-9]+\]/;
   const citationBlocks = doc.blocks.filter((block) => (
     block.order > heading.block.order
     && (!nextHeading || block.order < nextHeading.order)
-    && /^\s*\[[^\]]+\]/.test(block.text ?? '')
+    && bibliographyEntryStart.test((block.text ?? '').trimStart())
   ));
   const leftCitationBlocks = citationBlocks.filter((block) => block.rect.x < headingPageMidpoint);
   const rightCitationBlocks = citationBlocks.filter((block) => block.rect.x >= headingPageMidpoint);
@@ -1894,7 +2393,6 @@ function rebuildBibliographyFromGeometry(
     : undefined;
   const rightColumnBibliographyTop = rightContinuation?.rect.y ?? firstRightCitation?.rect.y;
 
-  const selectedBlockIds = new Set<string>();
   const characters: BibliographyCharacter[] = [];
   const seenCharacters = new Set<string>();
   for (const block of doc.blocks) {
@@ -1925,7 +2423,7 @@ function rebuildBibliographyFromGeometry(
       const beforeNextHeading = !nextHeading
         || character.pageIndex < nextHeading.pageIndex
         || (character.pageIndex === nextHeading.pageIndex && centerY < nextHeading.rect.y - 2);
-      if (!afterHeading || !beforeNextHeading || centerY <= page.height * 0.1 || centerY >= page.height * 0.92) {
+      if (!afterHeading || !beforeNextHeading || centerY <= page.height * 0.065 || centerY >= page.height * 0.95) {
         continue;
       }
       const key = [
@@ -1937,7 +2435,6 @@ function rebuildBibliographyFromGeometry(
       ].join(':');
       if (seenCharacters.has(key)) continue;
       seenCharacters.add(key);
-      selectedBlockIds.add(block.id);
       characters.push({
         ...character,
         blockId: block.id,
@@ -1975,12 +2472,20 @@ function rebuildBibliographyFromGeometry(
     }
   }
 
-  const lines = rows.map((row) => bibliographyRowText(row))
-    .filter(Boolean);
+  const rowLines = rows.map((row) => ({ row, text: bibliographyRowText(row) }))
+    .filter((candidate) => Boolean(candidate.text));
+  const biographyLineIndex = rowLines.findIndex((candidate) => (
+    authorBiographyStart(candidate.text) === 0
+  ));
+  const bibliographyRowLines = biographyLineIndex >= 0
+    ? rowLines.slice(0, biographyLineIndex)
+    : rowLines;
+  const selectedBlockIds = new Set(bibliographyRowLines
+    .flatMap((candidate) => candidate.row.map((character) => character.blockId)));
   const entries: string[] = [];
-  for (const rawLine of lines) {
-    const line = rawLine.replace(/^(\[[^\]]+\])(?=\S)/, '$1 ');
-    if (/^\[[^\]]+\]/.test(line)) {
+  for (const { text: rawLine } of bibliographyRowLines) {
+    const line = rawLine.replace(/^(\[(?=[^\]\r\n]*\d)[A-Za-z0-9]+\])(?=\S)/, '$1 ');
+    if (bibliographyEntryStart.test(line)) {
       entries.push(line);
     } else if (entries.length) {
       entries[entries.length - 1] = appendBibliographyContinuation(entries.at(-1)!, line);
@@ -1993,14 +2498,39 @@ function rebuildBibliographyFromGeometry(
   const replacedIds = new Set(inputUnits
     .filter((unit) => (
       unit.id !== heading.unit.id
-      && (unit.parentId === heading.unit.id || selectedBlockIds.has(unit.sourceBlockId ?? unit.id))
+      && (
+        selectedBlockIds.has(unit.sourceBlockId ?? unit.id)
+        || (unit.parentId === heading.unit.id && unit.kind === 'reference')
+      )
     ))
     .map((unit) => unit.id));
   const targetRegion = regions.find((region) => region.id === heading.unit.layoutRegionId);
   if (!targetRegion) return inputUnits;
 
+  const biographyResiduals = inputUnits.flatMap((unit): SemanticUnit[] => {
+    if (!replacedIds.has(unit.id)) return [];
+    const start = authorBiographyStart(unit.sourceText);
+    if (start === undefined) return [];
+    const sourceText = unit.sourceText!.slice(start).trim();
+    if (!sourceText) return [];
+    return [{
+      ...unit,
+      id: `${unit.id}-biography`,
+      parentId: undefined,
+      kind: 'paragraph',
+      sourceText,
+      protectedTokens: extractProtectedTokens(sourceText),
+    }];
+  });
+  const residualByOriginal = new Map(biographyResiduals.map((unit) => [
+    unit.id.replace(/-biography$/, ''), unit,
+  ]));
   for (const region of regions) {
-    region.orderedUnitIds = region.orderedUnitIds.filter((unitId) => !replacedIds.has(unitId));
+    region.orderedUnitIds = region.orderedUnitIds.flatMap((unitId) => {
+      if (!replacedIds.has(unitId)) return [unitId];
+      const residual = residualByOriginal.get(unitId);
+      return residual ? [residual.id] : [];
+    });
   }
   const rebuilt = entries.map((sourceText, index): SemanticUnit => ({
     id: `${heading.unit.id}-reference-${index + 1}`,
@@ -2017,7 +2547,7 @@ function rebuildBibliographyFromGeometry(
     headingIndex = targetRegion.orderedUnitIds.length - 1;
   }
   targetRegion.orderedUnitIds.splice(headingIndex + 1, 0, ...rebuilt.map((unit) => unit.id));
-  return inputUnits.filter((unit) => !replacedIds.has(unit.id)).concat(rebuilt);
+  return inputUnits.filter((unit) => !replacedIds.has(unit.id)).concat(rebuilt, biographyResiduals);
 }
 
 export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOptions = {}): PreparedImmutableStructure {
@@ -2029,6 +2559,7 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
     protectedTokens: [...unit.protectedTokens],
   }));
   units = mergeFirstPageTitleContinuations(doc, units, regions, blocks);
+  units = repairSplitHeadingRows(doc, units, regions, blocks);
   repairHeadingRegionOrder(doc, units, regions, blocks);
   const assetRegions: DetectedAssetRegion[] = [];
   const algorithmAssets = detectedAlgorithmAssets(doc);
@@ -2049,7 +2580,7 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
   verifiedAssetRegions.forEach((asset) => {
     clampSpanFigureToCaptionColumn(doc, asset);
     clampColumnTableToGutter(doc, asset);
-    extendFigureThroughPrecedingVisualLabels(doc, asset);
+    extendFigureThroughPrecedingVisualLabels(doc, asset, verifiedAssetRegions);
   });
   // PDF.js can aggregate an entire diagram's labels with its trailing caption.
   // When reconciliation binds that block as the caption owner, translate only
@@ -2076,9 +2607,10 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
   const verifiedCaptionIds = new Set(verifiedAssetRegions
     .map((asset) => asset.captionUnitId)
     .filter((id): id is string => Boolean(id)));
+  const portraitPages = authorPortraitPages(doc, verifiedAssetRegions);
   for (const region of regions) {
     const visionLayout = options.pageLayouts?.get(region.sourcePage);
-    if (visionLayout === 'single') region.mode = 'single';
+    if (visionLayout === 'single' && !portraitPages.has(region.sourcePage)) region.mode = 'single';
     else if (visionLayout === 'double' && region.mode !== 'full-width') region.mode = 'double';
   }
   const furnitureIds = detectedPageFurnitureIds(doc);
@@ -2120,8 +2652,14 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
       unit.sourceText,
       verifiedAssetRegions.filter((asset) => asset.captionUnitId !== unit.id),
     );
-    const geometryCleaned = withoutEmbeddedMarginFurniture(doc, block, assetCleaned);
-    const labelsCleaned = withoutTrailingVisualLabelCluster(geometryCleaned);
+    // A legitimate first-page title often straddles the generic 10% top
+    // margin threshold. Never treat its first visual line as running furniture.
+    const geometryCleaned = ['title', 'author'].includes(unit.kind)
+      ? assetCleaned
+      : withoutEmbeddedMarginFurniture(doc, block, assetCleaned);
+    const labelsCleaned = withoutDetachedVariableLines(normalizeDetachedSubscriptLines(
+      withoutTrailingVisualLabelCluster(geometryCleaned),
+    ));
     const crossesPages = new Set((block.fragments ?? []).map((fragment) => fragment.pageIndex)).size > 1;
     // A numbered heading can sit next to a display formula, but its leading
     // section number is structural content rather than a scattered math
@@ -2173,10 +2711,11 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
   }
 
   const bibliographySectionIds = new Set(units
-    .filter((unit) => unit.kind === 'heading' && BIBLIOGRAPHY_HEADING.test(unit.sourceText?.trim() ?? ''))
+    .filter((unit) => unit.kind === 'heading' && isBibliographyHeading(unit.sourceText))
     .map((unit) => unit.id));
   if (bibliographySectionIds.size) {
     units = units.map((unit) => unit.id !== unit.parentId && bibliographySectionIds.has(unit.parentId ?? '')
+      && authorBiographyStart(unit.sourceText) === undefined
       ? { ...unit, kind: 'reference' as const }
       : unit);
   }
@@ -2186,8 +2725,17 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
   // leading bracket and labels it as a bibliography entry even though it is
   // still ordinary prose. Real bibliography units are parented to the
   // References heading; recover only unparented, sentence-like false matches.
+  const firstBibliographyHeadingOrder = units
+    .filter((unit) => unit.kind === 'heading' && isBibliographyHeading(unit.sourceText))
+    .map((unit) => blocks.get(unit.sourceBlockId ?? unit.id)?.order ?? unit.order)
+    .sort((left, right) => left - right)[0];
   units = units.map((unit) => {
-    if (unit.kind !== 'reference' || unit.parentId || !unit.sourceText) return unit;
+    if (unit.kind !== 'reference' || !unit.sourceText) return unit;
+    const physicalOrder = blocks.get(unit.sourceBlockId ?? unit.id)?.order ?? unit.order;
+    if (firstBibliographyHeadingOrder !== undefined && physicalOrder < firstBibliographyHeadingOrder) {
+      return { ...unit, kind: 'paragraph' as const };
+    }
+    if (unit.parentId) return unit;
     const wordsAfterCitation = unit.sourceText
       .replace(/^\s*\[\d+\]\s*/, '')
       .match(/[A-Za-z]{3,}/g)?.length ?? 0;
@@ -2339,6 +2887,25 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
       const absoluteStart = consumed + fragment.start;
       const absoluteEnd = consumed + fragment.end;
       if (absoluteEnd <= absoluteStart || absoluteEnd <= consumed) break;
+      const page = doc.pages[fragment.pageIndex];
+      const intersecting = doc.blocks.filter((candidate) => (
+        candidate.pageIndex === fragment.pageIndex
+        && intersectionArea(candidate.rect, fragment.rect) > 0
+      ));
+      const candidateAsset: DetectedAssetRegion = {
+        id: `${unit.id}-inline-candidate`,
+        kind: 'formula',
+        pageIndex: fragment.pageIndex,
+        rect: fragment.rect,
+        widthMode: block.widthMode,
+      };
+      if (page && validateImmutableRegion(candidateAsset, page, intersecting).issues.includes('body-prose-density')) {
+        // A malformed PDF source index can make a short `x = ...` match span
+        // most of the prose line. Keep that source text translatable and keep
+        // scanning for a later, genuinely tight expression.
+        consumed = absoluteEnd;
+        continue;
+      }
       fragments.push({ ...fragment, absoluteStart, absoluteEnd });
       consumed = absoluteEnd;
     }
@@ -2666,6 +3233,33 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
     }
   }
 
+  // Parser-confirmed formula assets are constructed after the first cleanup
+  // pass above. Re-run the narrow fragment test against those new assets so a
+  // piecewise equation split into `formula first row + paragraph tail` cannot
+  // leave its stacked subscripts, equation number, and closing brace as a
+  // translated text block (for example `res / T otal / N = ...`). Never
+  // remove another formula owner here; adjacent equations remain independent.
+  const deterministicFormulaFragmentIds = new Set(units
+    .filter((unit) => ['paragraph', 'abstract', 'list-item'].includes(unit.kind))
+    .filter((unit) => {
+      const block = blocks.get(unit.sourceBlockId ?? unit.id);
+      if (!block) return false;
+      return assetRegions.some((asset) => (
+        asset.kind === 'formula'
+        && asset.id !== unit.assetId
+        && asset.id !== block.id
+        && isFormulaExtractionFragment(block, asset)
+      ));
+    })
+    .map((unit) => unit.id));
+  if (deterministicFormulaFragmentIds.size) {
+    units = units.filter((unit) => !deterministicFormulaFragmentIds.has(unit.id));
+    for (const region of regions) {
+      region.orderedUnitIds = region.orderedUnitIds
+        .filter((id) => !deterministicFormulaFragmentIds.has(id));
+    }
+  }
+
   for (const caption of units.filter((unit) => (
     unit.kind === 'caption'
     && isFigureCaptionText(unit.sourceText ?? '')
@@ -2674,31 +3268,43 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
     const captionBlock = blocks.get(caption.id);
     const region = regions.find((candidate) => candidate.id === caption.layoutRegionId);
     if (!captionBlock || !region) throw new Error(`图注 ${caption.id} 缺少版式坐标`);
+    const recoveredCaption = recoverSplitColumnCaption(doc, captionBlock);
+    const captionAnchor = recoveredCaption?.anchor ?? captionBlock;
+    if (recoveredCaption) {
+      caption.sourceText = recoveredCaption.sourceText;
+      caption.protectedTokens = extractProtectedTokens(recoveredCaption.sourceText);
+      const continuationIds = new Set(recoveredCaption.continuationIds);
+      units = units.filter((unit) => !continuationIds.has(unit.id));
+      for (const candidateRegion of regions) {
+        candidateRegion.orderedUnitIds = candidateRegion.orderedUnitIds
+          .filter((unitId) => !continuationIds.has(unitId));
+      }
+    }
     const captionIndex = region.orderedUnitIds.indexOf(caption.id);
-    const pageWidth = doc.pages[captionBlock.pageIndex]?.width ?? doc.meta.paperWidth;
+    const pageWidth = doc.pages[captionAnchor.pageIndex]?.width ?? doc.meta.paperWidth;
     const previousBlock = [...region.orderedUnitIds.slice(0, captionIndex)]
       .reverse().map((id) => blocks.get(id)).find((block) => (
-        block?.pageIndex === captionBlock.pageIndex
-        && sameVisualColumn(block, captionBlock, pageWidth)
+        block?.pageIndex === captionAnchor.pageIndex
+        && sameVisualColumn(block, captionAnchor, pageWidth)
       ));
-    const bottom = captionBlock.rect.y - 6;
+    const bottom = captionAnchor.rect.y - 6;
     const furnitureBoundary = doc.blocks
       .filter((block) => (
-        block.pageIndex === captionBlock.pageIndex
+        block.pageIndex === captionAnchor.pageIndex
         && furnitureIds.has(block.id)
         && block.rect.y + block.rect.h <= bottom
-        && block.rect.x < captionBlock.rect.x + captionBlock.rect.w
-        && block.rect.x + block.rect.w > captionBlock.rect.x
+        && block.rect.x < captionAnchor.rect.x + captionAnchor.rect.w
+        && block.rect.x + block.rect.w > captionAnchor.rect.x
       ))
       .reduce((boundary, block) => Math.max(boundary, block.rect.y + block.rect.h + 6), 0);
     const previousBoundary = previousBlock ? previousBlock.rect.y + previousBlock.rect.h + 6 : 0;
     const visualLabelTop = doc.blocks
       .filter((block) => (
-        block.pageIndex === captionBlock.pageIndex
+        block.pageIndex === captionAnchor.pageIndex
         && block.id !== caption.id
         && block.rect.y < bottom
-        && block.rect.x < captionBlock.rect.x + captionBlock.rect.w
-        && block.rect.x + block.rect.w > captionBlock.rect.x
+        && block.rect.x < captionAnchor.rect.x + captionAnchor.rect.w
+        && block.rect.x + block.rect.w > captionAnchor.rect.x
       ))
       .flatMap((block) => {
         const clusterTop = trailingVisualLabelClusterTop(block);
@@ -2706,15 +3312,23 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
         return looksLikeVisualLabels(block) ? [Math.max(1, block.rect.y - 6)] : [];
       })
       .reduce((boundary, top) => Math.min(boundary, top), Number.POSITIVE_INFINITY);
-    const previousColumnProseBottom = previousProseBottomInCaptionColumn(doc, captionBlock);
+    const previousColumnProseBottom = previousProseBottomInCaptionColumn(doc, captionAnchor);
+    const previousTableBottom = precedingTableBodyBottom(doc, captionAnchor);
+    const previousPhysicalBottom = recoveredCaption
+      ? previousPhysicalContentBottom(doc, captionAnchor)
+      : undefined;
     const inferredTop = Math.max(
       furnitureBoundary,
       previousColumnProseBottom !== undefined ? previousColumnProseBottom + 6 : 0,
+      previousTableBottom !== undefined ? previousTableBottom + 6 : 0,
+      previousPhysicalBottom !== undefined ? previousPhysicalBottom + 6 : 0,
       Number.isFinite(visualLabelTop)
         ? visualLabelTop
-        : (doc.pages[captionBlock.pageIndex]?.height ?? doc.meta.paperHeight) * 0.1,
+        : (doc.pages[captionAnchor.pageIndex]?.height ?? doc.meta.paperHeight) * 0.1,
     );
-    const top = previousBlock && previousBoundary < bottom - 24 ? previousBoundary : inferredTop;
+    const top = previousBlock && previousBoundary < bottom - 24
+      ? Math.max(previousBoundary, inferredTop)
+      : inferredTop;
     if (bottom - top < 24) {
       const previousId = previousBlock?.id ?? 'none';
       const previousText = previousBlock?.text?.replace(/\s+/g, ' ').slice(0, 48) ?? 'none';
@@ -2723,10 +3337,10 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
       );
     }
     const id = `${caption.id}-asset`;
-    const widthMode = captionBlock.widthMode;
-    const column = visualColumnBounds(doc, captionBlock);
+    const widthMode = captionAnchor.widthMode;
+    const column = visualColumnBounds(doc, captionAnchor);
     assetRegions.push({
-      id, kind: 'figure', pageIndex: captionBlock.pageIndex,
+      id, kind: 'figure', pageIndex: captionAnchor.pageIndex,
       rect: { x: column.x, y: top, w: column.w, h: bottom - top },
       widthMode, captionUnitId: caption.id,
     });
@@ -2747,46 +3361,55 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
     if (!captionBlock || !region) throw new Error(`表题 ${caption.id} 缺少版式坐标`);
     const pageWidth = doc.pages[captionBlock.pageIndex]?.width ?? doc.meta.paperWidth;
     const captionBottom = captionBlock.rect.y + captionBlock.rect.h;
-    const following = doc.blocks
-      .filter((block) => (
-        block.id !== caption.id
-        && block.pageIndex === captionBlock.pageIndex
-        && sameVisualColumn(block, captionBlock, pageWidth)
-        && block.rect.y >= captionBottom - 2
-      ))
-      .sort((left, right) => left.rect.y - right.rect.y || left.order - right.order);
-    const first = following[0];
-    if (!first) throw new Error(`无法可靠确定表 ${caption.id} 的不可变区域（缺少后续边界）`);
-
     const bodyIds: string[] = [];
-    let top = captionBottom + 6;
+    const spanningGeometry = centeredSpanningTableGeometry(doc, captionBlock);
+    let top = spanningGeometry?.rect.y ?? captionBottom + 6;
     let bottom: number;
-    const initialGap = first.rect.y - captionBottom;
-    if (initialGap >= 24) {
-      bottom = first.rect.y - 6;
+    let column = spanningGeometry
+      ? { x: spanningGeometry.rect.x, w: spanningGeometry.rect.w }
+      : visualColumnBounds(doc, captionBlock);
+    let widthMode = spanningGeometry ? 'span' as const : captionBlock.widthMode;
+    if (spanningGeometry) {
+      bottom = spanningGeometry.rect.y + spanningGeometry.rect.h;
+      bodyIds.push(...spanningGeometry.bodyIds);
     } else {
-      if (initialGap > 20) throw new Error(`无法可靠确定表 ${caption.id} 的不可变区域（表题后间距不明确）`);
-      let previousBottom = captionBottom;
-      let boundaryFound = false;
-      for (const candidate of following) {
-        const gap = candidate.rect.y - previousBottom;
-        if (bodyIds.length && (
-          gap > 20
-          || candidate.type === 'section'
-          || candidate.type === 'caption'
-          || candidate.type === 'equation'
-        )) {
-          boundaryFound = true;
-          break;
+      const following = doc.blocks
+        .filter((block) => (
+          block.id !== caption.id
+          && block.pageIndex === captionBlock.pageIndex
+          && sameVisualColumn(block, captionBlock, pageWidth)
+          && block.rect.y >= captionBottom - 2
+        ))
+        .sort((left, right) => left.rect.y - right.rect.y || left.order - right.order);
+      const first = following[0];
+      if (!first) throw new Error(`无法可靠确定表 ${caption.id} 的不可变区域（缺少后续边界）`);
+      const initialGap = first.rect.y - captionBottom;
+      if (initialGap >= 24) {
+        bottom = first.rect.y - 6;
+      } else {
+        if (initialGap > 20) throw new Error(`无法可靠确定表 ${caption.id} 的不可变区域（表题后间距不明确）`);
+        let previousBottom = captionBottom;
+        let boundaryFound = false;
+        for (const candidate of following) {
+          const gap = candidate.rect.y - previousBottom;
+          if (bodyIds.length && (
+            gap > 20
+            || candidate.type === 'section'
+            || candidate.type === 'caption'
+            || candidate.type === 'equation'
+          )) {
+            boundaryFound = true;
+            break;
+          }
+          bodyIds.push(candidate.id);
+          previousBottom = Math.max(previousBottom, candidate.rect.y + candidate.rect.h);
         }
-        bodyIds.push(candidate.id);
-        previousBottom = Math.max(previousBottom, candidate.rect.y + candidate.rect.h);
+        if (!bodyIds.length || !boundaryFound) {
+          throw new Error(`无法可靠确定表 ${caption.id} 的不可变区域（未检测到表后边界）`);
+        }
+        const lastBody = blocks.get(bodyIds.at(-1)!)!;
+        bottom = lastBody.rect.y + lastBody.rect.h + 6;
       }
-      if (!bodyIds.length || !boundaryFound) {
-        throw new Error(`无法可靠确定表 ${caption.id} 的不可变区域（未检测到表后边界）`);
-      }
-      const lastBody = blocks.get(bodyIds.at(-1)!)!;
-      bottom = lastBody.rect.y + lastBody.rect.h + 6;
     }
     // A full-width table can be split by PDF.js into a shallow span header and
     // a separate column-classified numeric body. Keep a valid header-height
@@ -2796,11 +3419,10 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
     if (bottom - top < 12) throw new Error(`无法可靠确定表 ${caption.id} 的不可变区域（高度不足）`);
 
     const id = `${caption.id}-asset`;
-    const column = visualColumnBounds(doc, captionBlock);
     assetRegions.push({
       id, kind: 'table', pageIndex: captionBlock.pageIndex,
       rect: { x: column.x, y: top, w: column.w, h: bottom - top },
-      widthMode: captionBlock.widthMode, captionUnitId: caption.id,
+      widthMode, captionUnitId: caption.id,
     });
     units = units.filter((unit) => !bodyIds.includes(unit.id));
     for (const candidateRegion of regions) {
@@ -3003,10 +3625,13 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
     ));
     const captionRect = asset.captionUnitId ? blocks.get(asset.captionUnitId)?.rect : undefined;
     const geometry = validateImmutableRegion(asset, page, intersecting, captionRect);
-    if (!geometry.pass) {
+    const blockingGeometryIssues = portraitPages.has(asset.pageIndex) && isPortraitAsset(doc, asset)
+      ? geometry.issues.filter((issue) => issue !== 'body-prose-density')
+      : geometry.issues;
+    if (blockingGeometryIssues.length) {
       const rect = [asset.rect.x, asset.rect.y, asset.rect.w, asset.rect.h]
         .map((value) => Number(value.toFixed(2))).join(',');
-      throw new Error(`不可变资产 ${asset.id} 几何校验失败（第 ${asset.pageIndex + 1} 页：${geometry.issues.join(', ')}；bbox=${rect}）`);
+      throw new Error(`不可变资产 ${asset.id} 几何校验失败（第 ${asset.pageIndex + 1} 页：${blockingGeometryIssues.join(', ')}；bbox=${rect}）`);
     }
   }
 
@@ -3020,6 +3645,9 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
     pageKindGroups.set(key, group);
   }
   for (const [key, candidates] of pageKindGroups) {
+    const portraitPage = candidates.length >= 3
+      && candidates.every((asset) => isPortraitAsset(doc, asset))
+      && isAuthorBiographyPage(doc, candidates[0]!.pageIndex);
     const pending = [...candidates].sort((left, right) => left.rect.y - right.rect.y || left.rect.x - right.rect.x);
     let rowNumber = 0;
     while (pending.length) {
@@ -3031,14 +3659,15 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
           anchor.rect.y + anchor.rect.h,
           candidate.rect.y + candidate.rect.h,
         ) - Math.max(anchor.rect.y, candidate.rect.y));
-        if (Math.abs(candidate.rect.y - anchor.rect.y) <= 12
-          && overlap / Math.max(1, Math.min(anchor.rect.h, candidate.rect.h)) >= 0.6) {
+        if ((portraitPage && isPortraitAsset(doc, anchor) && isPortraitAsset(doc, candidate))
+          || (Math.abs(candidate.rect.y - anchor.rect.y) <= 12
+            && overlap / Math.max(1, Math.min(anchor.rect.h, candidate.rect.h)) >= 0.6)) {
           band.push(candidate);
           pending.splice(index, 1);
         }
       }
       if (band.length < 2) continue;
-      band.sort((left, right) => left.rect.x - right.rect.x);
+      band.sort((left, right) => left.rect.x - right.rect.x || left.rect.y - right.rect.y);
       const grouped = new Map<string, DetectedAssetRegion[]>();
       for (const asset of band) {
         const captionKey = asset.captionUnitId ?? `asset:${asset.id}`;
@@ -3094,7 +3723,7 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
   // PDF character rectangles unusable for inline formula extraction.
   for (const unit of units) {
     if (!unit.sourceText || unit.kind === 'reference') continue;
-    const normalized = normalizePdfNumericSpacing(unit.sourceText);
+    const normalized = normalizePdfNumericSpacing(unit.sourceText, unit.kind === 'heading');
     if (normalized === unit.sourceText) continue;
     unit.sourceText = normalized;
     unit.protectedTokens = extractProtectedTokens(normalized);

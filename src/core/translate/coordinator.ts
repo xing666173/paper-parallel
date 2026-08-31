@@ -151,9 +151,14 @@ export async function runTranslationTask(
       const cachedRecord = await options.findCached(block);
       if (taskSignal.aborted) throw abortError();
       if (cachedRecord) {
-        completed.set(block.blockId, cachedRecord);
-        cached.add(block.blockId);
-        options.onEvent({ type: 'cache-hit', at: now(), blockId: block.blockId });
+        const cachedValidation = validateBatchResponse([block], { blocks: [cachedRecord] });
+        if (cachedValidation.ok) {
+          completed.set(block.blockId, cachedRecord);
+          cached.add(block.blockId);
+          options.onEvent({ type: 'cache-hit', at: now(), blockId: block.blockId });
+        } else {
+          missing.push(block);
+        }
       } else {
         missing.push(block);
       }

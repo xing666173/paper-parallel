@@ -67,6 +67,18 @@ describe('parser: items -> lines', () => {
     ]);
   });
 
+  it('splits IEEE columns across a twelve-point centre gutter', () => {
+    const lines = itemsToLines([
+      { str: 'the left-column sentence ends here', x: 38, y: 444.2, w: 250.6, h: 10 },
+      { str: 'the right-column sentence starts here', x: 300.6, y: 447.8, w: 251, h: 10 },
+    ], 594);
+
+    expect(lines.map((line) => line.text)).toEqual([
+      'the left-column sentence ends here',
+      'the right-column sentence starts here',
+    ]);
+  });
+
   it('does not split ordinary same-line fragments near the page center', () => {
     const lines = itemsToLines([
       { str: 'a full-width sentence ending', x: 120, y: 90, w: 180, h: 10 },
@@ -96,6 +108,15 @@ describe('parser: columns', () => {
     }], 612);
 
     expect(lines[0]?.col).toBe('right');
+  });
+
+  it('keeps a narrow two-column abstract in its physical lane', () => {
+    const lines = classifyLines([{
+      y: 170, x1: 48, x2: 289, h: 10,
+      text: 'Abstract—This paper presents an accelerator.', items: [],
+    }], 594);
+
+    expect(lines[0]?.col).toBe('left');
   });
 });
 
@@ -176,6 +197,28 @@ describe('parser: lines -> blocks', () => {
     expect(isFigureCaptionText('Figure 10. The architecture is discussed below.')).toBe(false);
   });
 
+  it('recognizes dotted Roman headings and letter-spaced bibliography headings', () => {
+    const line = (text: string, y: number) => ({
+      y, x1: 45, x2: 285, h: 10, text, items: [], col: 'left' as const,
+    });
+    const types = ['VI. R ELATED W ORK', 'R EFERENCES'].map((text) => (
+      groupLinesToBlocks([line(text, 100)], 594, 792)[0]?.type
+    ));
+
+    expect(types).toEqual(['section', 'section']);
+  });
+
+  it('does not mistake a three-digit curve suffix for a numbered section heading', () => {
+    const line = (text: string, y: number) => ({
+      y, x1: 45, x2: 285, h: 10, text, items: [], col: 'left' as const,
+    });
+    const block = groupLinesToBlocks([
+      line('753 requires 20880 DSP slices for a fully pipelined PADD', 100),
+    ], 594, 792)[0];
+
+    expect(block?.type).toBe('paragraph');
+  });
+
   it('在块文本中保留 PDF.js 文本项的字符索引和真实坐标', () => {
     const result = parsePageItems([
       { str: 'AB', x: 10, y: 20, w: 12, h: 10 },
@@ -194,7 +237,7 @@ describe('parser: lines -> blocks', () => {
       { y: 140, x1: 48, x2: 280, h: 10, text: 'Keywords: layout, translation', items: [] },
     ], 612);
 
-    expect(lines.map((line) => line.col)).toEqual(['full', 'full', 'full', 'full']);
+    expect(lines.map((line) => line.col)).toEqual(['full', 'full', 'full', 'left']);
   });
 });
 

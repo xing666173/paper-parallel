@@ -113,6 +113,19 @@ describe('vision: final PDF review', () => {
     expect(report.issues[0]?.severity).toBe('warning');
   });
 
+  it('keeps high-confidence missing author portraits as a blocking defect', () => {
+    const report = parseVisionFinalPageReport({
+      target_page: 16,
+      issues: [{
+        type: 'asset_missing', severity: 'severe', bbox: [1, 1, 998, 998],
+        confidence: 0.95, evidence: 'All author portraits are missing on the target page.',
+      }],
+    }, 15);
+
+    expect(report.pass).toBe(false);
+    expect(report.issues[0]?.severity).toBe('severe');
+  });
+
   it('does not let page-local missing-text density guesses veto globally verified content', () => {
     const report = parseVisionFinalPageReport({
       target_page: 10,
@@ -336,6 +349,7 @@ describe('vision: final PDF review', () => {
 
     expect(requests).toHaveLength(2);
     expect(requests[1].messages[0].content[0].text).toContain('glyph strokes are visibly cut');
+    expect(requests[1].messages[0].content[0].text).toContain('low-resolution English labels');
     expect(report.pass).toBe(true);
     expect(report.issues).toEqual([]);
   });
@@ -367,6 +381,37 @@ describe('vision: final PDF review', () => {
     expect(report.issues).toHaveLength(1);
   });
 
+  it('retries a timed-out focused confirmation without discarding the reviewed page', async () => {
+    const requests: any[] = [];
+    const page = { getViewport: () => ({ width: 1, height: 1 }), render: () => ({ promise: Promise.resolve() }) };
+    const report = await runVisionFinalReview({
+      sourcePdf: { numPages: 1, getPage: async () => page },
+      targetPdf: { numPages: 1, getPage: async () => page },
+      manifest: { units: [] } as any,
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test',
+      renderPage: async () => 'data:image/png;base64,page',
+      complete: async (request: any) => {
+        requests.push(request);
+        if (requests.length === 1) {
+          return {
+            content: '{"target_page":1,"issues":[{"type":"overlap","severity":"severe","bbox":[1,1,20,20],"confidence":0.95,"evidence":"possible overlap"}]}',
+            usage: { promptTokens: 1, completionTokens: 1 },
+          };
+        }
+        if (requests.length === 2) {
+          const error = new Error('timeout');
+          error.name = 'DeepSeekTimeoutError';
+          throw error;
+        }
+        return { content: '{"target_page":1,"issues":[]}', usage: { promptTokens: 1, completionTokens: 1 } };
+      },
+    });
+
+    expect(requests).toHaveLength(3);
+    expect(requests[1].timeoutMs).toBe(90_000);
+    expect(report.pass).toBe(true);
+  });
+
   it('retries an overlong visual report with a compact severe-only request', async () => {
     const requests: any[] = [];
     const page = { getViewport: () => ({ width: 1, height: 1 }), render: () => ({ promise: Promise.resolve() }) };
@@ -389,6 +434,31 @@ describe('vision: final PDF review', () => {
 
     expect(report.pass).toBe(true);
     expect(requests).toHaveLength(2);
+    expect(requests[1].messages[0].content[0].text).toContain('at most 3 severe issues');
+  });
+
+  it('allows two transient request failures before accepting a compact visual report', async () => {
+    const requests: any[] = [];
+    const page = { getViewport: () => ({ width: 1, height: 1 }), render: () => ({ promise: Promise.resolve() }) };
+    const report = await runVisionFinalReview({
+      sourcePdf: { numPages: 1, getPage: async () => page },
+      targetPdf: { numPages: 1, getPage: async () => page },
+      manifest: { units: [] } as any,
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test',
+      renderPage: async () => 'data:image/png;base64,page',
+      complete: async (request: any) => {
+        requests.push(request);
+        if (requests.length < 3) {
+          const error = new Error('timeout');
+          error.name = 'DeepSeekTimeoutError';
+          throw error;
+        }
+        return { content: '{"target_page":1,"issues":[]}', usage: { promptTokens: 1, completionTokens: 1 } };
+      },
+    });
+
+    expect(report.pass).toBe(true);
+    expect(requests).toHaveLength(3);
     expect(requests[1].messages[0].content[0].text).toContain('at most 3 severe issues');
   });
 
@@ -418,6 +488,27 @@ describe('vision: final PDF review', () => {
     expect(requests[1].messages[0].content[0].text).toContain('at most 3 severe issues');
     expect(invalidReasons).toEqual(['Vision 成品质检 JSON 无法解析']);
     expect(phases).toContain('retrying');
+  });
+
+  it('allows a second compact retry when two visual JSON responses are malformed', async () => {
+    const requests: any[] = [];
+    const page = { getViewport: () => ({ width: 1, height: 1 }), render: () => ({ promise: Promise.resolve() }) };
+    const report = await runVisionFinalReview({
+      sourcePdf: { numPages: 1, getPage: async () => page },
+      targetPdf: { numPages: 1, getPage: async () => page },
+      manifest: { units: [] } as any,
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test',
+      renderPage: async () => 'data:image/png;base64,page',
+      complete: async (request: any) => {
+        requests.push(request);
+        return requests.length < 3
+          ? { content: '{not-json', usage: { promptTokens: 1, completionTokens: 1 } }
+          : { content: '{"target_page":1,"issues":[]}', usage: { promptTokens: 1, completionTokens: 1 } };
+      },
+    });
+
+    expect(report.pass).toBe(true);
+    expect(requests).toHaveLength(3);
   });
 
   it('reviews heavy multimodal pages sequentially, reports starts immediately, and preserves page order', async () => {

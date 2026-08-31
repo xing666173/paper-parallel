@@ -173,7 +173,11 @@ interface WordToken {
 
 function wordTokens(text: string): WordToken[] {
   return [...text.matchAll(/[\p{L}\p{N}_]+/gu)].map((match) => ({
-    value: match[0].normalize('NFKC').toLocaleLowerCase(),
+    // Preparation can reattach a detached PDF subscript (`W asted` followed
+    // by separate `res` rows) as `Wasted_res` for translation. Geometry still
+    // points at the original glyphs, so compare that repaired token by its
+    // base variable name while retaining the full source range.
+    value: match[0].normalize('NFKC').toLocaleLowerCase().replace(/_res$/u, ''),
     start: match.index!,
     end: match.index! + match[0].length,
   }));

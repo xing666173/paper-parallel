@@ -76,6 +76,14 @@ export function isDisplayFormulaCandidate(text: string, centered: boolean): bool
 
   const naturalWords = normalized.match(/[A-Za-z]{3,}/g) ?? [];
   if (naturalWords.length > 5) return false;
+  const functionWords = normalized.match(
+    /\b(?:the|a|an|and|or|of|to|in|for|with|that|this|is|are|was|were|as|by|from|on|at|if|when|where|whether|we|need)\b/gi,
+  ) ?? [];
+  // A prose sentence can contain enough variables and operators to score as
+  // mathematics (for example, "whether it contains P_i + P_t, where ...").
+  // Keeping that whole line as source pixels leaves a conspicuous English
+  // sentence in the translated paper. Natural-language syntax is decisive.
+  if (naturalWords.length >= 3 && functionWords.length >= 1) return false;
 
   const relations = normalized.match(/(?:=|≠|≈|≤|≥|<|>)/g) ?? [];
   const operators = normalized.match(/[+*/^{}×÷√∑∫]/g) ?? [];
@@ -90,27 +98,36 @@ export function isDisplayFormulaCandidate(text: string, centered: boolean): bool
 
 function classifyLineRole(l: ClassifiedLine, col: ColumnBounds): RawBlock['type'] {
   const t = l.text.trim();
+  const compactLetters = t.replace(/\s+/g, '');
   const colCenter = (col.min + col.max) / 2;
   const lineCenter = (l.x1 + l.x2) / 2;
   const centered = Math.abs(lineCenter - colCenter) <= Math.max(20, (col.max - col.min) * 0.12);
 
   // 通栏区:标题/作者/摘要/关键词
+  if (/^(abstract|摘要)[\s—\-:：]/i.test(t)) return 'abstract';
+  if (/^key ?words|^关键词/i.test(t)) return 'keywords';
   if (l.col === 'full') {
-    if (/^(abstract|摘要)[\s—\-:：]/i.test(t)) return 'abstract';
-    if (/^key ?words|^关键词/i.test(t)) return 'keywords';
+    if (l.y < 180 && /\b(?:member\s*,?\s*IEEE|IEEE\s+(?:member|fellow))\b/i.test(t)) return 'authors';
     if (/[,，]/.test(t) && /university|大学|学院|实验室|lab/i.test(t)) return 'authors';
     if (t.length < 90 && l.h >= 14) return 'title';
   }
 
   // 章节标题:数字编号 + 短文本;排除"2021 IEEE..."这类文献行(含逗号/句末标点)
+  const numberedHeading = /^\s*\d{1,2}(?:\.\d+)*\.?\s+[A-Z\u4e00-\u9fa5]/i.test(t);
+  // Roman IEEE section numbers always carry a period. Requiring it prevents
+  // ordinary words made only of Roman letters ("LIMM ...") and detached
+  // subscripts ("c c", "i t") from becoming headings.
+  const romanHeading = /^\s*[IVXLCDM]+\.\s+[A-Z\u4e00-\u9fa5]/.test(t);
+  const alphabeticHeading = /^\s*[A-Z]\.\s+[A-Z\u4e00-\u9fa5]/.test(t);
   if (
-    /^\s*(\d+(\.\d+)*|IV|V|VI|VII|VIII|IX|X)\s+[A-Z\u4e00-\u9fa5]/.test(t) &&
+    (numberedHeading || romanHeading || alphabeticHeading) &&
     t.length < 80 &&
     !/[.!?。！？]$/.test(t) &&
-    !/[,;]/.test(t)
+    !/[,;]/.test(t) &&
+    !/^\d+\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\b/i.test(t)
   )
     return 'section';
-  if (/^(references|bibliography|acknowledge?ments?|参考文献|致谢)\s*$/i.test(t)) return 'section';
+  if (/^(references|bibliography|acknowledge?ments?|参考文献|致谢)\s*$/i.test(compactLetters)) return 'section';
 
   // 图表题注
   if (isNumberedCaptionText(t))
@@ -120,7 +137,9 @@ function classifyLineRole(l: ClassifiedLine, col: ColumnBounds): RawBlock['type'
   if (isDisplayFormulaCandidate(t, centered)) return 'equation';
 
   // 参考文献
-  if (/^\[\d+\]/.test(t)) return 'reference';
+  // Multiple leading citations followed by prose are a body continuation,
+  // not the beginning of a bibliography entry.
+  if (/^\[\d+\]/.test(t) && !/^\[\d+\](?:\s*,\s*\[\d+\])+\s+\S/.test(t)) return 'reference';
 
   return 'paragraph';
 }
