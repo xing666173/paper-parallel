@@ -195,7 +195,7 @@ export async function buildTypstProject(input: TypstProjectInput): Promise<Typst
         // can therefore move the complete unbreakable group only when the
         // remaining page space is insufficient; forcing a pagebreak here left
         // nearly empty pages before ordinary algorithms and figures.
-        const content = `#pp-asset-group[\n${captionFirst ? `${captionContent}\n${assetsContent}` : `${assetsContent}\n${captionContent}`}\n]`;
+        const content = `#pp-asset-group(column-flow: ${groupMode === 'double'})[\n${captionFirst ? `${captionContent}\n${assetsContent}` : `${assetsContent}\n${captionContent}`}\n]`;
         const columns = new Set(memberIds.map((id) => unitsById.get(id)?.sourceColumn).filter(Boolean));
         pushRendered(
           groupMode,

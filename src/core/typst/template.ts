@@ -36,7 +36,13 @@ export function buildAcademicTemplate(options: AcademicTemplateOptions): string 
   set par(spacing: 1pt)
   body
 }
-#let pp-asset-group(body) = block(breakable: false, width: 100%, above: 2pt, below: 4pt)[#body]
+#let pp-asset-group(body, column-flow: false) = {
+  // Typst's multi-page columns can place an image's ink a few points beyond
+  // the logical block extent at a page boundary. This small column-only strut
+  // makes the native unbreakable block advance before that ambiguous edge.
+  if column-flow { block(height: 8pt)[] }
+  block(breakable: false, width: 100%, above: 2pt, below: 4pt)[#body]
+}
 #let pp-asset(id, path, source-width, span: false) = {
   let body = block(breakable: false, width: 100%)[#align(center)[#pp-unit(id)[#image(path, width: source-width)]]]
   if span { pp-full-width(body) } else { body }

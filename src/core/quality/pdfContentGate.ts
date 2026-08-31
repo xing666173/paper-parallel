@@ -1,7 +1,10 @@
 import { getDocument } from '../pdf/runtime';
+import { extractBitmapRegions } from '../pdf/bitmapRegions';
+import type { Rect } from '../../types/models';
 
 export type PdfContentIssueCode =
   | 'blank-page'
+  | 'asset-footer-overflow'
   | 'chinese-text-missing'
   | 'page-count-excessive'
   | 'pdf-empty'
@@ -15,6 +18,8 @@ export interface PdfContentIssue {
 export interface PdfContentGateInput {
   pageTexts: readonly string[];
   pageDrawableCounts?: readonly number[];
+  pageBitmapRegions?: readonly (readonly Rect[])[];
+  pageSizes?: readonly { width: number; height: number }[];
   expectedTranslations: readonly string[];
   maximumPages: number;
   minimumCoverage?: number;
@@ -48,6 +53,21 @@ export function runPdfContentGate(input: PdfContentGateInput): PdfContentGateRes
   if (blankPages.length) {
     issues.push({ code: 'blank-page', message: `中文 PDF 存在空白页：${blankPages.join(', ')}` });
   }
+  const overflowPages = input.pageBitmapRegions?.flatMap((regions, pageIndex) => {
+    const page = input.pageSizes?.[pageIndex];
+    if (!page) return [];
+    const margin = Math.max(36, page.width * 0.1);
+    const printableBottom = page.height - margin;
+    return regions.some((rect) => rect.y + rect.h > printableBottom + 2)
+      ? [pageIndex + 1]
+      : [];
+  }) ?? [];
+  if (overflowPages.length) {
+    issues.push({
+      code: 'asset-footer-overflow',
+      message: `中文 PDF 存在越过正文底线的图片，可能被页脚裁切：${overflowPages.join(', ')}`,
+    });
+  }
   if (input.pageTexts.length > input.maximumPages) {
     issues.push({
       code: 'page-count-excessive',
@@ -70,7 +90,8 @@ export function runPdfContentGate(input: PdfContentGateInput): PdfContentGateRes
   }
 
   const order: PdfContentIssueCode[] = [
-    'pdf-empty', 'blank-page', 'page-count-excessive', 'chinese-text-missing', 'translation-coverage-low',
+    'pdf-empty', 'blank-page', 'asset-footer-overflow', 'page-count-excessive',
+    'chinese-text-missing', 'translation-coverage-low',
   ];
   issues.sort((left, right) => order.indexOf(left.code) - order.indexOf(right.code));
   return { pass: issues.length === 0, coverage, chineseCharacters, issues };
@@ -79,6 +100,8 @@ export function runPdfContentGate(input: PdfContentGateInput): PdfContentGateRes
 export interface CompiledPdfInspection {
   pageTexts: string[];
   pageDrawableCounts: number[];
+  pageBitmapRegions: Rect[][];
+  pageSizes: Array<{ width: number; height: number }>;
 }
 
 export async function inspectCompiledPdf(pdfBytes: Uint8Array): Promise<CompiledPdfInspection> {
@@ -86,6 +109,8 @@ export async function inspectCompiledPdf(pdfBytes: Uint8Array): Promise<Compiled
   const pdf = await loading.promise;
   const pageTexts: string[] = [];
   const pageDrawableCounts: number[] = [];
+  const pageBitmapRegions: Rect[][] = [];
+  const pageSizes: Array<{ width: number; height: number }> = [];
   try {
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
       const page = await pdf.getPage(pageNumber);
@@ -96,8 +121,11 @@ export async function inspectCompiledPdf(pdfBytes: Uint8Array): Promise<Compiled
         .join(' '));
       const operators = await page.getOperatorList();
       pageDrawableCounts.push(operators.fnArray.length);
+      const viewport = page.getViewport({ scale: 1 });
+      pageSizes.push({ width: viewport.width, height: viewport.height });
+      pageBitmapRegions.push(extractBitmapRegions(operators, viewport.transform));
     }
-    return { pageTexts, pageDrawableCounts };
+    return { pageTexts, pageDrawableCounts, pageBitmapRegions, pageSizes };
   } finally {
     await pdf.destroy();
   }

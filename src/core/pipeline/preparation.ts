@@ -2283,9 +2283,11 @@ function isBibliographyHeading(source: string | undefined): boolean {
   return /^(?:references|bibliography|参考文献)$/i.test(compact);
 }
 
-function authorBiographyStart(source: string | undefined): number | undefined {
+export function authorBiographyStart(source: string | undefined): number | undefined {
   if (!source) return undefined;
-  const match = source.match(/(?:^|\n)(?=[A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){1,3}(?:\s+\([^\n)]*IEEE[^\n)]*\))?\s+received\b)/m);
+  const match = source.match(
+    /(?:^|\n)(?=[A-Z][A-Za-z.'-]*(?:\s+[A-Z][A-Za-z.'-]*){1,4}(?:\s+\([^\n)]*IEEE[^\n)]*\))?\s+(?:received|earned|obtained|is|was|has\s+(?:been|worked)|currently\s+(?:is|works))\b)/m,
+  );
   if (match?.index === undefined) return undefined;
   return match.index + (match[0].startsWith('\n') ? 1 : 0);
 }

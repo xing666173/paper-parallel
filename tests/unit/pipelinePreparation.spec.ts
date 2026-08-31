@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  authorBiographyStart,
   buildTranslationRequestsFromDoc,
   normalizeDeepSeekTranslationResponse,
   parseDeepSeekTranslationJson,
@@ -8,6 +9,15 @@ import {
 import type { Doc } from '../../src/types/models';
 
 describe('production pipeline preparation', () => {
+  it('recognizes degree and role-led author biographies after a bibliography', () => {
+    expect(authorBiographyStart('Patrick Dai is the founder of Semisand Chip Design.')).toBe(0);
+    expect(authorBiographyStart('Yinlong Li is the senior FPGA engineer in the hardware R&D center.')).toBe(0);
+    expect(authorBiographyStart('Shiyong Wu is the chief researcher in the hardware R&D center.')).toBe(0);
+    expect(authorBiographyStart('Fan Yang (Member, IEEE) received the B.S. degree in 2003.')).toBe(0);
+    expect(authorBiographyStart('[12] Patrick Dai is cited in this bibliography entry.')).toBeUndefined();
+    expect(authorBiographyStart('This system is the proposed accelerator.')).toBeUndefined();
+  });
+
   it('normalizes both snake_case and camelCase DeepSeek JSON without changing IDs', () => {
     const response = normalizeDeepSeekTranslationResponse({ blocks: [{
       block_id: 'p1', translation: '译文。',

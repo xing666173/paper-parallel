@@ -39,6 +39,15 @@ describe('vision: final PDF review', () => {
     expect(prompt).toContain('operators, variables, limits/subscripts');
   });
 
+  it('checks adjacent translated pages before confirming a missing author portrait', () => {
+    const prompt = buildVisionFinalConfirmationPrompt(16, [{
+      type: 'asset_missing', bbox: [80, 80, 120, 120], evidence: 'Missing author portrait for Yulong Li',
+    }], [15]);
+    expect(prompt).toContain('Adjacent translated target pages 15');
+    expect(prompt).toContain('moved to an adjacent target page is present, not missing');
+    expect(prompt).toContain('source biography without a source portrait');
+  });
+
   it('renders dense academic pages above CSS-pixel resolution for legible inspection', () => {
     expect(VISION_FINAL_REVIEW_RENDER_SCALE).toBeGreaterThanOrEqual(1.5);
   });
@@ -251,6 +260,46 @@ describe('vision: final PDF review', () => {
       .filter((part: any) => part.type === 'image_url');
     expect(confirmationImages).toEqual([
       { type: 'image_url', image_url: { url: 'data:image/png;base64,source-0', detail: 'original' } },
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,target-0', detail: 'original' } },
+    ]);
+  });
+
+  it('attaches adjacent target pages only when confirming a missing author portrait', async () => {
+    const requests: any[] = [];
+    const page = { getViewport: () => ({ width: 1, height: 1 }), render: () => ({ promise: Promise.resolve() }) };
+    const report = await runVisionFinalReview({
+      sourcePdf: { numPages: 1, getPage: async () => page },
+      targetPdf: { numPages: 2, getPage: async () => page },
+      manifest: { units: [] } as any,
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test',
+      renderPage: async (_page, role, index) => `data:image/png;base64,${role}-${index}`,
+      complete: async (request: any) => {
+        requests.push(request);
+        const prompt = request.messages[0].content[0].text as string;
+        if (prompt.includes('translated target page 2.') && !prompt.includes('Independently re-check')) {
+          return {
+            content: '{"target_page":2,"issues":[{"type":"asset_missing","severity":"severe","bbox":[80,80,120,120],"confidence":0.95,"evidence":"Missing author portrait for Yulong Li"}]}',
+            usage: { promptTokens: 1, completionTokens: 1 },
+          };
+        }
+        return {
+          content: prompt.includes('target page 2')
+            ? '{"target_page":2,"issues":[]}'
+            : '{"target_page":1,"issues":[]}',
+          usage: { promptTokens: 1, completionTokens: 1 },
+        };
+      },
+    });
+
+    expect(report.pass).toBe(true);
+    const confirmation = requests.find((request) => (
+      request.messages[0].content[0].text.includes('Independently re-check')
+    ));
+    const confirmationImages = confirmation.messages[0].content
+      .filter((part: any) => part.type === 'image_url');
+    expect(confirmationImages).toEqual([
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,source-0', detail: 'original' } },
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,target-1', detail: 'original' } },
       { type: 'image_url', image_url: { url: 'data:image/png;base64,target-0', detail: 'original' } },
     ]);
   });

@@ -178,8 +178,9 @@ describe('Typst project generation', () => {
       assets,
     });
 
-    expect(project.mainContent).toContain('#pp-asset-group[');
-    expect(project.mainContent).toContain('#let pp-asset-group(body) = block(breakable: false');
+    expect(project.mainContent).toContain('#pp-asset-group(column-flow: true)[');
+    expect(project.mainContent).toContain('#let pp-asset-group(body, column-flow: false) = {');
+    expect(project.mainContent).toContain('if column-flow { block(height: 8pt)[] }');
     expect(project.mainContent).toContain('#let pp-full-width(body) = body');
     expect(project.mainContent).toContain('#let pp-single(body) = body');
     expect(project.mainContent).not.toContain('#let pp-full-width(body) = block');
@@ -206,8 +207,11 @@ describe('Typst project generation', () => {
       assets,
     });
 
-    expect(project.mainContent.indexOf('前置正文')).toBeLessThan(project.mainContent.indexOf('#pp-asset-group['));
-    expect(project.mainContent).not.toContain('#colbreak()');
+    expect(project.mainContent.indexOf('前置正文')).toBeLessThan(
+      project.mainContent.indexOf('#pp-asset-group(column-flow: true)['),
+    );
+    const body = project.mainContent.slice(project.mainContent.indexOf('#pp-double['));
+    expect(body).not.toContain('#colbreak()');
   });
 
   it('does not force a fresh page merely because a two-column segment starts with an asset', async () => {
@@ -231,7 +235,7 @@ describe('Typst project generation', () => {
     });
 
     expect(project.mainContent).not.toContain('#pagebreak(weak: true)');
-    expect(project.mainContent).toContain('#pp-asset-group[');
+    expect(project.mainContent).toContain('#pp-asset-group(column-flow: true)[');
   });
 
   it('renders a horizontal source asset band as one multi-column grid', async () => {

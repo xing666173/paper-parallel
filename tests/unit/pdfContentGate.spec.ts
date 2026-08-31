@@ -29,6 +29,22 @@ describe('compiled PDF content gate', () => {
     ]);
   });
 
+  it('rejects an immutable image that overflows into the reserved footer', () => {
+    const result = runPdfContentGate({
+      pageTexts: ['中文正文和图注。'],
+      pageDrawableCounts: [10],
+      pageBitmapRegions: [[{ x: 312, y: 590, w: 239, h: 164 }]],
+      pageSizes: [{ width: 612, height: 792 }],
+      expectedTranslations: ['中文正文和图注。'],
+      maximumPages: 2,
+    });
+
+    expect(result.issues).toContainEqual({
+      code: 'asset-footer-overflow',
+      message: '中文 PDF 存在越过正文底线的图片，可能被页脚裁切：1',
+    });
+  });
+
   it('passes a readable naturally paginated Chinese paper with high translation coverage', () => {
     expect(runPdfContentGate({
       pageTexts: [

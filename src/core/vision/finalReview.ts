@@ -69,6 +69,12 @@ const ISSUE_TYPES: readonly VisionFinalIssueType[] = [
   'layout_collapse', 'layout_drift', 'asset_changed', 'asset_missing', 'formula_changed', 'table_changed',
 ];
 
+const AUTHOR_PORTRAIT_EVIDENCE = /\b(?:author\s+)?(?:portrait|headshot|photo)s?\b|头像|肖像/i;
+
+function isAuthorPortraitMissing(issue: Pick<VisionFinalIssue, 'type' | 'evidence'>): boolean {
+  return issue.type === 'asset_missing' && AUTHOR_PORTRAIT_EVIDENCE.test(issue.evidence);
+}
+
 function calibratedSeverity(
   type: VisionFinalIssueType,
   severity: VisionFinalIssue['severity'],
@@ -85,7 +91,7 @@ function calibratedSeverity(
     // author portraits/headshots are uncaptioned assets that otherwise have
     // no deterministic text marker. Missing them anywhere in the final author
     // section is a real document-level loss and must remain blocking.
-    if (/\b(?:author\s+)?(?:portrait|headshot|photo)s?\b|头像|肖像/i.test(evidence)
+    if (AUTHOR_PORTRAIT_EVIDENCE.test(evidence)
       && confidence >= 0.85) return 'severe';
     return 'warning';
   }
@@ -447,6 +453,25 @@ export async function runVisionFinalReview(options: RunVisionFinalReviewOptions)
     if (!pageReport) throw new Error('Vision 成品质检 JSON 无法解析');
     const severeCandidates = pageReport.issues.filter(isBlockingIssue);
     if (severeCandidates.length) {
+      const adjacentTargetContent: any[] = [];
+      const adjacentTargetPageIndices = severeCandidates.some(isAuthorPortraitMissing)
+        ? [targetPageIndex - 1, targetPageIndex + 1].filter((pageIndex) => (
+          pageIndex >= 0 && pageIndex < options.targetPdf.numPages
+        ))
+        : [];
+      for (const adjacentTargetPageIndex of adjacentTargetPageIndices) {
+        const adjacentTargetImage = await renderReviewPage(
+          options.targetPdf,
+          adjacentTargetPageIndex + 1,
+          'target',
+          adjacentTargetPageIndex,
+        );
+        if (pageSignal.aborted) throw new DOMException('已停止', 'AbortError');
+        adjacentTargetContent.push(
+          { type: 'text', text: `ADJACENT TARGET PAGE ${adjacentTargetPageIndex + 1}` },
+          { type: 'image_url', image_url: { url: adjacentTargetImage, detail: 'original' } },
+        );
+      }
       const requestConfirmation = () => {
         let contentReported = false;
         return complete({
@@ -482,6 +507,7 @@ export async function runVisionFinalReview(options: RunVisionFinalReviewOptions)
                   bbox: issue.bbox,
                   evidence: issue.evidence,
                 })),
+                adjacentTargetPageIndices.map((pageIndex) => pageIndex + 1),
               ),
             },
             // Changed-asset candidates require the same source references used
@@ -489,6 +515,7 @@ export async function runVisionFinalReview(options: RunVisionFinalReviewOptions)
             // compact but intact ruled table for prose merely because its
             // typography differs from the surrounding translated text.
             ...content.slice(1),
+            ...adjacentTargetContent,
           ] }],
         });
       };

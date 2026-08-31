@@ -59,12 +59,17 @@ export function buildVisionFinalReviewPrompt(
 export function buildVisionFinalConfirmationPrompt(
   targetPageNumber: number,
   candidates: readonly { type: string; bbox: readonly number[]; evidence: string }[],
+  adjacentTargetPageNumbers: readonly number[] = [],
 ): string {
   return [
     'Independently re-check the attached translated academic-paper page.',
     `This is target page ${targetPageNumber}.`,
     'The first visual pass proposed the candidate issues below. Confirm only defects that are plainly visible in the pixels; do not repeat a candidate merely because it was proposed.',
     'Global translated-text markers, content coverage, immutable-asset markers, and asset hashes have already passed deterministic checks. Do not confirm missing_text or asset_missing merely because this one page is sparse or source content was naturally repaginated.',
+    ...(adjacentTargetPageNumbers.length ? [
+      `Adjacent translated target pages ${adjacentTargetPageNumbers.join(', ')} are also attached as context.`,
+      'For an author-portrait candidate, compare the source pixels with the entire attached target-page window. A portrait moved to an adjacent target page is present, not missing. A source biography without a source portrait does not require a target portrait. Confirm asset_missing only when a portrait visibly present in the source references is absent from every attached target page.',
+    ] : []),
     `Candidates: ${JSON.stringify(candidates)}`,
     'For clipped_text, confirm only when glyph strokes are visibly cut by a page, column, crop, or overlapping object boundary. A complete heading or first line near the top margin is not clipped.',
     'For overlap, confirm only when two visible content objects actually cover one another. Small dense labels inside immutable figures are not defects.',
