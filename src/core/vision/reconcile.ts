@@ -349,6 +349,42 @@ function withPrecedingTextClearance(
   return top < bottom - 12 ? { ...rect, y: top, h: bottom - top } : rect;
 }
 
+function withAdjacentVisualLabelExtent(
+  doc: Doc,
+  pageIndex: number,
+  rect: Rect,
+  type: VisionRegion['type'],
+): Rect {
+  if (type !== 'figure') return rect;
+  const page = doc.pages[pageIndex]!;
+  const candidates = doc.blocks.filter((block) => {
+    if (block.pageIndex !== pageIndex || block.type === 'caption' || !looksLikeVisualText(block)) return false;
+    const verticalOverlap = Math.max(0, Math.min(
+      block.rect.y + block.rect.h,
+      rect.y + rect.h,
+    ) - Math.max(block.rect.y, rect.y));
+    const verticalRatio = verticalOverlap / Math.max(1, Math.min(block.rect.h, rect.h));
+    const horizontalGap = Math.max(
+      0,
+      block.rect.x - (rect.x + rect.w),
+      rect.x - (block.rect.x + block.rect.w),
+    );
+    return verticalRatio >= 0.3 && horizontalGap <= page.width * 0.08;
+  });
+  if (!candidates.length) return rect;
+  const left = Math.max(0, Math.min(rect.x, ...candidates.map((block) => block.rect.x)) - 2);
+  const top = Math.max(0, Math.min(rect.y, ...candidates.map((block) => block.rect.y)) - 2);
+  const right = Math.min(page.width, Math.max(
+    rect.x + rect.w,
+    ...candidates.map((block) => block.rect.x + block.rect.w),
+  ) + 2);
+  const bottom = Math.min(page.height, Math.max(
+    rect.y + rect.h,
+    ...candidates.map((block) => block.rect.y + block.rect.h),
+  ) + 2);
+  return { x: left, y: top, w: right - left, h: bottom - top };
+}
+
 function looksLikeVisualText(block: Doc['blocks'][number]): boolean {
   const text = block.text?.trim() ?? '';
   if (!text) return true;
@@ -577,10 +613,6 @@ export function reconcileVisionLayout(
         });
         return;
       }
-      if (vision.confidence < minimumConfidence && !portraitIndices.has(regionIndex)) {
-        unresolved.push({ pageIndex: page.pageIndex, regionIndex, type: vision.type, reason: 'low-confidence' });
-        return;
-      }
       const sourceVisionRect = sourceRect(vision.bbox, page);
       let rect = withAssetPadding(sourceVisionRect, vision.type, page);
       rect = withSingleColumnFormulaWidth(doc, page.pageIndex, rect, analysis, vision);
@@ -591,6 +623,19 @@ export function reconcileVisionLayout(
         unresolved.push({ pageIndex: page.pageIndex, regionIndex, type: vision.type, reason: 'caption-unmatched' });
         return;
       }
+      const captionCorroboratesRegion = Boolean(
+        vision.confidence >= 0.45
+        && (vision.type === 'figure' || vision.type === 'table')
+        && captionRect
+        && caption
+        && intersectionArea(caption.rect, captionRect) / Math.max(1, caption.rect.w * caption.rect.h) >= 0.2,
+      );
+      if (vision.confidence < minimumConfidence
+        && !portraitIndices.has(regionIndex)
+        && !captionCorroboratesRegion) {
+        unresolved.push({ pageIndex: page.pageIndex, regionIndex, type: vision.type, reason: 'low-confidence' });
+        return;
+      }
       if (vision.type === 'display_formula' && implausibleFormulaInk(doc, page.pageIndex, rect)) {
         unresolved.push({ pageIndex: page.pageIndex, regionIndex, type: vision.type, reason: 'body-prose-density' });
         return;
@@ -598,6 +643,7 @@ export function reconcileVisionLayout(
       const captionBoundaries = vision.type === 'table' && caption
         ? [caption.rect]
         : [caption?.rect, captionRect];
+      rect = withAdjacentVisualLabelExtent(doc, page.pageIndex, rect, vision.type);
       rect = withoutCaption(rect, captionBoundaries, vision.type);
       rect = withAdjacentCaptionClearance(rect, caption?.rect, vision.type);
       rect = withoutFollowingTableCaption(doc, page.pageIndex, rect, caption?.id, vision.type);

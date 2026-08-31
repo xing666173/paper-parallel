@@ -18,6 +18,8 @@ export interface ProjectRepository {
   saveAlignmentManifest(manifest: AlignmentManifest): Promise<void>;
   loadAlignmentManifest(projectId: string): Promise<AlignmentManifest | undefined>;
   clearProjectDerivedData(projectId: string): Promise<void>;
+  /** 删除排版结果但保留英文、译文以及源版式/公式缓存。 */
+  clearProjectLayoutOutputs(projectId: string): Promise<void>;
   listProjectTranslations(projectId: string): Promise<TranslationCacheRecord[]>;
   listProjectArtifacts(projectId: string): Promise<ProjectArtifactRecord[]>;
   saveAiLog(projectId: string, entries: ProjectAiLogEntry[]): Promise<void>;
@@ -101,6 +103,20 @@ export function createProjectRepository(name = 'paper-parallel'): ProjectReposit
 
     async listProjectArtifacts(projectId) {
       return db.artifacts.where('projectId').equals(projectId).sortBy('kind');
+    },
+
+    async clearProjectLayoutOutputs(projectId) {
+      const outputKinds = new Set([
+        'chinese-pdf', 'typst-source', 'typst-preview',
+        'alignment-manifest', 'quality-report', 'project-package',
+      ]);
+      await db.transaction('rw', db.artifacts, async () => {
+        const artifacts = await db.artifacts.where('projectId').equals(projectId).toArray();
+        const outputKeys = artifacts
+          .filter((artifact) => outputKinds.has(artifact.kind))
+          .map((artifact) => artifact.key);
+        if (outputKeys.length) await db.artifacts.bulkDelete(outputKeys);
+      });
     },
 
     async saveAiLog(projectId, entries) {

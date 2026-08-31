@@ -2,9 +2,11 @@
 defineProps<{
   enPage: number; enPageCount: number; zhPage: number; zhPageCount: number;
   enZoom: number; zhZoom: number; syncEnabled: boolean; highlightsEnabled: boolean;
+  layoutLabel: string; showReflow: boolean;
 }>();
 const emit = defineEmits<{
   return: []; choose: []; clear: []; 'download-chinese': []; 'download-package': [];
+  reflow: [];
   'page-step': [side: 'en' | 'zh', delta: number];
   'zoom-step': [side: 'en' | 'zh', delta: number];
   'fit-width': [side: 'en' | 'zh'];
@@ -38,10 +40,12 @@ const emit = defineEmits<{
       </div>
     </div>
     <div class="reader-options">
+      <span class="layout-profile-badge">{{ layoutLabel }}</span>
       <label><input :checked="syncEnabled" type="checkbox" @change="emit('update:syncEnabled', ($event.target as HTMLInputElement).checked)"> 同步滚动</label>
       <label><input :checked="highlightsEnabled" type="checkbox" @change="emit('update:highlightsEnabled', ($event.target as HTMLInputElement).checked)"> 对应高亮</label>
       <button type="button" @click="emit('download-chinese')">下载中文 PDF</button>
       <button type="button" @click="emit('download-package')">下载项目包</button>
+      <button v-if="showReflow" type="button" @click="emit('reflow')">按新版重新排版</button>
     </div>
   </header>
 </template>
@@ -52,5 +56,6 @@ const emit = defineEmits<{
 .document-controls { justify-content: space-between; }.reader-options { justify-content: flex-end; }
 button { min-height: 32px; padding: 0 10px; border: 1px solid #cbd5e1; border-radius: 7px; background: #fff; color: #334155; cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: .45; }.danger-action { color: #b42318; border-color: #f2b8b5; }
+.layout-profile-badge { border-radius: 999px; padding: 5px 9px; color: #1d5f9c; background: #e8f2fd; font-size: 11px; font-weight: 700; }
 @media (max-width: 1000px) { .document-controls { align-items: flex-start; flex-direction: column; }.reader-options { justify-content: flex-start; } }
 </style>

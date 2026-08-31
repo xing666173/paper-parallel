@@ -9,6 +9,8 @@ export interface ProjectPackageContext {
     sourceFileHash?: string;
     modelId?: string;
     thinkingMode?: 'enabled' | 'disabled';
+    targetLayoutPolicy?: 'single-column' | 'source-layout';
+    layoutProfileVersion?: string;
     pageCounts?: { en: number; zh: number };
   };
   glossary?: unknown;
@@ -58,6 +60,7 @@ export async function buildProjectPackage(
   const english = byKind.get('english-pdf');
   const chinese = byKind.get('chinese-pdf');
   const typst = byKind.get('typst-source');
+  const qualityReport = byKind.get('quality-report');
   if (!english || !chinese) throw new Error('项目包缺少英文或中文 PDF');
 
   const checksums: Record<string, string> = {
@@ -65,8 +68,9 @@ export async function buildProjectPackage(
     'chinese.pdf': await hashBlob(chinese.blob),
   };
   if (typst) checksums['translation.typ'] = await hashBlob(typst.blob);
+  if (qualityReport) checksums['quality-report.json'] = await hashBlob(qualityReport.blob);
   const project = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     projectId,
     name: context.project?.name ?? projectId,
     createdAt: task?.createdAt ?? null,
@@ -74,6 +78,12 @@ export async function buildProjectPackage(
     promptVersion: SYSTEM_PROMPT_VERSION,
     modelId: context.project?.modelId ?? null,
     thinkingMode: context.project?.thinkingMode ?? null,
+    targetLayoutPolicy: context.project?.targetLayoutPolicy
+      ?? task?.settings?.targetLayoutPolicy
+      ?? 'source-layout',
+    layoutProfileVersion: context.project?.layoutProfileVersion
+      ?? task?.settings?.layoutProfileVersion
+      ?? 'legacy-source-layout',
     sourceFileHash: context.project?.sourceFileHash ?? null,
     pageCounts: context.project?.pageCounts ?? null,
     artifactChecksums: checksums,
@@ -83,6 +93,7 @@ export async function buildProjectPackage(
   const targetUnits = context.targetUnits ?? alignment?.units.flatMap((unit) => unit.targetUnitIds) ?? [];
   const textFiles: Record<string, string> = {
     'project.json': json(project),
+    'quality-report.json': qualityReport ? await qualityReport.blob.text() : json(null),
     'alignment.json': json(alignment ?? null),
     'assets.json': json(context.assets ?? { assets: [] }),
     'audit.json': json(context.audit ?? { issues: [] }),

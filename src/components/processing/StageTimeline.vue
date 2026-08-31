@@ -8,7 +8,7 @@ const stages: { stage: TaskStage; label: string; detail: string }[] = [
   { stage: 'analyzing-layout', label: '识别版式', detail: 'Vision Exp 识别图、表、公式与栏区' },
   { stage: 'building-glossary', label: '建立术语表', detail: '统一全文专业术语' },
   { stage: 'translating', label: '翻译正文', detail: '批次翻译并校验保护内容' },
-  { stage: 'composing', label: '生成中文排版', detail: '继承原文区域与资产顺序' },
+  { stage: 'composing', label: '生成中文单栏排版', detail: '统一单栏并保留原始技术资产顺序' },
   { stage: 'compiling', label: '编译 PDF', detail: '在浏览器中生成中文 PDF' },
   { stage: 'aligning', label: '建立对齐映射', detail: '构建连续语义组锚点' },
   { stage: 'validating', label: '质量检查', detail: '确定性门禁与 Vision Exp 逐页复核' },

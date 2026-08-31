@@ -221,6 +221,82 @@ describe('source PDF geometry', () => {
     expect(resolved.source.map((set) => set.rects[0].y)).toEqual([200, 240]);
   });
 
+  it('combines a short trailing prose prefix with an exact long continuation in the adjacent block', () => {
+    const prefix = 'If we naively';
+    const suffix = 'scale up the bitwidth beyond 256, the area and energy overheads increase significantly.';
+    const body = `A long technical paragraph introduces the design constraints and computation costs. ${prefix}\nJ\nStep(3)\n… … … …\nNTT NTT`;
+    const continuation = `${suffix} Furthermore, the next sentence remains here.`;
+    const doc = emptyDoc();
+    doc.pages.push({ pageIndex: 1, width: 612, height: 792, columns: [] });
+    doc.blocks = [
+      {
+        id: 'body', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 300, y: 600, w: 240, h: 120 }, order: 1,
+        splitAllowed: true, widthMode: 'column', text: body,
+        characterRects: [...body].map((ch, sourceIndex) => ({
+          ch, sourceIndex, pageIndex: 0, rect: { x: 300 + sourceIndex * 2, y: 600, w: 2, h: 10 },
+        })),
+      },
+      {
+        id: 'continuation', docId: 'en', type: 'paragraph', pageIndex: 1,
+        rect: { x: 50, y: 250, w: 240, h: 80 }, order: 2,
+        splitAllowed: true, widthMode: 'column', text: continuation,
+        characterRects: [...continuation].map((ch, sourceIndex) => ({
+          ch, sourceIndex, pageIndex: 1, rect: { x: 50 + sourceIndex * 2, y: 250, w: 2, h: 10 },
+        })),
+      },
+    ];
+    const unit = alignmentUnit({
+      id: 'body-g-2', parentId: 'body', sourceBlockId: 'body',
+      kind: 'semantic-group', relation: '1:1', sourceText: `${prefix} ${suffix}`,
+    });
+
+    const [resolved] = resolveSourceGeometry([unit], doc, []);
+    expect(resolved).toMatchObject({
+      status: 'aligned', confidence: 0.95,
+      fallbackReason: 'source-sentence-split-across-origin-blocks',
+    });
+    expect(resolved.source.map((set) => set.page)).toEqual([0, 1]);
+  });
+
+  it('combines an exact one-word block ending with a long adjacent-page continuation', () => {
+    const prefix = 'This';
+    const suffix = 'is because all required points overlap with the device computation.';
+    const body = `The transfer time drops by an order of magnitude. ${prefix}`;
+    const continuation = `${suffix} Fourth, the next sentence remains separate.`;
+    const doc = emptyDoc();
+    doc.pages.push({ pageIndex: 1, width: 612, height: 792, columns: [] });
+    doc.blocks = [
+      {
+        id: 'body', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 100, y: 680, w: 390, h: 40 }, order: 1,
+        splitAllowed: true, widthMode: 'span', text: body,
+        characterRects: [...body].map((ch, sourceIndex) => ({
+          ch, sourceIndex, pageIndex: 0, rect: { x: 100 + sourceIndex * 3, y: 680, w: 3, h: 10 },
+        })),
+      },
+      {
+        id: 'continuation', docId: 'en', type: 'paragraph', pageIndex: 1,
+        rect: { x: 100, y: 260, w: 390, h: 60 }, order: 2,
+        splitAllowed: true, widthMode: 'span', text: continuation,
+        characterRects: [...continuation].map((ch, sourceIndex) => ({
+          ch, sourceIndex, pageIndex: 1, rect: { x: 100 + sourceIndex * 3, y: 260, w: 3, h: 10 },
+        })),
+      },
+    ];
+    const unit = alignmentUnit({
+      id: 'body-g-2', parentId: 'body', sourceBlockId: 'body',
+      kind: 'semantic-group', relation: '1:1', sourceText: `${prefix} ${suffix}`,
+    });
+
+    const [resolved] = resolveSourceGeometry([unit], doc, []);
+    expect(resolved).toMatchObject({
+      status: 'aligned', confidence: 0.95,
+      fallbackReason: 'source-sentence-split-across-origin-blocks',
+    });
+    expect(resolved.source.map((set) => set.page)).toEqual([0, 1]);
+  });
+
   it('tolerates a small diagram-label insertion inside an otherwise matching sentence', () => {
     const source = 'The process begins with 1 the interpretive execution of the guest program.';
     const target = 'The process begins with the interpretive execution of the guest program.';

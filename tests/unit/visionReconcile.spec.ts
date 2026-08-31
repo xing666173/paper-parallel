@@ -32,6 +32,25 @@ describe('vision: deterministic layout reconciliation', () => {
     expect(result.assetRegions[0]?.widthMode).toBe('column');
   });
 
+  it('expands a figure crop to include adjacent multi-line diagram labels', () => {
+    const doc = fixtureDoc();
+    doc.blocks.push({
+      id: 'diagram-labels', docId: 'en', type: 'paragraph', pageIndex: 0,
+      rect: { x: 280, y: 160, w: 220, h: 120 }, order: 0.5,
+      text: 'Stream 1\nData Transfer\nGPU Computation\nMSM\nIdle',
+      splitAllowed: true, widthMode: 'column',
+    });
+    const result = reconcileVisionLayout(doc, [{
+      pageIndex: 0, layout: 'single', regions: [{
+        type: 'figure', bbox: [500, 190, 160, 200], column: 'full', confidence: 0.99,
+      }],
+    }]);
+
+    expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions[0]!.rect.x).toBeLessThanOrEqual(278);
+    expect(result.assetRegions[0]!.rect.x + result.assetRegions[0]!.rect.w).toBeGreaterThanOrEqual(502);
+  });
+
   it('matches a nearby approximate caption box and trims a figure crop that includes the real caption', () => {
     const result = reconcileVisionLayout(fixtureDoc(), [{
       pageIndex: 0, layout: 'double', regions: [{
@@ -366,6 +385,20 @@ describe('vision: deterministic layout reconciliation', () => {
     expect(result.unresolved.map((item) => item.reason)).toEqual([
       'low-confidence', 'page-edge-touch',
     ]);
+  });
+
+  it('accepts a moderately confident asset only when its caption box is geometrically corroborated', () => {
+    const result = reconcileVisionLayout(fixtureDoc(), [{
+      pageIndex: 0, layout: 'double', regions: [{
+        type: 'figure', bbox: [80, 190, 360, 260], column: 'left',
+        captionBBox: [80, 470, 360, 35], confidence: 0.5,
+      }],
+    }]);
+
+    expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions).toEqual([expect.objectContaining({
+      kind: 'figure', captionUnitId: 'caption-1',
+    })]);
   });
 
   it('accepts a low-confidence cluster of uncaptioned author portraits on a biography page', () => {

@@ -54,6 +54,7 @@ function translationKind(kind: SemanticUnitKind): TranslationBlockKind {
   if (kind === 'author') return 'author';
   if (kind === 'affiliation') return 'affiliation';
   if (kind === 'abstract') return 'abstract';
+  if (kind === 'keywords') return 'paragraph';
   if (kind === 'heading') return 'heading';
   if (kind === 'list-item') return 'list-item';
   if (kind === 'caption') return 'caption';
@@ -182,6 +183,105 @@ export interface PrepareImmutableOptions {
   verifiedAssetRegions?: readonly DetectedAssetRegion[];
   /** Vision page layout is authoritative when the parser is confused by formula/figure text fragments. */
   pageLayouts?: ReadonlyMap<number, 'single' | 'double' | 'mixed'>;
+}
+
+export interface ParsedHeadingPart {
+  number?: string;
+  level: 1 | 2 | 3;
+  text: string;
+}
+
+/**
+ * Extract structural heading numbers before translation. A parser block may
+ * contain two adjacent headings (for example `2 Background 2.1 Motivation`).
+ * Only heading units are passed here, so a later numeric phrase cannot split
+ * ordinary body prose.
+ */
+export function parseHeadingParts(source: string): ParsedHeadingPart[] {
+  const normalized = source.replace(/\r/g, '').replace(/[ \t]+/g, ' ').trim();
+  if (!normalized) return [];
+  const matches: Array<{ start: number; contentStart: number; number: string; level: 1 | 2 | 3 }> = [];
+  const pattern = /(^|\s)((?:\d{1,2}(?:\.\d{1,2}){0,2})|(?:[IVXLCDM]{1,8}))\.?\s+(?=[A-Za-z\u00c0-\u024f\u3400-\u9fff])/g;
+  for (const match of normalized.matchAll(pattern)) {
+    const prefix = match[1] ?? '';
+    const number = match[2]!;
+    const start = (match.index ?? 0) + prefix.length;
+    const numericLevel = /^\d/.test(number) ? number.split('.').length : 1;
+    matches.push({
+      start,
+      contentStart: (match.index ?? 0) + match[0].length,
+      number,
+      level: Math.min(3, numericLevel) as 1 | 2 | 3,
+    });
+  }
+  if (!matches.length || matches[0]!.start > 0) return [{ level: 1, text: normalized }];
+  return matches.flatMap((match, index) => {
+    const text = normalized.slice(match.contentStart, matches[index + 1]?.start ?? normalized.length).trim();
+    return text ? [{ number: match.number, level: match.level, text }] : [];
+  });
+}
+
+function normalizeFirstPageFrontMatter(
+  doc: Doc,
+  units: SemanticUnit[],
+  blocks: ReadonlyMap<string, Doc['blocks'][number]>,
+): void {
+  const pageWidth = doc.pages[0]?.width ?? doc.meta.paperWidth;
+  const title = units.find((unit) => unit.kind === 'title');
+  const titleBlock = title ? blocks.get(title.sourceBlockId ?? title.id) : undefined;
+  const firstBodyTop = units
+    .filter((unit) => ['abstract', 'keywords', 'heading'].includes(unit.kind))
+    .map((unit) => blocks.get(unit.sourceBlockId ?? unit.id))
+    .filter((block): block is Doc['blocks'][number] => Boolean(block) && block!.pageIndex === 0)
+    .map((block) => block.rect.y)
+    .sort((left, right) => left - right)[0] ?? doc.meta.paperHeight * 0.38;
+  for (const unit of units) {
+    if (unit.kind !== 'paragraph' || !unit.sourceText || unit.parentId) continue;
+    const block = blocks.get(unit.sourceBlockId ?? unit.id);
+    if (!block || block.pageIndex !== 0) continue;
+    if (titleBlock && block.rect.y < titleBlock.rect.y + titleBlock.rect.h - 2) continue;
+    if (block.rect.y >= firstBodyTop || block.rect.y > doc.meta.paperHeight * 0.34) continue;
+    const center = block.rect.x + block.rect.w / 2;
+    if (Math.abs(center - pageWidth / 2) > pageWidth * 0.14) continue;
+    const text = unit.sourceText.replace(/\s+/g, ' ').trim();
+    if (!text || text.length > 320) continue;
+    const affiliation = /\b(?:university|institute|institution|laborator(?:y|ies)|department|school|college|academy|faculty|email|e-mail)\b|@/i.test(text);
+    const nameTokens = text.match(/\b[A-Z][A-Za-z'’-]{1,}(?:\s+[A-Z][A-Za-z'’-]{1,})+\b/g) ?? [];
+    const author = nameTokens.length >= 2 || (nameTokens.length >= 1 && /(?:,|\band\b|&)/i.test(text));
+    if (affiliation) unit.kind = 'affiliation';
+    else if (author) unit.kind = 'author';
+  }
+}
+
+function normalizeHeadingHierarchy(
+  units: SemanticUnit[],
+  regions: LayoutRegion[],
+): SemanticUnit[] {
+  let normalized = [...units];
+  for (const unit of [...normalized]) {
+    if (unit.kind !== 'heading' || !unit.sourceText) continue;
+    const parts = parseHeadingParts(unit.sourceText);
+    if (!parts.length) continue;
+    const children = parts.map((part, index): SemanticUnit => ({
+      ...unit,
+      id: index === 0 ? unit.id : `${unit.id}-heading-${index + 1}`,
+      parentId: index === 0 ? unit.parentId : unit.id,
+      sourceBlockId: unit.sourceBlockId ?? unit.id,
+      sourceText: part.text,
+      headingNumber: part.number,
+      headingLevel: part.level,
+      protectedTokens: extractProtectedTokens(part.text),
+      order: unit.order + index / 1_000,
+    }));
+    const unitIndex = normalized.findIndex((candidate) => candidate.id === unit.id);
+    normalized.splice(unitIndex, 1, ...children);
+    const region = regions.find((candidate) => candidate.id === unit.layoutRegionId);
+    const regionIndex = region?.orderedUnitIds.indexOf(unit.id) ?? -1;
+    if (region && regionIndex >= 0) {
+      region.orderedUnitIds.splice(regionIndex, 1, ...children.map((child) => child.id));
+    }
+  }
+  return normalized;
 }
 
 function mergeFirstPageTitleContinuations(
@@ -1618,6 +1718,182 @@ function splitOversizedSourceText(source: string): string[] {
   return parts;
 }
 
+function withoutTrailingVisualPunctuationRows(source: string): string {
+  const lines = source.split(/\r?\n/);
+  let cut = lines.length;
+  while (cut > 1) {
+    const line = lines[cut - 1]!.trim();
+    if (!line || /[\p{L}\p{N}]/u.test(line) || !/^[\p{P}\p{S}\s]+$/u.test(line)) break;
+    cut -= 1;
+  }
+  return lines.slice(0, cut).join('\n').trim();
+}
+
+function normalizedPrefixEnd(source: string, prefix: string): number | undefined {
+  let sourceIndex = 0;
+  let prefixIndex = 0;
+  while (prefixIndex < prefix.length) {
+    while (sourceIndex < source.length && /\s/u.test(source[sourceIndex]!)) sourceIndex += 1;
+    while (prefixIndex < prefix.length && /\s/u.test(prefix[prefixIndex]!)) prefixIndex += 1;
+    if (prefixIndex >= prefix.length) return sourceIndex;
+    if (sourceIndex >= source.length) return undefined;
+    if (source[sourceIndex]!.normalize('NFKC') !== prefix[prefixIndex]!.normalize('NFKC')) return undefined;
+    sourceIndex += 1;
+    prefixIndex += 1;
+  }
+  return sourceIndex;
+}
+
+/**
+ * A parser aggregate can end with the beginning of a sentence followed by a
+ * figure's internal labels, while the lowercase continuation is emitted after
+ * the figure caption on the next page/column. Rejoin only the first complete
+ * continuation sentence. The rest of the following paragraph stays after the
+ * figure, and sourceBlockId remains anchored to the prefix block so alignment
+ * can resolve the sentence across both original PDF blocks.
+ */
+function repairInterruptedProseAcrossImmutableAsset(
+  inputUnits: SemanticUnit[],
+  regions: LayoutRegion[],
+  assets: readonly DetectedAssetRegion[],
+  blocks: ReadonlyMap<string, Doc['blocks'][number]>,
+): SemanticUnit[] {
+  const proseKinds = new Set<SemanticUnitKind>(['paragraph', 'abstract', 'list-item']);
+  const ordered = [...inputUnits].sort((left, right) => left.order - right.order);
+  const removedIds = new Set<string>();
+
+  for (let index = 0; index < ordered.length; index += 1) {
+    const current = ordered[index]!;
+    if (removedIds.has(current.id) || !proseKinds.has(current.kind) || !current.sourceText) continue;
+    const cleanedCurrent = withoutTrailingVisualPunctuationRows(current.sourceText);
+    if (
+      /[.!?。！？]["')\]}”’]*\s*$/u.test(cleanedCurrent)
+      || (cleanedCurrent.match(/[A-Za-z]{2,}/g)?.length ?? 0) < 4
+    ) continue;
+
+    const nextIndex = ordered.findIndex((candidate, candidateIndex) => (
+      candidateIndex > index
+      && !removedIds.has(candidate.id)
+      && proseKinds.has(candidate.kind)
+      && Boolean(candidate.sourceText?.trim())
+    ));
+    if (nextIndex < 0) continue;
+    const next = ordered[nextIndex]!;
+    const nextSource = next.sourceText!.trim();
+    if (!/^[\s([{'"“‘]*\p{Ll}/u.test(nextSource)) continue;
+
+    const between = ordered.slice(index + 1, nextIndex).filter((unit) => !removedIds.has(unit.id));
+    if (between.some((unit) => ![
+      'figure', 'table', 'formula', 'code', 'caption', 'table-title', 'page-furniture',
+    ].includes(unit.kind))) continue;
+    const captionedVisuals = between.flatMap((unit) => {
+      if (!['figure', 'table', 'code'].includes(unit.kind)) return [];
+      const asset = assets.find((candidate) => candidate.id === (unit.assetId ?? unit.id));
+      return asset?.captionUnitId && between.some((candidate) => candidate.id === asset.captionUnitId)
+        ? [asset]
+        : [];
+    });
+    if (!captionedVisuals.length) continue;
+
+    const currentBlock = blocks.get(current.sourceBlockId ?? current.id);
+    const nextBlock = blocks.get(next.sourceBlockId ?? next.id);
+    if (!currentBlock || !nextBlock) continue;
+    const currentPages = physicalPages(currentBlock);
+    const lastCurrentPage = Math.max(...currentPages);
+    if (
+      nextBlock.pageIndex < currentBlock.pageIndex
+      || nextBlock.pageIndex > lastCurrentPage + 1
+      || !captionedVisuals.some((asset) => (
+        asset.pageIndex >= currentBlock.pageIndex && asset.pageIndex <= nextBlock.pageIndex
+      ))
+    ) continue;
+
+    const candidates = buildSourceSentenceCandidates(next.id, nextSource);
+    if (candidates.mode !== 'sentence-candidates') continue;
+    const firstSentence = candidates.sentences[0]?.text.trim();
+    if (
+      !firstSentence
+      || firstSentence.length > 800
+      || !/[.!?。！？]["')\]}”’]*$/u.test(firstSentence)
+    ) continue;
+    const prefixEnd = normalizedPrefixEnd(nextSource, firstSentence);
+    if (prefixEnd === undefined) continue;
+
+    current.sourceText = `${cleanedCurrent}\n${firstSentence}`;
+    current.protectedTokens = extractProtectedTokens(current.sourceText);
+    const remainder = nextSource.slice(prefixEnd).trim();
+    if (remainder) {
+      next.sourceText = remainder;
+      next.protectedTokens = extractProtectedTokens(remainder);
+    } else {
+      removedIds.add(next.id);
+    }
+  }
+
+  if (!removedIds.size) return inputUnits;
+  for (const region of regions) {
+    region.orderedUnitIds = region.orderedUnitIds.filter((unitId) => !removedIds.has(unitId));
+  }
+  return inputUnits.filter((unit) => !removedIds.has(unit.id));
+}
+
+/** Join a wrapped table caption line that sits physically between its caption and table. */
+function repairCaptionContinuationBeforeImmutableTable(
+  inputUnits: SemanticUnit[],
+  regions: LayoutRegion[],
+  assets: readonly DetectedAssetRegion[],
+  blocks: ReadonlyMap<string, Doc['blocks'][number]>,
+): SemanticUnit[] {
+  const removedIds = new Set<string>();
+  for (const asset of assets) {
+    if (asset.kind !== 'table' || !asset.captionUnitId) continue;
+    const caption = inputUnits.find((unit) => unit.id === asset.captionUnitId);
+    const captionBlock = blocks.get(asset.captionUnitId);
+    if (
+      !caption?.sourceText
+      || !captionBlock
+      || /[.!?。！？]["')\]}”’]*\s*$/u.test(caption.sourceText)
+    ) continue;
+    const captionBottom = captionBlock.rect.y + captionBlock.rect.h;
+    const continuation = inputUnits
+      .filter((unit) => (
+        !removedIds.has(unit.id)
+        && unit.kind === 'paragraph'
+        && unit.order > caption.order
+        && Boolean(unit.sourceText?.trim())
+      ))
+      .map((unit) => ({ unit, block: blocks.get(unit.sourceBlockId ?? unit.id) }))
+      .filter((candidate): candidate is { unit: SemanticUnit; block: Doc['blocks'][number] } => {
+        if (!candidate.block || candidate.block.pageIndex !== asset.pageIndex) return false;
+        const horizontalOverlap = Math.max(0, Math.min(
+          captionBlock.rect.x + captionBlock.rect.w,
+          candidate.block.rect.x + candidate.block.rect.w,
+        ) - Math.max(captionBlock.rect.x, candidate.block.rect.x));
+        const source = candidate.unit.sourceText!.trim();
+        return candidate.block.rect.y >= captionBottom - 2
+          && candidate.block.rect.y - captionBottom <= 24
+          && candidate.block.rect.y + candidate.block.rect.h <= asset.rect.y + 4
+          && horizontalOverlap >= Math.min(captionBlock.rect.w, candidate.block.rect.w) * 0.45
+          && /^[\s([{'"“‘]*\p{Ll}/u.test(source)
+          && (source.match(/[A-Za-z]{2,}/g)?.length ?? 0) >= 3
+          && source.length <= 180;
+      })
+      .sort((left, right) => left.block.rect.y - right.block.rect.y || left.unit.order - right.unit.order)[0];
+    if (!continuation) continue;
+    caption.sourceText = appendCaptionContinuation(
+      caption.sourceText.trim(),
+      continuation.unit.sourceText!.trim(),
+    );
+    caption.protectedTokens = extractProtectedTokens(caption.sourceText);
+    removedIds.add(continuation.unit.id);
+  }
+  if (!removedIds.size) return inputUnits;
+  for (const region of regions) {
+    region.orderedUnitIds = region.orderedUnitIds.filter((unitId) => !removedIds.has(unitId));
+  }
+  return inputUnits.filter((unit) => !removedIds.has(unit.id));
+}
+
 function trailingFormulaRect(
   block: Doc['blocks'][number],
   cleanedLength: number,
@@ -2652,6 +2928,8 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
   }));
   units = mergeFirstPageTitleContinuations(doc, units, regions, blocks);
   units = repairSplitHeadingRows(doc, units, regions, blocks);
+  normalizeFirstPageFrontMatter(doc, units, blocks);
+  units = normalizeHeadingHierarchy(units, regions);
   repairHeadingRegionOrder(doc, units, regions, blocks);
   const assetRegions: DetectedAssetRegion[] = [];
   const algorithmAssets = detectedAlgorithmAssets(doc);
@@ -3753,6 +4031,9 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
       region.orderedUnitIds = region.orderedUnitIds.filter((unitId) => !emptyAfterAssetMask.has(unitId));
     }
   }
+
+  units = repairCaptionContinuationBeforeImmutableTable(units, regions, assetRegions, blocks);
+  units = repairInterruptedProseAcrossImmutableAsset(units, regions, assetRegions, blocks);
 
   const protectedCaptionIds = new Set(assetRegions
     .map((asset) => asset.captionUnitId)

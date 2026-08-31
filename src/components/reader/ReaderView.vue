@@ -9,8 +9,16 @@ type PaneHandle = { scrollToPosition(top: number): void; scrollToPage(pageIndex:
 const props = withDefaults(defineProps<{
   englishPdf: Blob; chinesePdf: Blob; manifest: AlignmentManifest;
   initialPageCounts?: { en: number; zh: number }; chineseFilename?: string;
-}>(), { initialPageCounts: () => ({ en: 0, zh: 0 }), chineseFilename: '中文论文.pdf' });
-const emit = defineEmits<{ return: []; choose: []; clear: []; 'download-package': []; error: [message: string] }>();
+  layoutLabel?: string; showReflow?: boolean;
+}>(), {
+  initialPageCounts: () => ({ en: 0, zh: 0 }),
+  chineseFilename: '中文论文.pdf',
+  layoutLabel: '中文单栏版',
+  showReflow: false,
+});
+const emit = defineEmits<{
+  return: []; choose: []; clear: []; reflow: []; 'download-package': []; error: [message: string];
+}>();
 
 const enPane = ref<PaneHandle>();
 const zhPane = ref<PaneHandle>();
@@ -123,7 +131,9 @@ onBeforeUnmount(() => { if (animationFrame) cancelAnimationFrame(animationFrame)
     <ReaderToolbar
       :en-page="pages.en" :en-page-count="pageCounts.en" :zh-page="pages.zh" :zh-page-count="pageCounts.zh"
       :en-zoom="zoom.en" :zh-zoom="zoom.zh" :sync-enabled="syncEnabled" :highlights-enabled="highlightsEnabled"
+      :layout-label="layoutLabel" :show-reflow="showReflow"
       @return="emit('return')" @choose="emit('choose')" @clear="emit('clear')"
+      @reflow="emit('reflow')"
       @download-chinese="downloadChinese" @download-package="emit('download-package')"
       @page-step="stepPage" @zoom-step="stepZoom" @fit-width="fitWidth"
       @update:sync-enabled="syncEnabled = $event" @update:highlights-enabled="highlightsEnabled = $event"

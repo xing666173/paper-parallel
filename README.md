@@ -1,6 +1,6 @@
 # Paper Parallel
 
-Paper Parallel 是一个面向学术论文的浏览器端翻译、排版与双语对照阅读项目。目标是在不依赖自有服务器、也不要求用户安装 XeLaTeX 或 Typst 的条件下，将英文 PDF 转换为继承原论文栏型与技术资产的中文 PDF，并提供真实双 PDF 对照阅读。
+Paper Parallel 是一个面向学术论文的浏览器端翻译、排版与双语对照阅读项目。英文 PDF 始终保持原样；中文 PDF 按 `zh-single-column-v1` 固定重排为适合连续阅读的单栏，同时原样复用论文中的图、表、公式和代码，并提供真实双 PDF 对照阅读。
 
 ## 当前实现状态
 
@@ -10,7 +10,9 @@ Paper Parallel 是一个面向学术论文的浏览器端翻译、排版与双�
 2. 翻译与排版：显示八阶段进度、预计剩余时间、AI 任务日志、论文预览与安全停止。
 3. 对照阅读：加载真实英文/中文 PDF，支持独立页码与缩放、同步滚动、语义组高亮、结果与项目包下载。
 
-当前生产流程已接通 PDF.js 解析、DeepSeek 批量翻译与校验、不可变图形/公式裁切、浏览器本地 Typst WASM 编译、连续语义组对齐、质量门和 IndexedDB 恢复。
+当前生产流程已接通 PDF.js 解析、DeepSeek 批量翻译与校验、不可变图形/公式裁切、浏览器本地 Typst WASM 单栏编译、连续语义组对齐、内容门禁、Vision Exp 逐页终审和 IndexedDB 恢复。视觉终审发现可安全修复的排版问题时，系统最多自动修复并重新编译两轮；内容丢失、公式/表格变化等问题会立即停止。
+
+旧任务缺少当前排版版本时会显示“旧版排版”。“按新版重新排版”只重建中文 PDF、Typst、预览、对齐、质检报告和项目包，保留英文 PDF、已校验译文以及 Vision/公式缓存。
 
 当前仍需持续扩充的边界能力：
 
@@ -18,7 +20,7 @@ Paper Parallel 是一个面向学术论文的浏览器端翻译、排版与双�
 - 复杂跨页表格、嵌套浮动体和非常规页眉页脚；
 - 更多公开论文版式的回归夹具。
 
-只有翻译块、受保护内容、中文 PDF、不可变资产、对齐映射与本地持久化全部通过检查后，应用才允许显示“处理完成”并进入阅读器。
+只有翻译块、受保护内容、中文 PDF、不可变资产、对齐映射与逐页视觉终审全部通过检查后，应用才允许显示“处理完成”并进入阅读器。失败任务保留逐页 `quality-report`，不会带严重问题自动进入阅读器。
 
 ## DeepSeek 设置
 
@@ -58,7 +60,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\check.ps1
 - PDF、任务快照、已校验译文和对齐数据保存在当前浏览器的 IndexedDB。
 - API Key 只有在用户明确勾选后才写入当前浏览器的 localStorage。
 - API Key 不写入 IndexedDB 项目记录、下载项目包、URL、AI 日志或 GitHub 仓库。
-- Paper Parallel 不上传原始 PDF；调用翻译接口时只应发送需要翻译的文本和必要上下文。
+- Paper Parallel 不上传或集中保存原始 PDF；翻译请求发送所需文本，版式识别和逐页终审会按页面发送临时渲染图给 DeepSeek Vision Exp。
 - “安全停止”会取消活动请求，但保留已经通过校验的翻译缓存。
 - “清除翻译缓存”只删除当前论文译文，不删除原始 PDF，也不影响其他任务。
 
@@ -68,5 +70,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\check.ps1
 - [应用与翻译工作流计划](docs/superpowers/plans/2026-08-24-app-and-translation-workflow.md)
 - [版式、资产与浏览器 Typst 计划](docs/superpowers/plans/2026-08-24-layout-assets-and-browser-typst.md)
 - [对齐、阅读器与部署计划](docs/superpowers/plans/2026-08-24-alignment-reader-and-deployment.md)
+- [中文单栏正式工作流](docs/SINGLE-COLUMN-LAYOUT-WORKFLOW.md)
+- [最终验收手册](docs/FINAL-TEST-RUNBOOK.md)
 
 旧 `probes/` 文件仅作为仓库内历史回归夹具保留，不会复制到生产构建或 GitHub Pages。

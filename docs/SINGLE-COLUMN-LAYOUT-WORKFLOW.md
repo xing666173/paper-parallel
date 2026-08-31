@@ -1,6 +1,6 @@
 # 中文单栏重排工作流
 
-状态：实验策略，ZK-Tracer 样稿已经跑通。本文档用于区分人工调参、确定性排版算法和 DeepSeek 的职责，并记录后续固化路径。
+状态：正式产品策略，版本 `zh-single-column-v1`。ZK-Tracer 样稿只作为回归证据，正式网站不调用样稿脚本。
 
 ## 1. 职责边界
 
@@ -40,7 +40,7 @@ DeepSeek 不决定字号、页边距、行距、首行缩进、标题段前距�
 1. 解析英文 PDF，生成页面、文本块、语义单元和不可变资产。
 2. 为每个语义单元分配稳定 ID，并建立英文坐标到语义单元的对应表。
 3. 调用 DeepSeek 翻译；命中缓存时复用经过内容门禁的译文。
-4. 当 `targetLayoutPolicy=single-column` 时：
+4. 新任务固定写入 `targetLayoutPolicy=single-column` 和 `layoutProfileVersion=zh-single-column-v1`：
    - 所有普通正文区域变为单栏自然流；
    - 横向图组、并排对比图和成组表格可以保留网格；
    - 单个图表按内容宽度适度放大，但不得超过正文宽度；
@@ -48,8 +48,10 @@ DeepSeek 不决定字号、页边距、行距、首行缩进、标题段前距�
 5. 编译 Typst，并保留所有 `pp-unit` 链接标记。
 6. 执行内容门禁：页数非零、关键章节存在、语义标记没有丢失、不可变资产哈希正确。
 7. 将每页渲染成 PNG，逐页检查标题间距、首行缩进、图表居中、裁切、重叠、空白页和参考文献可读性。
-8. 有 API 时调用 DeepSeek 视觉终审；它是第二检查者，不覆盖确定性排版参数。
-9. 只有本地门禁和视觉终审都通过，才允许保存任务结果或部署。
+8. 调用 DeepSeek 视觉终审；它是第二检查者，不覆盖确定性排版参数。
+9. 对可安全修复的标题拥挤、孤立标题、图表裁切/重叠和不可读横排生成受限 `LayoutRepairPlan`，重新编译后立即刷新预览，最多两轮；同一问题重复或内容完整性问题立即停止。
+10. 保存包含逐页问题、修复动作、尝试次数和最终状态的 `quality-report`；只有全部门禁通过的 PDF、Typst 和对齐清单才成为正式成品。
+11. 旧任务可按新版重新排版，并保留英文 PDF、译文、Vision 源版式和公式识别缓存。
 
 ## 4. 本轮 ZK-Tracer 调试记录
 
@@ -76,5 +78,7 @@ DeepSeek 不决定字号、页边距、行距、首行缩进、标题段前距�
 - `src/core/typst/template.ts`：单栏排版参数和 Typst 模板。
 - `src/core/typst/project.ts`：源布局到中文单栏布局的确定性转换。
 - `src/core/vision/prompts.ts`：DeepSeek 最终视觉验收要求。
-- `scripts/build-single-column-typst-prototype.mjs`：ZK-Tracer 缓存样稿适配器，仅用于实验验证。
+- `src/core/quality/layoutRepair.ts`：受限自动修复映射与重复问题停止逻辑。
+- `src/core/quality/report.ts`：逐次、逐页质检报告格式。
+- `scripts/build-single-column-typst-prototype.mjs`：ZK-Tracer 缓存样稿适配器，仅用于回归证据，正式网站不得调用。
 - `tests/unit/typstProject.spec.ts`：单栏排版参数和标题层级测试。

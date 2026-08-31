@@ -112,7 +112,7 @@ export interface LayoutRegion {
 }
 
 export type SemanticUnitKind =
-  | 'title' | 'author' | 'affiliation' | 'abstract' | 'heading'
+  | 'title' | 'author' | 'affiliation' | 'abstract' | 'keywords' | 'heading'
   | 'paragraph' | 'sentence' | 'list-item' | 'caption' | 'table-title'
   | 'figure' | 'table' | 'formula' | 'code' | 'reference' | 'page-furniture';
 
@@ -122,6 +122,9 @@ export interface SemanticUnit {
   /** 原始英文 PDF 中承载该单元文字与字符坐标的块 ID。 */
   sourceBlockId?: string;
   kind: SemanticUnitKind;
+  /** 标题层级和编号必须从英文源文档确定，不能根据译文反推。 */
+  headingLevel?: 1 | 2 | 3;
+  headingNumber?: string;
   sourceText?: string;
   translation?: string;
   protectedTokens: string[];
@@ -302,5 +305,8 @@ export interface TaskSnapshot {
     thinkingMode: 'enabled' | 'disabled';
     sourceFileName: string;
     sourceFileHash: string;
+    /** 新任务固定为中文单栏；source-layout 只用于识别历史任务。 */
+    targetLayoutPolicy?: 'single-column' | 'source-layout';
+    layoutProfileVersion?: string;
   };
 }

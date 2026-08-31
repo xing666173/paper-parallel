@@ -111,4 +111,32 @@ describe('project repository', () => {
     expect(await repo.findArtifact('b:chinese-pdf')).toBeDefined();
     expect(await repo.findTranslation('a:1')).toBeUndefined();
   });
+
+  it('重新排版时只删除布局产物并保留译文与源分析缓存', async () => {
+    const repo = createTestRepository();
+    for (const kind of [
+      'english-pdf', 'vision-layout', 'formula-ocr', 'chinese-pdf',
+      'typst-source', 'typst-preview', 'alignment-manifest', 'quality-report', 'project-package',
+    ] as const) {
+      await repo.putArtifact({
+        key: `a:${kind}`, projectId: 'a', kind,
+        blob: new Blob([kind]), updatedAt: 1,
+      });
+    }
+    await repo.putTranslation({
+      key: 'a:block', projectId: 'a', blockId: 'block', translation: '译文',
+      alignmentGroups: [], validatedAt: 1,
+    });
+
+    await repo.clearProjectLayoutOutputs('a');
+
+    expect(await repo.findArtifact('a:english-pdf')).toBeDefined();
+    expect(await repo.findArtifact('a:vision-layout')).toBeDefined();
+    expect(await repo.findArtifact('a:formula-ocr')).toBeDefined();
+    expect(await repo.findTranslation('a:block')).toBeDefined();
+    for (const kind of [
+      'chinese-pdf', 'typst-source', 'typst-preview',
+      'alignment-manifest', 'quality-report', 'project-package',
+    ]) expect(await repo.findArtifact(`a:${kind}`)).toBeUndefined();
+  });
 });

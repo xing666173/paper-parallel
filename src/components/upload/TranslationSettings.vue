@@ -58,6 +58,7 @@ defineEmits<{
         >
       </label>
     </div>
+    <p class="layout-policy-note"><strong>输出格式：</strong>英文 PDF 保持不变，中文固定重排为单栏。</p>
     <div class="connection-row">
       <label class="check-field">
         <input

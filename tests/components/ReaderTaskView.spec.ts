@@ -6,6 +6,8 @@ import { createMemoryHistory, createRouter } from 'vue-router';
 import { describe, expect, it, vi } from 'vitest';
 import ReaderTaskView from '../../src/views/ReaderTaskView.vue';
 import type { ProjectRepository } from '../../src/core/project/repository';
+import { createTaskSnapshot } from '../../src/core/task/stateMachine';
+import type { TaskSnapshot } from '../../src/types/models';
 
 describe('completed dual-PDF reader route', () => {
   it('shows independent counts and every task action', async () => {
@@ -37,6 +39,37 @@ describe('completed dual-PDF reader route', () => {
     expect(wrapper.text()).toContain('翻译排版完成，已自动进入对照阅读');
     expect(router.currentRoute.value.query.auto).toBeUndefined();
   });
+
+  it('reflows a legacy task without deleting its source or translation caches', async () => {
+    const legacyTask: TaskSnapshot = {
+      ...createTaskSnapshot('p1', 1_000),
+      stage: 'completed', status: 'completed', updatedAt: 2_000,
+      settings: {
+        sourceFileName: 'legacy.pdf', sourceFileHash: 'source-hash',
+        modelId: 'deepseek-v4-flash', thinkingMode: 'disabled',
+      },
+    };
+    const repository = readerRepository(legacyTask);
+    sessionStorage.setItem('paper-parallel.deepseek-key-session', 'verified-key');
+    const { wrapper, router } = await mountReader(repository);
+
+    expect(wrapper.text()).toContain('旧版排版');
+    const reflow = wrapper.findAll('button').find((button) => button.text() === '按新版重新排版');
+    expect(reflow).toBeDefined();
+    await reflow!.trigger('click');
+    await flushPromises();
+
+    expect(repository.clearProjectLayoutOutputs).toHaveBeenCalledWith('p1');
+    expect(repository.clearProjectDerivedData).not.toHaveBeenCalled();
+    expect(repository.saveTask).toHaveBeenCalledWith(expect.objectContaining({
+      projectId: 'p1', stage: 'idle', status: 'idle',
+      settings: expect.objectContaining({
+        targetLayoutPolicy: 'single-column', layoutProfileVersion: 'zh-single-column-v1',
+      }),
+    }));
+    expect(router.currentRoute.value.name).toBe('process');
+    sessionStorage.removeItem('paper-parallel.deepseek-key-session');
+  });
 });
 
 async function mountReader(repository: ProjectRepository, auto = false) {
@@ -61,14 +94,14 @@ async function mountReader(repository: ProjectRepository, auto = false) {
   return { wrapper, router };
 }
 
-function readerRepository(): ProjectRepository {
+function readerRepository(task?: TaskSnapshot): ProjectRepository {
   const artifacts = new Map([
     ['p1:english-pdf', { key: 'p1:english-pdf', projectId: 'p1', kind: 'english-pdf', blob: new Blob(['%PDF-en']), updatedAt: 1 }],
     ['p1:chinese-pdf', { key: 'p1:chinese-pdf', projectId: 'p1', kind: 'chinese-pdf', blob: new Blob(['%PDF-zh']), updatedAt: 1 }],
   ]);
   return {
     saveTask: vi.fn(),
-    loadTask: vi.fn(async () => undefined),
+    loadTask: vi.fn(async () => task),
     putTranslation: vi.fn(),
     findTranslation: vi.fn(),
     clearProjectTranslation: vi.fn(),
@@ -80,6 +113,7 @@ function readerRepository(): ProjectRepository {
       stats: { total: 0, aligned: 0, lowConfidence: 0, unmatched: 0, coverage: 1 },
     })),
     clearProjectDerivedData: vi.fn(),
+    clearProjectLayoutOutputs: vi.fn(),
     listProjectTranslations: vi.fn(async () => []),
     listProjectArtifacts: vi.fn(async () => [...artifacts.values()]),
     saveAiLog: vi.fn(async () => undefined),

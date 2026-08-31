@@ -29,7 +29,12 @@ import { buildBatchPrompt, buildSystemPrompt, SYSTEM_PROMPT_VERSION } from '../t
 import type { TranslationBlockRequest, TranslationBlockResponse, TranslationRequest } from '../translate/protocol';
 import { buildFormulaOcrCacheKey, buildTranslationCacheKey } from '../project/cacheKey';
 import { buildSemanticGroups, buildBlockAndAssetAlignmentUnits } from '../align/semanticUnits';
-import { buildTypstProject, type TypstProject, type TypstSemanticUnit } from '../typst/project';
+import {
+  buildTypstProject,
+  type LayoutRepairPlan,
+  type TypstProject,
+  type TypstSemanticUnit,
+} from '../typst/project';
 import { compileTypstProject, type TypstCompileResult } from '../typst/compiler';
 import { getTypstRuntimePaths } from '../typst/runtimePaths';
 import { readTargetMarkers } from '../align/targetMarkers';
@@ -51,6 +56,8 @@ import {
   recognizeFormulaCrop,
 } from '../vision/formulaOcr';
 import type { TargetLayoutPolicy } from '../typst/template';
+import { buildLayoutRepairPlan, type PdfPageSize } from '../quality/layoutRepair';
+import type { QualityAttemptReport, QualityReport } from '../quality/report';
 
 const SESSION_KEY_STORAGE = 'paper-parallel.deepseek-key-session';
 const LOCAL_KEY_STORAGE = 'paper-parallel.deepseek-key';
@@ -84,6 +91,7 @@ export interface BrowserPipelineStageOptions {
   maxRetries?: number;
   onAiEvent?(event: AiLogEvent): void;
   onCompileProgress?(phase: string): void;
+  onPreview?(event: { svg: string; attempt: 0 | 1 | 2 }): void;
 }
 
 function value(input: PipelineValue): BrowserValue {
@@ -133,6 +141,7 @@ function typstTextUnit(
   });
   return {
     id: unit.id, kind: unit.kind, layoutRegionId: unit.layoutRegionId, order: unit.order,
+    headingLevel: unit.headingLevel, headingNumber: unit.headingNumber,
     targetSegments: targetSegments.map((segment) => ({ id: segment.id, text: segment.targetText })),
   };
 }
@@ -155,13 +164,60 @@ function typstSourceColumn(
   return rect.x + rect.w / 2 < pageWidth / 2 ? 'left' : 'right';
 }
 
+async function buildAlignmentForCompiled(
+  current: BrowserValue,
+  compiled: TypstCompileResult,
+  projectId: string,
+): Promise<AlignmentManifest> {
+  const doc = requireValue(current.doc, '解析文档缺失');
+  const requests = requireValue(current.requests, '翻译请求缺失');
+  const translations = requireValue(current.translations, '翻译结果缺失');
+  const prepared = requireValue(current.prepared, '版式结构缺失');
+  const targetLoading = getDocument({ data: compiled.pdf.slice() });
+  const targetPdf = await targetLoading.promise;
+  try {
+    const markers = await readTargetMarkers(targetPdf as any);
+    const segments: TargetTextSegment[] = [];
+    const preparedById = new Map(prepared.units.map((unit) => [unit.id, unit]));
+    let units: AlignmentUnit[] = requests.flatMap((request) => {
+      const response = translations.find((candidate) => candidate.blockId === request.blockId)!;
+      const groups = responseGroups(request, response);
+      groups.forEach((group, groupIndex) => group.targetUnitIds.forEach((id, index) => {
+        segments.push({ id, targetText: response.alignmentGroups[groupIndex].targetSegments[index] });
+      }));
+      const sourceBlockId = preparedById.get(request.blockId)?.sourceBlockId;
+      return groups.map((group) => ({ ...group, sourceBlockId }));
+    });
+    const immutable = prepared.units.filter((unit) => Boolean(unit.assetId));
+    units.push(...buildBlockAndAssetAlignmentUnits(immutable));
+    units = resolveSourceGeometry(units, doc, current.assets ?? []);
+    const fallback = await matchTranslatedText(targetPdf as any, segments);
+    return buildAlignmentManifest({ projectId, units, markers, fallback });
+  } finally {
+    await targetPdf.destroy();
+  }
+}
+
+async function persistQualityReport(
+  repository: ProjectRepository,
+  report: QualityReport,
+): Promise<void> {
+  await repository.putArtifact({
+    key: `${report.projectId}:quality-report`,
+    projectId: report.projectId,
+    kind: 'quality-report',
+    blob: new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' }),
+    updatedAt: report.createdAt,
+  });
+}
+
 export function createBrowserPipelineStages(options: BrowserPipelineStageOptions): ProductionPipelineStages {
   const settings = requireValue(options.snapshot.settings, '任务缺少模型与源文件设置');
   const apiKey = options.apiKey
     ?? sessionStorage.getItem(SESSION_KEY_STORAGE)
     ?? localStorage.getItem(LOCAL_KEY_STORAGE)
     ?? '';
-  const targetLayoutPolicy: TargetLayoutPolicy = import.meta.env.VITE_PP_TARGET_LAYOUT === 'single-column'
+  const targetLayoutPolicy: TargetLayoutPolicy = settings.targetLayoutPolicy === 'single-column'
     ? 'single-column'
     : 'source-layout';
   const skipRemoteFinalReview = import.meta.env.MODE === 'test'
@@ -506,10 +562,12 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
         if (unit.assetId) return {
           id: unit.id, kind: unit.kind, layoutRegionId: unit.layoutRegionId,
           order: unit.order, assetId: unit.assetId, sourceColumn,
+          headingLevel: unit.headingLevel, headingNumber: unit.headingNumber,
         };
         if (unit.kind === 'reference') return {
           id: unit.id, kind: unit.kind, layoutRegionId: unit.layoutRegionId,
           order: unit.order, text: unit.sourceText ?? '', sourceColumn,
+          headingLevel: unit.headingLevel, headingNumber: unit.headingNumber,
         };
         return {
           ...typstTextUnit(
@@ -541,6 +599,7 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
         runtimePaths: getTypstRuntimePaths(import.meta.env.BASE_URL, document.baseURI), signal,
         onProgress: (phase) => options.onCompileProgress?.(phase),
       });
+      options.onPreview?.({ svg: compiled.svg, attempt: 0 });
       if (import.meta.env.MODE === 'test') {
         const debugGlobal = globalThis as typeof globalThis & { __PP_DIAGNOSTIC_PDF_URL__?: string };
         if (debugGlobal.__PP_DIAGNOSTIC_PDF_URL__) URL.revokeObjectURL(debugGlobal.__PP_DIAGNOSTIC_PDF_URL__);
@@ -553,170 +612,239 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
 
     async align(input) {
       const current = value(input);
-      const doc = requireValue(current.doc, '解析文档缺失');
       const compiled = requireValue(current.compiled, '中文 PDF 缺失');
-      const requests = requireValue(current.requests, '翻译请求缺失');
-      const translations = requireValue(current.translations, '翻译结果缺失');
-      const targetLoading = getDocument({ data: compiled.pdf.slice() });
-      const targetPdf = await targetLoading.promise;
-      const markers = await readTargetMarkers(targetPdf as any);
-      const segments: TargetTextSegment[] = [];
-      const prepared = requireValue(current.prepared, '版式结构缺失');
-      const preparedById = new Map(prepared.units.map((unit) => [unit.id, unit]));
-      let units: AlignmentUnit[] = requests.flatMap((request) => {
-        const response = translations.find((candidate) => candidate.blockId === request.blockId)!;
-        const groups = responseGroups(request, response);
-        groups.forEach((group, groupIndex) => group.targetUnitIds.forEach((id, index) => {
-          segments.push({ id, targetText: response.alignmentGroups[groupIndex].targetSegments[index] });
-        }));
-        const sourceBlockId = preparedById.get(request.blockId)?.sourceBlockId;
-        return groups.map((group) => ({ ...group, sourceBlockId }));
-      });
-      const immutable = prepared.units.filter((unit) => Boolean(unit.assetId));
-      units.push(...buildBlockAndAssetAlignmentUnits(immutable));
-      units = resolveSourceGeometry(units, doc, current.assets ?? []);
-      const fallback = await matchTranslatedText(targetPdf as any, segments);
-      const manifest = buildAlignmentManifest({
-        projectId: options.projectId, units, markers, fallback,
-      });
+      const manifest = await buildAlignmentForCompiled(current, compiled, options.projectId);
       if (import.meta.env.MODE === 'test') {
         (globalThis as typeof globalThis & { __PP_DIAGNOSTIC_ALIGNMENT_MANIFEST__?: AlignmentManifest })
           .__PP_DIAGNOSTIC_ALIGNMENT_MANIFEST__ = manifest;
       }
-      await targetPdf.destroy();
       return { ...current, manifest };
     },
 
     async validate(input, signal) {
       const current = value(input);
       const doc = requireValue(current.doc, '解析文档缺失');
-      const compiled = requireValue(current.compiled, '中文 PDF 缺失');
-      const manifest = requireValue(current.manifest, '对齐清单缺失');
       const translations = requireValue(current.translations, '翻译结果缺失');
-      const project = requireValue(current.typstProject, 'Typst 项目缺失');
-      const alignment = runAlignmentGate(manifest);
-      const pdfCompiled = new TextDecoder().decode(compiled.pdf.slice(0, 5)).startsWith('%PDF-');
-      const inspection = await inspectCompiledPdf(compiled.pdf);
-      const contentGate = runPdfContentGate({
-        ...inspection,
-        expectedTranslations: translations.map((translation) => translation.translation),
-        maximumPages: Math.max(doc.pageCount + 2, Math.ceil(doc.pageCount * 3)),
-      });
-      if (!contentGate.pass) {
-        throw new Error(`PDF 内容质量门未通过：${contentGate.issues.map((issue) => issue.message).join('；')}`);
-      }
-      if (!alignment.pass) {
-        const errors = alignment.issues.filter((issue) => issue.severity === 'error');
-        throw new Error(`对齐质量门未通过：${errors.map((issue) => issue.message).join('；')}`);
-      }
+      const prepared = requireValue(current.prepared, '版式结构缺失');
+      const typstUnits = requireValue(current.typstUnits, 'Typst 语义单元缺失');
+      let compiled = requireValue(current.compiled, '中文 PDF 缺失');
+      let manifest = requireValue(current.manifest, '对齐清单缺失');
+      let project = requireValue(current.typstProject, 'Typst 项目缺失');
       const sourcePdf = requireValue(current.sourcePdf, '源 PDF 缺失');
-      const targetLoading = getDocument({ data: compiled.pdf.slice() });
-      const targetPdf = await targetLoading.promise;
-      let visualReport: VisionFinalReport;
-      try {
-        visualReport = skipRemoteFinalReview
-          ? { pass: true, issues: [], reviewedPages: targetPdf.numPages }
-          : await runVisionFinalReview({
-          sourcePdf,
-          targetPdf: targetPdf as any,
-          manifest,
-          baseUrl: options.baseUrl ?? 'https://api.deepseek.com',
-          apiKey,
-          targetLayoutPolicy,
-          signal,
-          onPageStart: (event) => options.onAiEvent?.({
-            type: 'vision-review-page-started', at: Date.now(), page: event.targetPageIndex + 1,
-            totalPages: event.totalPages,
-          }),
-          onPagePhase: (event) => options.onAiEvent?.({
-            type: 'vision-review-page-phase', at: Date.now(), page: event.targetPageIndex + 1,
-            totalPages: event.totalPages, phase: event.phase,
-          }),
-          onPageInvalid: (event) => options.onAiEvent?.({
-            type: 'vision-review-page-invalid', at: Date.now(), page: event.targetPageIndex + 1,
-            totalPages: event.totalPages, reason: event.reason,
-          }),
-          onPageWait: (event) => options.onAiEvent?.({
-            type: 'vision-review-page-waiting', at: Date.now(), page: event.targetPageIndex + 1,
-            totalPages: event.totalPages, elapsedMs: event.elapsedMs,
-          }),
-          onPageTimeout: (event) => options.onAiEvent?.({
-            type: 'vision-review-page-timeout', at: Date.now(), page: event.targetPageIndex + 1,
-            totalPages: event.totalPages, timeoutMs: event.timeoutMs,
-          }),
-          onPage: (event) => options.onAiEvent?.({
-            type: 'vision-review-page', at: Date.now(), page: event.targetPageIndex + 1,
-            totalPages: event.totalPages, issueCount: event.issueCount,
-          }),
-        });
+      const attemptReports: QualityAttemptReport[] = [];
+      let repairPlan: LayoutRepairPlan | undefined;
+      const report = (pass: boolean): QualityReport => {
+        const qualityReport: QualityReport = {
+          schemaVersion: 1,
+          projectId: options.projectId,
+          layoutProfileVersion: settings.layoutProfileVersion ?? 'legacy-source-layout',
+          pass,
+          createdAt: Date.now(),
+          attempts: attemptReports,
+        };
         if (import.meta.env.MODE === 'test') {
-          (globalThis as typeof globalThis & { __PP_DIAGNOSTIC_VISUAL_REPORT__?: VisionFinalReport })
-            .__PP_DIAGNOSTIC_VISUAL_REPORT__ = visualReport;
+          (globalThis as typeof globalThis & { __PP_DIAGNOSTIC_QUALITY_REPORT__?: QualityReport })
+            .__PP_DIAGNOSTIC_QUALITY_REPORT__ = qualityReport;
         }
-        options.onAiEvent?.({
-          type: 'vision-review-completed', at: Date.now(), reviewedPages: visualReport.reviewedPages,
-          issueCount: visualReport.issues.length,
-        });
-      } finally {
-        await Promise.allSettled([
-          targetPdf.destroy(),
-          (sourcePdf as typeof sourcePdf & { destroy?: () => Promise<unknown> }).destroy?.(),
-        ]);
-      }
-      const severeVisualIssues = visualReport.issues.filter((issue) => (
-        issue.severity === 'severe' && issue.confidence >= 0.8
-      ));
-      options.onAiEvent?.({
-        type: 'quality-finalizing', at: Date.now(), visualPass: visualReport.pass,
-        severeIssueCount: severeVisualIssues.length,
-      });
-      const visualError = severeVisualIssues.map((issue) => (
-        `第 ${issue.targetPageIndex + 1} 页 ${issue.type}：${issue.evidence}`
-      )).join('；');
-      if (!visualReport.pass) {
-        throw new Error(`视觉质检未通过：${visualError || 'Vision Exp 发现严重页面缺陷'}`);
-      }
-      const updatedAt = Date.now();
-      const artifacts = [
-        {
-          key: `${options.projectId}:chinese-pdf`, projectId: options.projectId,
-          kind: 'chinese-pdf' as const, blob: new Blob([compiled.pdf], { type: 'application/pdf' }), updatedAt,
-        },
-        {
-          key: `${options.projectId}:typst-source`, projectId: options.projectId,
-          kind: 'typst-source' as const, blob: new Blob([project.mainContent], { type: 'text/plain' }), updatedAt,
-        },
-        {
-          key: `${options.projectId}:typst-preview`, projectId: options.projectId,
-          kind: 'typst-preview' as const, blob: new Blob([compiled.svg], { type: 'image/svg+xml' }), updatedAt,
-        },
-      ];
-      await persistValidatedOutputs({
-        contentGate,
-        alignmentPass: alignment.pass,
-        alignmentError: alignment.issues.map((issue) => issue.message).join('；'),
-        visualPass: visualReport.pass,
-        visualError,
-        artifacts,
-        manifest,
-        putArtifact: (artifact) => options.repository.putArtifact(artifact),
-        saveAlignmentManifest: (value) => options.repository.saveAlignmentManifest(value),
-      });
-      options.onAiEvent?.({ type: 'quality-persisted', at: Date.now() });
-      const persisted = Boolean(
-        await options.repository.findArtifact(`${options.projectId}:chinese-pdf`)
-        && await options.repository.loadAlignmentManifest(options.projectId),
-      );
-      return {
-        requiredBlocks: current.requiredBlocks ?? 0,
-        validatedBlocks: current.validatedBlocks ?? 0,
-        failedBlocks: 0,
-        protectedContentPass: true,
-        pdfCompiled,
-        assetsPass: contentGate.pass,
-        alignmentBuilt: alignment.pass,
-        persisted,
+        return qualityReport;
       };
+      try {
+        for (let attempt = 0 as 0 | 1 | 2; attempt <= 2; attempt = (attempt + 1) as 0 | 1 | 2) {
+          if (signal.aborted) throw new DOMException('已停止', 'AbortError');
+          const alignment = runAlignmentGate(manifest);
+          const pdfCompiled = new TextDecoder().decode(compiled.pdf.slice(0, 5)).startsWith('%PDF-');
+          const inspection = await inspectCompiledPdf(compiled.pdf);
+          const contentGate = runPdfContentGate({
+            ...inspection,
+            expectedTranslations: translations.map((translation) => translation.translation),
+            maximumPages: Math.max(doc.pageCount + 2, Math.ceil(doc.pageCount * 3)),
+          });
+          if (!contentGate.pass || !alignment.pass) {
+            await persistQualityReport(options.repository, report(false));
+            if (!contentGate.pass) {
+              throw new Error(`PDF 内容质量门未通过：${contentGate.issues.map((issue) => issue.message).join('；')}`);
+            }
+            const errors = alignment.issues.filter((issue) => issue.severity === 'error');
+            throw new Error(`对齐质量门未通过：${errors.map((issue) => issue.message).join('；')}`);
+          }
+
+          const targetLoading = getDocument({ data: compiled.pdf.slice() });
+          const targetPdf = await targetLoading.promise;
+          const pageSizes = new Map<number, PdfPageSize>();
+          let visualReport: VisionFinalReport;
+          try {
+            for (let pageIndex = 0; pageIndex < targetPdf.numPages; pageIndex += 1) {
+              const page = await targetPdf.getPage(pageIndex + 1);
+              const viewport = page.getViewport({ scale: 1 });
+              pageSizes.set(pageIndex, { width: viewport.width, height: viewport.height });
+            }
+            visualReport = skipRemoteFinalReview
+              ? { pass: true, issues: [], reviewedPages: targetPdf.numPages }
+              : await runVisionFinalReview({
+              sourcePdf,
+              targetPdf: targetPdf as any,
+              manifest,
+              baseUrl: options.baseUrl ?? 'https://api.deepseek.com',
+              apiKey,
+              targetLayoutPolicy,
+              signal,
+              onPageStart: (event) => options.onAiEvent?.({
+                type: 'vision-review-page-started', at: Date.now(), page: event.targetPageIndex + 1,
+                totalPages: event.totalPages,
+              }),
+              onPagePhase: (event) => options.onAiEvent?.({
+                type: 'vision-review-page-phase', at: Date.now(), page: event.targetPageIndex + 1,
+                totalPages: event.totalPages, phase: event.phase,
+              }),
+              onPageInvalid: (event) => options.onAiEvent?.({
+                type: 'vision-review-page-invalid', at: Date.now(), page: event.targetPageIndex + 1,
+                totalPages: event.totalPages, reason: event.reason,
+              }),
+              onPageWait: (event) => options.onAiEvent?.({
+                type: 'vision-review-page-waiting', at: Date.now(), page: event.targetPageIndex + 1,
+                totalPages: event.totalPages, elapsedMs: event.elapsedMs,
+              }),
+              onPageTimeout: (event) => options.onAiEvent?.({
+                type: 'vision-review-page-timeout', at: Date.now(), page: event.targetPageIndex + 1,
+                totalPages: event.totalPages, timeoutMs: event.timeoutMs,
+              }),
+              onPage: (event) => options.onAiEvent?.({
+                type: 'vision-review-page', at: Date.now(), page: event.targetPageIndex + 1,
+                totalPages: event.totalPages, issueCount: event.issueCount,
+              }),
+            });
+          } finally {
+            await targetPdf.destroy();
+          }
+          if (import.meta.env.MODE === 'test') {
+            (globalThis as typeof globalThis & { __PP_DIAGNOSTIC_VISUAL_REPORT__?: VisionFinalReport })
+              .__PP_DIAGNOSTIC_VISUAL_REPORT__ = visualReport;
+          }
+          options.onAiEvent?.({
+            type: 'vision-review-completed', at: Date.now(), reviewedPages: visualReport.reviewedPages,
+            issueCount: visualReport.issues.length,
+          });
+          const severeVisualIssues = visualReport.issues.filter((issue) => (
+            issue.severity === 'severe' && issue.confidence >= 0.8
+          ));
+          attemptReports.push({
+            attempt,
+            pass: visualReport.pass,
+            reviewedPages: visualReport.reviewedPages,
+            issues: visualReport.issues,
+            actions: repairPlan?.actions ?? [],
+          });
+          options.onAiEvent?.({
+            type: 'quality-finalizing', at: Date.now(), visualPass: visualReport.pass,
+            severeIssueCount: severeVisualIssues.length,
+          });
+          const visualError = severeVisualIssues.map((issue) => (
+            `第 ${issue.targetPageIndex + 1} 页 ${issue.type}：${issue.evidence}`
+          )).join('；');
+
+          if (visualReport.pass) {
+            const updatedAt = Date.now();
+            const qualityReport = report(true);
+            const artifacts = [
+              {
+                key: `${options.projectId}:chinese-pdf`, projectId: options.projectId,
+                kind: 'chinese-pdf' as const, blob: new Blob([compiled.pdf], { type: 'application/pdf' }), updatedAt,
+              },
+              {
+                key: `${options.projectId}:typst-source`, projectId: options.projectId,
+                kind: 'typst-source' as const, blob: new Blob([project.mainContent], { type: 'text/plain' }), updatedAt,
+              },
+              {
+                key: `${options.projectId}:typst-preview`, projectId: options.projectId,
+                kind: 'typst-preview' as const, blob: new Blob([compiled.svg], { type: 'image/svg+xml' }), updatedAt,
+              },
+              {
+                key: `${options.projectId}:quality-report`, projectId: options.projectId,
+                kind: 'quality-report' as const,
+                blob: new Blob([JSON.stringify(qualityReport, null, 2)], { type: 'application/json' }), updatedAt,
+              },
+            ];
+            await persistValidatedOutputs({
+              contentGate,
+              alignmentPass: alignment.pass,
+              alignmentError: alignment.issues.map((issue) => issue.message).join('；'),
+              visualPass: true,
+              visualError: '',
+              artifacts,
+              manifest,
+              putArtifact: (artifact) => options.repository.putArtifact(artifact),
+              saveAlignmentManifest: (value) => options.repository.saveAlignmentManifest(value),
+            });
+            options.onAiEvent?.({ type: 'quality-persisted', at: Date.now() });
+            const persisted = Boolean(
+              await options.repository.findArtifact(`${options.projectId}:chinese-pdf`)
+              && await options.repository.loadAlignmentManifest(options.projectId),
+            );
+            return {
+              requiredBlocks: current.requiredBlocks ?? 0,
+              validatedBlocks: current.validatedBlocks ?? 0,
+              failedBlocks: 0,
+              protectedContentPass: true,
+              pdfCompiled,
+              assetsPass: contentGate.pass,
+              alignmentBuilt: alignment.pass,
+              persisted,
+            };
+          }
+
+          if (attempt === 2) {
+            await persistQualityReport(options.repository, report(false));
+            throw new Error(`视觉质检未通过：${visualError || '两轮自动修复后仍有严重页面缺陷'}`);
+          }
+          const nextAttempt = (attempt + 1) as 1 | 2;
+          const nextPlan = buildLayoutRepairPlan({
+            attempt: nextAttempt,
+            issues: severeVisualIssues,
+            manifest,
+            units: typstUnits,
+            pageSizes,
+            previous: repairPlan,
+          });
+          if (!nextPlan) {
+            await persistQualityReport(options.repository, report(false));
+            throw new Error(`视觉质检未通过且没有安全的自动修复动作：${visualError || '内容完整性问题'}`);
+          }
+          repairPlan = nextPlan;
+          options.onAiEvent?.({
+            type: 'layout-repair-started', at: Date.now(), attempt: nextAttempt,
+            issueCount: severeVisualIssues.length,
+          });
+          repairPlan.actions.forEach((action) => options.onAiEvent?.({
+            type: 'layout-repair-action', at: Date.now(), attempt: nextAttempt,
+            unitId: action.unitId, message: action.detail,
+          }));
+          project = await buildTypstProject({
+            metadata: { paperWidth: doc.meta.paperWidth, paperHeight: doc.meta.paperHeight },
+            regions: prepared.regions,
+            units: typstUnits,
+            assets: current.assets ?? [],
+            targetLayoutPolicy,
+            repairPlan,
+          });
+          compiled = await compileTypstProject(project, {
+            runtimePaths: getTypstRuntimePaths(import.meta.env.BASE_URL, document.baseURI), signal,
+            onProgress: (phase) => options.onCompileProgress?.(phase),
+          });
+          options.onPreview?.({ svg: compiled.svg, attempt: nextAttempt });
+          manifest = await buildAlignmentForCompiled(current, compiled, options.projectId);
+          current.typstProject = project;
+          current.compiled = compiled;
+          current.manifest = manifest;
+          if (import.meta.env.MODE === 'test') {
+            (globalThis as typeof globalThis & { __PP_DIAGNOSTIC_TYPST_SOURCE__?: string })
+              .__PP_DIAGNOSTIC_TYPST_SOURCE__ = project.mainContent;
+          }
+          options.onAiEvent?.({ type: 'layout-repair-completed', at: Date.now(), attempt: nextAttempt });
+        }
+      } finally {
+        await (sourcePdf as typeof sourcePdf & { destroy?: () => Promise<unknown> }).destroy?.();
+      }
+      throw new Error('质量检查未完成');
     },
   };
 }

@@ -445,7 +445,7 @@ export function buildDoc(pages: ParsedPage[], docId: 'en' | 'zh'): Doc {
     layoutRegions.flatMap((region) => region.orderedUnitIds.map((id) => [id, region.id] as const)),
   );
   const semanticKind: Record<Block['type'], SemanticUnitKind> = {
-    title: 'title', authors: 'author', abstract: 'abstract', keywords: 'paragraph',
+    title: 'title', authors: 'author', abstract: 'abstract', keywords: 'keywords',
     section: 'heading', paragraph: 'paragraph', figure: 'figure', table: 'table',
     equation: 'formula', caption: 'caption', reference: 'reference', other: 'paragraph',
   };

@@ -23,6 +23,9 @@ export type AiLogEvent =
   | { type: 'vision-review-completed'; at: number; reviewedPages: number; issueCount: number }
   | { type: 'quality-finalizing'; at: number; visualPass: boolean; severeIssueCount: number }
   | { type: 'quality-persisted'; at: number }
+  | { type: 'layout-repair-started'; at: number; attempt: 1 | 2; issueCount: number }
+  | { type: 'layout-repair-action'; at: number; attempt: 1 | 2; unitId: string; message: string }
+  | { type: 'layout-repair-completed'; at: number; attempt: 1 | 2 }
   | { type: 'batch-started'; at: number; batchId: string; blockIds: string[]; modelId: string }
   | {
       type: 'batch-received'; at: number; batchId: string; elapsedMs: number;

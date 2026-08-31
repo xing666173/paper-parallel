@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildAssetManifest } from '../../src/core/assets/extract';
 import { escapeTypstText } from '../../src/core/typst/escape';
-import { buildTypstProject } from '../../src/core/typst/project';
+import { buildTypstProject, shouldStackAssetRow } from '../../src/core/typst/project';
 import {
   buildAcademicTemplate,
   SINGLE_COLUMN_TYPOGRAPHY,
@@ -35,6 +35,8 @@ describe('Typst project generation', () => {
     expect(singleColumn).toContain('width: 100%');
     expect(singleColumn).toContain('#let pp-subheading');
     expect(singleColumn).toContain('hanging-indent: 1.4em');
+    expect(singleColumn).toContain('#let pp-double(body) = body');
+    expect(singleColumn).not.toContain('columns(2');
     expect(singleColumn).toContain(`above: ${SINGLE_COLUMN_TYPOGRAPHY.majorHeading.abovePt}pt`);
     expect(singleColumn).toContain(`below: ${SINGLE_COLUMN_TYPOGRAPHY.majorHeading.belowPt}pt`);
     expect(singleColumn).toContain(`above: ${SINGLE_COLUMN_TYPOGRAPHY.minorHeading.abovePt}pt`);
@@ -230,14 +232,14 @@ describe('Typst project generation', () => {
         orderedUnitIds: ['section', 'subsection'],
       }],
       units: [
-        { id: 'section', kind: 'heading', layoutRegionId: 'r1', order: 0, text: '3 方法' },
-        { id: 'subsection', kind: 'heading', layoutRegionId: 'r1', order: 1, text: '3.1 架构' },
+        { id: 'section', kind: 'heading', layoutRegionId: 'r1', order: 0, text: '方法', headingNumber: '3', headingLevel: 1 },
+        { id: 'subsection', kind: 'heading', layoutRegionId: 'r1', order: 1, text: '架构', headingNumber: '3.1', headingLevel: 2 },
       ],
       assets: [],
     });
 
-    expect(project.mainContent).toContain('#pp-heading[#pp-unit("section")');
-    expect(project.mainContent).toContain('#pp-subheading[#pp-unit("subsection")');
+    expect(project.mainContent).toContain('#pp-heading(extra-below: 0pt)[#pp-unit("section")[3 方法]');
+    expect(project.mainContent).toContain('#pp-subheading(extra-below: 0pt)[#pp-unit("subsection")[3.1 架构]');
   });
 
   it('keeps an immutable figure and translated caption in one unbreakable group', async () => {
@@ -343,6 +345,34 @@ describe('Typst project generation', () => {
     expect(project.mainContent).toContain('155.2pt');
     expect(project.mainContent).not.toContain('[#pagebreak(weak: true)');
     expect(project.mainContent).not.toContain('#pagebreak(weak: true)');
+  });
+
+  it('stacks a horizontal table row when each table would become unreadably narrow', async () => {
+    const { assets } = await buildAssetManifest([
+      { id: 'ta', kind: 'table', pageIndex: 0, rect: { x: 20, y: 100, w: 340, h: 150 }, bytes: new Uint8Array([1]), captionUnitId: 'ca' },
+      { id: 'tb', kind: 'table', pageIndex: 0, rect: { x: 370, y: 100, w: 340, h: 150 }, bytes: new Uint8Array([2]), captionUnitId: 'cb' },
+    ]);
+    expect(shouldStackAssetRow(
+      assets, { paperWidth: 612, paperHeight: 792 }, 'single-column',
+    )).toBe(true);
+    const project = await buildTypstProject({
+      metadata: { paperWidth: 612, paperHeight: 792 }, targetLayoutPolicy: 'single-column',
+      regions: [{
+        id: 'tables', mode: 'full-width', presentation: 'horizontal', sourcePage: 0,
+        bounds: { x: 20, y: 100, w: 692, h: 170 },
+        orderedUnitIds: ['ta', 'ca', 'tb', 'cb'],
+      }],
+      units: [
+        { id: 'ta', kind: 'table', layoutRegionId: 'tables', order: 0, assetId: 'ta' },
+        { id: 'ca', kind: 'table-title', layoutRegionId: 'tables', order: 1, text: '表一' },
+        { id: 'tb', kind: 'table', layoutRegionId: 'tables', order: 2, assetId: 'tb' },
+        { id: 'cb', kind: 'table-title', layoutRegionId: 'tables', order: 3, text: '表二' },
+      ],
+      assets,
+    });
+
+    expect(project.mainContent).not.toContain('#grid(columns: 2');
+    expect(project.mainContent).toContain('440.64pt');
   });
 
   it('escapes Typst syntax without changing ordinary protected text', () => {

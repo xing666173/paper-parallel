@@ -63,6 +63,12 @@ function projectAiMessage(event: AiLogEvent): string {
         : `视觉质量门未通过（${event.severeIssueCount} 个高置信严重问题），正在结束任务`;
     case 'quality-persisted':
       return '中文 PDF 与对齐数据已保存';
+    case 'layout-repair-started':
+      return `开始第 ${event.attempt}/2 轮确定性排版修复（${event.issueCount} 个严重问题）`;
+    case 'layout-repair-action':
+      return `排版修复 ${event.attempt}/2：${event.unitId} — ${event.message}`;
+    case 'layout-repair-completed':
+      return `第 ${event.attempt}/2 轮排版修复已编译，正在重新对齐与逐页质检`;
     case 'batch-started':
       return `开始批次 ${event.batchId}，共 ${event.blockIds.length} 个文本块`;
     case 'batch-received':
@@ -140,6 +146,7 @@ export function createTaskStore(dependencies: TaskStoreDependencies, id = 'task'
           ...('totalPages' in event ? { totalPages: event.totalPages } : {}),
         } : {}),
         ...('reviewedPages' in event ? { reviewedPages: event.reviewedPages } : {}),
+        ...('attempt' in event ? { attempt: event.attempt } : {}),
         message: projectAiMessage(event),
       };
       if (event.type === 'batch-progress') {
@@ -171,6 +178,9 @@ export function createTaskStore(dependencies: TaskStoreDependencies, id = 'task'
         || event.type === 'vision-review-completed'
         || event.type === 'quality-finalizing'
         || event.type === 'quality-persisted'
+        || event.type === 'layout-repair-started'
+        || event.type === 'layout-repair-action'
+        || event.type === 'layout-repair-completed'
       ) {
         lastResponseAt.value = event.at;
         if (event.type === 'batch-received' && event.completionTokens > 0 && event.elapsedMs > 0) {

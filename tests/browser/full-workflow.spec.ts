@@ -13,12 +13,20 @@ interface PromptBlock {
 
 async function mockDeepSeek(
   page: Page,
-  options: { firstTranslationDelayMs?: number; firstProtocolError?: boolean; firstValidationError?: boolean } = {},
+  options: {
+    firstTranslationDelayMs?: number;
+    firstProtocolError?: boolean;
+    firstValidationError?: boolean;
+    visualRounds?: Array<'pass' | 'repairable'>;
+  } = {},
 ): Promise<{
   translatedBatches: () => number;
   translationRequests: () => Array<{ maxTokens: number; thinking: string; blockCount: number; stream: boolean }>;
+  visualReviewRounds: () => number;
 }> {
   let translatedBatches = 0;
+  let visualReviewRounds = 0;
+  const activeVisualRound = new Map<number, number>();
   const translationRequests: Array<{
     maxTokens: number; thinking: string; blockCount: number; stream: boolean;
   }> = [];
@@ -57,7 +65,30 @@ async function mockDeepSeek(
       content = JSON.stringify({ page: pageNumber, layout: 'mixed', regions: [] });
     } else if (Array.isArray(userContent) && userMessage.includes('final visual quality inspector')) {
       const targetPage = Number(userMessage.match(/translated target page (\d+)/i)?.[1] ?? 1);
-      content = JSON.stringify({ target_page: targetPage, issues: [] });
+      if (targetPage === 1) visualReviewRounds += 1;
+      const round = targetPage === 1 ? visualReviewRounds : 0;
+      activeVisualRound.set(targetPage, round);
+      const outcome = targetPage === 1 ? options.visualRounds?.[round - 1] : 'pass';
+      content = JSON.stringify({
+        target_page: targetPage,
+        issues: outcome === 'repairable' ? [{
+          type: 'layout_drift', severity: 'severe',
+          bbox: { x: 0, y: 0, width: 1000, height: 1000 },
+          confidence: 0.99, evidence: `isolated layout unit round ${round}`,
+        }] : [],
+      });
+    } else if (Array.isArray(userContent) && userMessage.includes('Independently re-check')) {
+      const targetPage = Number(userMessage.match(/target page (\d+)/i)?.[1] ?? 1);
+      const round = activeVisualRound.get(targetPage) ?? 0;
+      const outcome = targetPage === 1 ? options.visualRounds?.[round - 1] : 'pass';
+      content = JSON.stringify({
+        target_page: targetPage,
+        issues: outcome === 'repairable' ? [{
+          type: 'layout_drift', severity: 'severe',
+          bbox: { x: 0, y: 0, width: 1000, height: 1000 },
+          confidence: 0.99, evidence: `isolated layout unit round ${round}`,
+        }] : [],
+      });
     } else if (userMessage !== 'Reply with pong.') {
       const prompt = JSON.parse(userMessage) as { blocks: PromptBlock[] };
       translatedBatches += 1;
@@ -133,6 +164,7 @@ async function mockDeepSeek(
   return {
     translatedBatches: () => translatedBatches,
     translationRequests: () => translationRequests,
+    visualReviewRounds: () => visualReviewRounds,
   };
 }
 
@@ -201,6 +233,11 @@ test('uploads a mixed-layout PDF and reaches the synchronized dual-PDF reader', 
   }]);
   expect(pageErrors).toEqual([]);
   expect(await page.evaluate(() => localStorage.getItem('paper-parallel.deepseek-key'))).toBeNull();
+  const typstSource = await page.evaluate(() => (
+    globalThis as typeof globalThis & { __PP_DIAGNOSTIC_TYPST_SOURCE__?: string }
+  ).__PP_DIAGNOSTIC_TYPST_SOURCE__ ?? '');
+  expect(typstSource).not.toContain('columns(2)');
+  expect(typstSource).not.toContain('#colbreak()');
 });
 
 test('safely stops an active translation request and resumes the recoverable task', async ({ page }) => {
@@ -222,4 +259,48 @@ test('safely stops an active translation request and resumes the recoverable tas
   await page.waitForURL(/#\/task\/pp-[a-f0-9]{64}\/read(?:\?|$)/, { timeout: 180_000 });
   await expect(page.getByLabel('英文 PDF 控制')).toContainText('英文 1 / 1');
   expect(deepSeek.translatedBatches()).toBeGreaterThanOrEqual(2);
+});
+
+test('refreshes the preview after both bounded layout repairs and then enters the reader', async ({ page }) => {
+  const deepSeek = await mockDeepSeek(page, { visualRounds: ['repairable', 'repairable', 'pass'] });
+  await page.goto('/');
+  await page.evaluate(() => {
+    const state = globalThis as typeof globalThis & { __PP_PREVIEW_URLS__?: string[] };
+    state.__PP_PREVIEW_URLS__ = [];
+    new MutationObserver(() => {
+      const url = document.querySelector<HTMLObjectElement>('object[aria-label="中文 Typst 编译预览"]')?.data;
+      if (url && !state.__PP_PREVIEW_URLS__!.includes(url)) state.__PP_PREVIEW_URLS__!.push(url);
+    }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['data'] });
+  });
+  await page.locator('[data-field="pdf"]').setInputFiles(FIXTURE);
+  await page.locator('[data-field="api-key"]').fill(FAKE_KEY);
+  await page.locator('[data-action="test-connection"]').click();
+  await expect(page.getByText('连接成功')).toBeVisible();
+  await page.locator('[data-action="start"]').click();
+
+  await page.waitForURL(/#\/task\/pp-[a-f0-9]{64}\/read(?:\?|$)/, { timeout: 210_000 });
+  await expect(page.getByText(/2 轮自动修复/)).toBeVisible();
+  expect(deepSeek.visualReviewRounds()).toBe(3);
+  const previewUrls = await page.evaluate(() => (
+    globalThis as typeof globalThis & { __PP_PREVIEW_URLS__?: string[] }
+  ).__PP_PREVIEW_URLS__ ?? []);
+  expect(new Set(previewUrls).size).toBeGreaterThanOrEqual(3);
+});
+
+test('stays on processing with a page report after the second repair still fails', async ({ page }) => {
+  const deepSeek = await mockDeepSeek(page, {
+    visualRounds: ['repairable', 'repairable', 'repairable'],
+  });
+  await page.goto('/');
+  await page.locator('[data-field="pdf"]').setInputFiles(FIXTURE);
+  await page.locator('[data-field="api-key"]').fill(FAKE_KEY);
+  await page.locator('[data-action="test-connection"]').click();
+  await expect(page.getByText('连接成功')).toBeVisible();
+  await page.locator('[data-action="start"]').click();
+
+  await expect(page.locator('.quality-error')).toContainText('视觉质检未通过', { timeout: 210_000 });
+  await expect(page.getByLabel('排版质量报告')).toContainText('逐页质检未通过');
+  await expect(page.getByLabel('排版质量报告')).toContainText('共 3 次排版');
+  expect(page.url()).toMatch(/\/process$/);
+  expect(deepSeek.visualReviewRounds()).toBe(3);
 });

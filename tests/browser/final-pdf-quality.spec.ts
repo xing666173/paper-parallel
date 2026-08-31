@@ -17,8 +17,9 @@ const REPORT_SLUG = process.env.PP_REPORT_SLUG?.trim()
     .replace(/^-+|-+$/g, '')
     .toLowerCase()
   || 'paper';
+const PROFILE_SLUG = process.env.PP_PROFILE_SLUG?.trim() || REPORT_SLUG;
 const OUTPUT_DIRECTORY = path.resolve('reports', 'real-api', TRANSLATION_MODEL, REPORT_SLUG);
-const PROFILE_DIRECTORY = path.resolve('reports', 'real-api', '.profiles', TRANSLATION_MODEL, REPORT_SLUG);
+const PROFILE_DIRECTORY = path.resolve('reports', 'real-api', '.profiles', TRANSLATION_MODEL, PROFILE_SLUG);
 
 async function connectWithRetry(page: import('@playwright/test').Page): Promise<void> {
   let failure = 'unknown network failure';
@@ -77,15 +78,23 @@ async function saveFailureDiagnostics(page: import('@playwright/test').Page): Pr
     const download = await downloadPromise;
     await download.saveAs(path.join(outputDirectory, 'diagnostic-failed.pdf'));
   }
-  const visualReport = await page.evaluate(() => {
+  const diagnostics = await page.evaluate(() => {
     const debugGlobal = globalThis as typeof globalThis & {
       __PP_DIAGNOSTIC_VISUAL_REPORT__?: unknown;
+      __PP_DIAGNOSTIC_QUALITY_REPORT__?: unknown;
     };
-    return debugGlobal.__PP_DIAGNOSTIC_VISUAL_REPORT__ ?? null;
+    return {
+      visualReport: debugGlobal.__PP_DIAGNOSTIC_VISUAL_REPORT__ ?? null,
+      qualityReport: debugGlobal.__PP_DIAGNOSTIC_QUALITY_REPORT__ ?? null,
+    };
   });
   await writeFile(
     path.join(outputDirectory, 'diagnostic-visual-report.json'),
-    JSON.stringify(visualReport, null, 2),
+    JSON.stringify(diagnostics.visualReport, null, 2),
+  );
+  await writeFile(
+    path.join(outputDirectory, 'diagnostic-quality-report.json'),
+    JSON.stringify(diagnostics.qualityReport, null, 2),
   );
   const layout = await page.evaluate(() => (
     globalThis as typeof globalThis & { __PP_DIAGNOSTIC_LAYOUT__?: unknown }
@@ -210,14 +219,25 @@ test('real API exact-paper PDF quality acceptance', async () => {
       const debugGlobal = globalThis as typeof globalThis & {
         __PP_DIAGNOSTIC_LAYOUT__?: unknown;
         __PP_DIAGNOSTIC_VISUAL_REPORT__?: unknown;
+        __PP_DIAGNOSTIC_QUALITY_REPORT__?: unknown;
         __PP_DIAGNOSTIC_TYPST_SOURCE__?: string;
       };
       return {
         layout: debugGlobal.__PP_DIAGNOSTIC_LAYOUT__ ?? null,
         visualReport: debugGlobal.__PP_DIAGNOSTIC_VISUAL_REPORT__ ?? null,
+        qualityReport: debugGlobal.__PP_DIAGNOSTIC_QUALITY_REPORT__ ?? null,
         typstSource: debugGlobal.__PP_DIAGNOSTIC_TYPST_SOURCE__ ?? '',
       };
     });
+    expect(successfulDiagnostics.typstSource).not.toContain('columns(2)');
+    expect(successfulDiagnostics.typstSource).not.toContain('#colbreak()');
+    expect(successfulDiagnostics.qualityReport).toMatchObject({
+      pass: true, layoutProfileVersion: 'zh-single-column-v1',
+    });
+    expect((successfulDiagnostics.qualityReport as { attempts: unknown[] }).attempts.length)
+      .toBeGreaterThanOrEqual(1);
+    expect((successfulDiagnostics.qualityReport as { attempts: unknown[] }).attempts.length)
+      .toBeLessThanOrEqual(3);
     await writeFile(
       path.join(outputDirectory, 'successful-layout.json'),
       JSON.stringify(successfulDiagnostics.layout, null, 2),
@@ -225,6 +245,10 @@ test('real API exact-paper PDF quality acceptance', async () => {
     await writeFile(
       path.join(outputDirectory, 'successful-visual-report.json'),
       JSON.stringify(successfulDiagnostics.visualReport, null, 2),
+    );
+    await writeFile(
+      path.join(outputDirectory, 'successful-quality-report.json'),
+      JSON.stringify(successfulDiagnostics.qualityReport, null, 2),
     );
     await writeFile(
       path.join(outputDirectory, 'successful-main.typ'),
@@ -269,6 +293,8 @@ test('real API exact-paper PDF quality acceptance', async () => {
       thinkingMode: 'disabled',
       sourcePdf: SOURCE_PDF,
       targetPages: pageCount,
+      layoutProfileVersion: 'zh-single-column-v1',
+      qualityAttempts: (successfulDiagnostics.qualityReport as { attempts?: unknown[] } | null)?.attempts?.length ?? 0,
       completedAt: new Date().toISOString(),
     }, null, 2));
   } finally {

@@ -19,6 +19,8 @@ export interface TypstSemanticUnit {
   layoutRegionId: string;
   order: number;
   text?: string;
+  headingLevel?: 1 | 2 | 3;
+  headingNumber?: string;
   targetSegments?: TypstTargetSegment[];
   assetId?: string;
   sourceColumn?: 'left' | 'right' | 'span';
@@ -31,6 +33,23 @@ export interface TypstProjectInput {
   assets: readonly ImmutableAsset[];
   /** Keep the source regions, or reflow every translated text region as one readable column. */
   targetLayoutPolicy?: TargetLayoutPolicy;
+  repairPlan?: LayoutRepairPlan;
+}
+
+export interface LayoutRepairAction {
+  type: 'heading-spacing' | 'page-break' | 'asset-scale' | 'stack-assets';
+  unitId: string;
+  detail: string;
+}
+
+export interface LayoutRepairPlan {
+  attempt: 1 | 2;
+  extraHeadingBelowPt: Record<string, number>;
+  forcePageBreakBeforeUnitIds: string[];
+  assetScaleByUnitId: Record<string, number>;
+  stackAssetGroupIds: string[];
+  issueFingerprints: string[];
+  actions: LayoutRepairAction[];
 }
 
 export interface TypstProject {
@@ -44,26 +63,45 @@ function quote(value: string): string {
   return `"${escapeTypstString(value)}"`;
 }
 
-function renderTextUnit(unit: TypstSemanticUnit, markerIds: string[]): string {
-  const segments = unit.targetSegments?.length
+function renderTextUnit(
+  unit: TypstSemanticUnit,
+  markerIds: string[],
+  repairPlan?: LayoutRepairPlan,
+): string {
+  const rawSegments = unit.targetSegments?.length
     ? unit.targetSegments
     : [{ id: unit.id, text: unit.text ?? '' }];
-  const marked = segments.map((segment) => {
+  const frontLabel = unit.kind === 'abstract' ? '摘要' : unit.kind === 'keywords' ? '关键词' : undefined;
+  const segments = rawSegments.map((segment, index) => ({
+    ...segment,
+    text: index === 0 && frontLabel
+      ? segment.text.replace(/^(?:摘要|abstract|关键词|key\s*words?)\s*(?:[.:：—-]\s*)?/i, '')
+      : segment.text,
+  }));
+  const withPageBreak = (content: string): string => (
+    repairPlan?.forcePageBreakBeforeUnitIds.includes(unit.id)
+      ? `#pagebreak(weak: true)\n${content}`
+      : content
+  );
+  const marked = segments.map((segment, index) => {
     markerIds.push(segment.id);
-    return `#pp-unit(${quote(encodeURIComponent(segment.id))})[${escapeTypstText(segment.text)}]`;
+    const prefix = index === 0 && unit.headingNumber ? `${escapeTypstText(unit.headingNumber)} ` : '';
+    return `#pp-unit(${quote(encodeURIComponent(segment.id))})[${prefix}${escapeTypstText(segment.text)}]`;
   }).join('\n');
-  if (unit.kind === 'title') return `#pp-title[${marked}]`;
-  if (unit.kind === 'author' || unit.kind === 'affiliation') return `#pp-author[${marked}]`;
+  if (unit.kind === 'title') return withPageBreak(`#pp-title[${marked}]`);
+  if (unit.kind === 'author' || unit.kind === 'affiliation') return withPageBreak(`#pp-author[${marked}]`);
   if (unit.kind === 'heading') {
-    const headingText = segments.map((segment) => segment.text).join(' ').trim();
-    const macro = /^\d+\.\d+(?:\.\d+)?(?:\s|$)/.test(headingText)
-      ? 'pp-subheading'
-      : 'pp-heading';
-    return `#${macro}[${marked}]`;
+    const macro = (unit.headingLevel ?? 1) >= 2 ? 'pp-subheading' : 'pp-heading';
+    const extra = Math.max(0, Math.min(4, repairPlan?.extraHeadingBelowPt[unit.id] ?? 0));
+    const heading = `#${macro}(extra-below: ${extra}pt)[${marked}]`;
+    return withPageBreak(heading);
   }
-  if (unit.kind === 'caption' || unit.kind === 'table-title') return `#pp-caption[${marked}]`;
-  if (unit.kind === 'reference') return `#pp-reference[${marked}]`;
-  return marked;
+  if (unit.kind === 'abstract' || unit.kind === 'keywords') {
+    return withPageBreak(`#pp-front-matter[${escapeTypstText(frontLabel!)}][${marked}]`);
+  }
+  if (unit.kind === 'caption' || unit.kind === 'table-title') return withPageBreak(`#pp-caption[${marked}]`);
+  if (unit.kind === 'reference') return withPageBreak(`#pp-reference[${marked}]`);
+  return withPageBreak(marked);
 }
 
 function assetExtension(asset: ImmutableAsset): string {
@@ -108,6 +146,38 @@ function boundedAssetWidth(
   return Math.min(asset.sourceRect.w, available);
 }
 
+/**
+ * Keep a source-side horizontal asset row only when every member remains
+ * readable at its projected single-column width. Portrait galleries are the
+ * deliberate exception: their images are narrow and are read as a set.
+ */
+export function shouldStackAssetRow(
+  assets: readonly ImmutableAsset[],
+  metadata: AcademicTemplateOptions,
+  targetLayoutPolicy: TargetLayoutPolicy,
+): boolean {
+  if (targetLayoutPolicy !== 'single-column' || assets.length <= 1) return false;
+  const margin = metadata.margin ?? Math.max(36, metadata.paperWidth * 0.1);
+  const contentWidth = metadata.paperWidth - margin * 2;
+  const gutter = metadata.columnGap ?? 12;
+  const cellWidth = (contentWidth - gutter * (assets.length - 1)) / assets.length;
+  const portraitGallery = assets.every((asset) => (
+    asset.kind === 'figure'
+    && !asset.captionUnitId
+    && asset.sourceRect.h >= asset.sourceRect.w * 1.08
+    && asset.sourceRect.w <= contentWidth * 0.25
+  ));
+  if (portraitGallery) return false;
+  return assets.some((asset) => {
+    const scale = cellWidth / asset.sourceRect.w;
+    if (asset.kind === 'table' || asset.kind === 'code') {
+      return cellWidth < contentWidth * 0.4 || scale < 0.82;
+    }
+    if (asset.kind === 'formula') return cellWidth < 120 || scale < 0.72;
+    return cellWidth < 125 || scale < 0.6;
+  });
+}
+
 export async function buildTypstProject(input: TypstProjectInput): Promise<TypstProject> {
   const targetLayoutPolicy = input.targetLayoutPolicy ?? 'source-layout';
   const unitsById = new Map(input.units.map((unit) => [unit.id, unit]));
@@ -116,6 +186,7 @@ export async function buildTypstProject(input: TypstProjectInput): Promise<Typst
   if (assetsById.size !== input.assets.length) throw new Error('Duplicate immutable asset ID');
 
   const markerIds: string[] = [];
+  const repairPlan = input.repairPlan;
   const regionBodies: Array<{ mode: 'double' | 'root'; content: string }> = [];
   const pushRegionBody = (mode: 'double' | 'root', content: string): void => {
     const previous = regionBodies.at(-1);
@@ -155,6 +226,13 @@ export async function buildTypstProject(input: TypstProjectInput): Promise<Typst
         return Boolean(member && !member.captionUnitId);
       }).length
       : 1;
+    const horizontalAssets = region.orderedUnitIds.flatMap((unitId) => {
+      const unit = unitsById.get(unitId);
+      const member = unit?.assetId ? assetsById.get(unit.assetId) : undefined;
+      return member ? [member] : [];
+    });
+    const autoStackRegion = region.presentation === 'horizontal'
+      && shouldStackAssetRow(horizontalAssets, input.metadata, targetLayoutPolicy);
     const consumed = new Set<string>();
     const pushRendered = (
       mode: LayoutRegion['mode'],
@@ -190,7 +268,7 @@ export async function buildTypstProject(input: TypstProjectInput): Promise<Typst
         input.metadata,
         rowSize,
         targetLayoutPolicy,
-      );
+      ) * Math.max(0.8, Math.min(1, repairPlan?.assetScaleByUnitId[unit.id] ?? 1));
       return `#pp-asset(${quote(encodeURIComponent(unit.id))}, ${quote(path)}, ${sourceWidth(width)}, span: ${asset.widthMode === 'span'})`;
     };
 
@@ -213,7 +291,13 @@ export async function buildTypstProject(input: TypstProjectInput): Promise<Typst
         });
         const memberIds = [captionId, ...assetUnits.map((member) => member.unit.id)];
         memberIds.forEach((id) => consumed.add(id));
-        const rowSize = assetUnits.length > 1 ? assetUnits.length : horizontalCellCount;
+        const autoStackGroup = shouldStackAssetRow(
+          assetUnits.map((member) => member.asset), input.metadata, targetLayoutPolicy,
+        );
+        const stackAssets = autoStackRegion || autoStackGroup || repairPlan?.stackAssetGroupIds.some((id) => (
+          id === captionId || id === region.id
+        ));
+        const rowSize = stackAssets ? 1 : assetUnits.length > 1 ? assetUnits.length : horizontalCellCount;
         const groupMode: LayoutRegion['mode'] = regionMode === 'double'
           && (groupedAssets.length > 1 || groupedAssets.some((member) => member.widthMode === 'span'))
           ? 'full-width'
@@ -221,10 +305,10 @@ export async function buildTypstProject(input: TypstProjectInput): Promise<Typst
         const assetCodes = assetUnits.map((member) => (
           renderAsset(member.unit, member.asset, rowSize, groupMode)
         ));
-        const assetsContent = assetCodes.length > 1
+        const assetsContent = assetCodes.length > 1 && !stackAssets
           ? `#grid(columns: ${assetCodes.length}, gutter: 6pt, ${assetCodes.map((code) => `[${code}]`).join(', ')})`
-          : assetCodes[0]!;
-        const captionContent = renderTextUnit(caption, markerIds);
+          : assetCodes.join('\n');
+        const captionContent = renderTextUnit(caption, markerIds, repairPlan);
         const captionFirst = groupedAssets.every((member) => (
           member.kind === 'table' || member.kind === 'code'
         ));
@@ -232,7 +316,8 @@ export async function buildTypstProject(input: TypstProjectInput): Promise<Typst
         // can therefore move the complete unbreakable group only when the
         // remaining page space is insufficient; forcing a pagebreak here left
         // nearly empty pages before ordinary algorithms and figures.
-        const content = `#pp-asset-group(column-flow: ${groupMode === 'double'})[\n${captionFirst ? `${captionContent}\n${assetsContent}` : `${assetsContent}\n${captionContent}`}\n]`;
+        const forceGroupBreak = memberIds.some((id) => repairPlan?.forcePageBreakBeforeUnitIds.includes(id));
+        const content = `${forceGroupBreak ? '#pagebreak(weak: true)\n' : ''}#pp-asset-group(column-flow: ${groupMode === 'double'})[\n${captionFirst ? `${captionContent}\n${assetsContent}` : `${assetsContent}\n${captionContent}`}\n]`;
         const columns = new Set(memberIds.map((id) => unitsById.get(id)?.sourceColumn).filter(Boolean));
         pushRendered(
           groupMode,
@@ -248,14 +333,17 @@ export async function buildTypstProject(input: TypstProjectInput): Promise<Typst
         : regionMode;
       if (unit.assetId) {
         if (!asset) throw new Error(`Unit ${unit.id} references missing asset ${unit.assetId}`);
+        const assetContent = renderAsset(unit, asset, autoStackRegion ? 1 : horizontalCellCount, unitMode);
         pushRendered(
           unitMode,
-          renderAsset(unit, asset, horizontalCellCount, unitMode),
+          repairPlan?.forcePageBreakBeforeUnitIds.includes(unit.id)
+            ? `#pagebreak(weak: true)\n${assetContent}`
+            : assetContent,
           unit.sourceColumn,
           false,
         );
       } else {
-        pushRendered(unitMode, renderTextUnit(unit, markerIds), unit.sourceColumn);
+        pushRendered(unitMode, renderTextUnit(unit, markerIds, repairPlan), unit.sourceColumn);
       }
     }
     if (region.presentation === 'horizontal') {
@@ -265,7 +353,10 @@ export async function buildTypstProject(input: TypstProjectInput): Promise<Typst
       if (cells.length) {
         // The band is an unbreakable root-level group, so natural pagination
         // preserves it without wasting the remainder of the previous page.
-        pushRegionBody('root', `#pp-asset-group[\n#grid(columns: ${cells.length}, gutter: 6pt, ${cells.map((cell) => `[${cell}]`).join(', ')})\n]`);
+        const horizontalContent = autoStackRegion || repairPlan?.stackAssetGroupIds.includes(region.id)
+          ? cells.join('\n')
+          : `#grid(columns: ${cells.length}, gutter: 6pt, ${cells.map((cell) => `[${cell}]`).join(', ')})`;
+        pushRegionBody('root', `#pp-asset-group[\n${horizontalContent}\n]`);
       }
       continue;
     }

@@ -10,6 +10,10 @@ import {
   listModels,
   type DeepSeekModel,
 } from '../core/translate/client';
+import {
+  CURRENT_LAYOUT_PROFILE,
+  CURRENT_TARGET_LAYOUT_POLICY,
+} from '../core/layout/profile';
 
 const KEY_STORAGE = 'paper-parallel.deepseek-key';
 const SESSION_KEY_STORAGE = 'paper-parallel.deepseek-key-session';
@@ -93,6 +97,8 @@ async function startTask(): Promise<void> {
         thinkingMode: thinkingMode.value,
         sourceFileName: file.value.name,
         sourceFileHash: fileHash,
+        targetLayoutPolicy: CURRENT_TARGET_LAYOUT_POLICY,
+        layoutProfileVersion: CURRENT_LAYOUT_PROFILE,
       },
     });
     await repository.clearAiLog(projectId);
@@ -110,7 +116,7 @@ async function startTask(): Promise<void> {
     <section class="upload-hero">
       <p class="eyebrow">ACADEMIC PDF TRANSLATOR</p>
       <h1>把英文论文转换为可对照阅读的中文论文</h1>
-      <p>保留论文的版式结构与技术内容，生成中文 PDF 和双语阅读任务。</p>
+      <p>英文原文保持不变，中文统一重排为适合阅读的单栏 PDF，并保留图表、公式与双语对应。</p>
     </section>
     <form class="upload-card" @submit.prevent="startTask">
       <PdfDropzone :model-value="file" @update:model-value="updateFile" @error="errorMessage = $event" />

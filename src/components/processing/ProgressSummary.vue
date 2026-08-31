@@ -82,6 +82,8 @@ const progressDetail = computed(() => {
     return `翻译文本块 ${props.task.progress.completed} / ${props.task.progress.total}`;
   }
   if (props.task.stage === 'validating') {
+    const repair = latestEntry(['layout-repair-started', 'layout-repair-action', 'layout-repair-completed']);
+    if (repair?.attempt) return `排版自动修复 ${repair.attempt} / 2`;
     const completed = latestEntry(['vision-review-completed']);
     const pageEntry = latestEntry([
       'vision-review-page', 'vision-review-page-timeout', 'vision-review-page-phase',

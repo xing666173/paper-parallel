@@ -162,6 +162,62 @@ function findSplitTextRanges(
       ];
     }
   }
+
+  // A sentence can be interrupted by a page/column figure after a short but
+  // meaningful prefix such as "If we naively", with its long continuation
+  // beginning the following PDF block. Keep the normal 16-character floor
+  // above, and relax only this exact, adjacent, strongly anchored shape.
+  if (normalizedNeedle.length >= 48) {
+    for (let split = 15; split >= 4; split -= 1) {
+      const prefixRange = findExactTextRange(
+        designatedBlock.text ?? '',
+        normalizedNeedle.slice(0, split),
+        from,
+      );
+      if (!prefixRange) continue;
+      const prefixText = (designatedBlock.text ?? '').slice(prefixRange[0], prefixRange[1]);
+      const trailingText = (designatedBlock.text ?? '').slice(prefixRange[1]);
+      const prefixWords = prefixText.match(/[A-Za-z]{2,}/g) ?? [];
+      const trailingFunctionWords = trailingText.match(
+        /\b(?:the|a|an|and|or|of|to|in|for|with|that|this|is|are|was|were|as|by|from|on|at|if|we)\b/gi,
+      ) ?? [];
+      const veryShortPrefix = split < 8;
+      if (veryShortPrefix) {
+        if (
+          !/^(?:This|That|These|Those|It)$/u.test(prefixText.trim())
+          || normalizedLength(trailingText) > 0
+        ) continue;
+      } else if (
+        prefixWords.length < 2
+        || prefixRange[0] < (designatedBlock.text?.length ?? 0) * 0.65
+        || trailingFunctionWords.length > 1
+      ) continue;
+      const suffix = normalizedNeedle.slice(split);
+      const suffixMatch = candidates
+        .filter((candidate) => (
+          candidate.id !== designatedBlock.id
+          && indexedChars(candidate).length > 0
+          && candidate.order > designatedBlock.order
+          && candidate.pageIndex >= designatedBlock.pageIndex
+          && candidate.pageIndex <= designatedBlock.pageIndex + 1
+        ))
+        .map((candidate) => ({
+          block: candidate,
+          range: findExactTextRange(candidate.text ?? '', suffix, 0),
+        }))
+        .filter((candidate): candidate is { block: Block; range: [number, number] } => (
+          Boolean(candidate.range)
+          && normalizedLength(candidate.block.text?.slice(0, candidate.range?.[0]) ?? '') <= 4
+        ))
+        .sort((left, right) => left.block.order - right.block.order)[0];
+      if (suffixMatch) {
+        return [
+          { block: designatedBlock, range: prefixRange },
+          suffixMatch,
+        ];
+      }
+    }
+  }
   return null;
 }
 

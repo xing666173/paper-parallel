@@ -13,6 +13,8 @@ import { useTaskStore } from '../stores/task';
 import { runProductionPipeline } from '../core/pipeline/productionPipeline';
 import { createBrowserPipelineStages } from '../core/pipeline/browserStages';
 import type { TaskSnapshot } from '../types/models';
+import { resetTaskForSingleColumnLayout, usesCurrentSingleColumnLayout } from '../core/layout/profile';
+import type { QualityReport } from '../core/quality/report';
 
 const route = useRoute();
 const router = useRouter();
@@ -24,6 +26,7 @@ const loadError = ref('');
 const sourceUrl = ref<string>();
 const previewUrl = ref<string>();
 const previewState = ref<PreviewState>('empty');
+const qualityReport = ref<QualityReport>();
 let enteredReader = false;
 
 const task = computed(() => (
@@ -45,8 +48,9 @@ watch(() => store.completionSummary, async (summary) => {
   await router.replace({ name: 'reader', params: { projectId: projectId.value }, query: { auto: '1' } });
 }, { deep: true });
 
-watch(() => task.value?.status, (status) => {
+watch(() => task.value?.status, async (status) => {
   if (status === 'failed' && !previewUrl.value) previewState.value = 'failed';
+  if (status === 'failed' || status === 'completed') await loadQualityReport();
 });
 
 function pipelineRunner(initial: TaskSnapshot) {
@@ -56,6 +60,11 @@ function pipelineRunner(initial: TaskSnapshot) {
       snapshot: initial,
       repository,
       onAiEvent: store.recordAiEvent,
+      onPreview: ({ svg }) => {
+        if (previewUrl.value) URL.revokeObjectURL(previewUrl.value);
+        previewUrl.value = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
+        previewState.value = 'ready';
+      },
     });
     const result = await runProductionPipeline({
       snapshot: initial,
@@ -67,6 +76,40 @@ function pipelineRunner(initial: TaskSnapshot) {
     store.current = result.snapshot;
     store.completionSummary = result.completion;
   };
+}
+
+async function loadQualityReport(): Promise<void> {
+  const artifact = await repository.findArtifact(`${projectId.value}:quality-report`);
+  qualityReport.value = artifact ? JSON.parse(await artifact.blob.text()) as QualityReport : undefined;
+}
+
+function hasApiKey(): boolean {
+  return Boolean(
+    sessionStorage.getItem('paper-parallel.deepseek-key-session')?.trim()
+    || localStorage.getItem('paper-parallel.deepseek-key')?.trim(),
+  );
+}
+
+async function reflowWithCurrentLayout(): Promise<void> {
+  if (!store.current || store.current.status === 'running' || store.current.status === 'stopping') return;
+  if (!hasApiKey()) {
+    loadError.value = '按新版重新排版仍需 DeepSeek 逐页质检，请返回上传页重新验证 API Key。';
+    return;
+  }
+  try {
+    await repository.clearProjectLayoutOutputs(projectId.value);
+    const reset = resetTaskForSingleColumnLayout(store.current);
+    await repository.saveTask(reset);
+    store.current = reset;
+    store.completionSummary = null;
+    qualityReport.value = undefined;
+    if (previewUrl.value) URL.revokeObjectURL(previewUrl.value);
+    previewUrl.value = undefined;
+    previewState.value = 'building';
+    startIdleTask(reset);
+  } catch (error) {
+    loadError.value = error instanceof Error ? error.message : String(error);
+  }
 }
 
 function startIdleTask(snapshot: TaskSnapshot) {
@@ -98,6 +141,7 @@ onMounted(async () => {
     } else if (task.value?.stage === 'composing' || task.value?.stage === 'compiling') {
       previewState.value = 'building';
     }
+    await loadQualityReport();
     if (!store.current) loadError.value = '未找到该翻译任务，请重新选择论文。';
     else if (store.current.status === 'idle') startIdleTask(store.current);
   } catch (error) {
@@ -136,6 +180,21 @@ onBeforeRouteLeave(() => {
       <p v-if="task.status === 'failed'" class="quality-error" role="alert">
         <strong>当前阶段未通过：</strong>{{ task.error }}
       </p>
+      <section v-if="qualityReport" class="quality-report-card" aria-label="排版质量报告">
+        <div>
+          <strong>{{ qualityReport.pass ? '逐页质检通过' : '逐页质检未通过' }}</strong>
+          <span>共 {{ qualityReport.attempts.length }} 次排版，检查 {{ qualityReport.attempts.at(-1)?.reviewedPages ?? 0 }} 页</span>
+        </div>
+        <ul v-if="qualityReport.attempts.at(-1)?.issues.length">
+          <li v-for="(issue, index) in qualityReport.attempts.at(-1)?.issues" :key="`${issue.targetPageIndex}-${issue.type}-${index}`">
+            第 {{ issue.targetPageIndex + 1 }} 页 · {{ issue.type }}：{{ issue.evidence }}
+          </li>
+        </ul>
+      </section>
+      <div v-if="(task.status === 'completed' || task.status === 'failed') && !usesCurrentSingleColumnLayout(task)" class="layout-action-row">
+        <span>{{ usesCurrentSingleColumnLayout(task) ? '当前：中文单栏版' : '当前：旧版排版' }}</span>
+        <button class="button secondary" type="button" @click="reflowWithCurrentLayout">按新版重新排版</button>
+      </div>
       <p class="vision-disclosure">
         版式识别和成品质检会将论文页面图片发送给 DeepSeek Vision Exp，并产生额外 API 用量；页面与结果仍只保存在当前浏览器。
       </p>

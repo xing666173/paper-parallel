@@ -3,12 +3,23 @@ import {
   authorBiographyStart,
   buildTranslationRequestsFromDoc,
   normalizeDeepSeekTranslationResponse,
+  parseHeadingParts,
   parseDeepSeekTranslationJson,
   prepareImmutableStructure,
 } from '../../src/core/pipeline/preparation';
 import type { Doc } from '../../src/types/models';
 
 describe('production pipeline preparation', () => {
+  it('splits merged section and subsection headings before translation', () => {
+    expect(parseHeadingParts('2 Motivation and Related Work 2.1 ZKP Bottleneck Shift')).toEqual([
+      { number: '2', level: 1, text: 'Motivation and Related Work' },
+      { number: '2.1', level: 2, text: 'ZKP Bottleneck Shift' },
+    ]);
+    expect(parseHeadingParts('III. EVALUATION')).toEqual([
+      { number: 'III', level: 1, text: 'EVALUATION' },
+    ]);
+  });
+
   it('recognizes degree and role-led author biographies after a bibliography', () => {
     expect(authorBiographyStart('Patrick Dai is the founder of Semisand Chip Design.')).toBe(0);
     expect(authorBiographyStart('Yinlong Li is the senior FPGA engineer in the hardware R&D center.')).toBe(0);
@@ -220,6 +231,134 @@ describe('production pipeline preparation', () => {
     expect(parts.length).toBeGreaterThan(1);
     expect(parts[0]!.sourceText).toMatch(/[.]$/);
     expect(parts[1]!.sourceText).toMatch(/^For the GPU implementations/);
+  });
+
+  it('rejoins a lowercase prose continuation across a captioned figure and drops visual punctuation residue', () => {
+    const doc = fixtureDoc();
+    doc.pageCount = 2;
+    doc.pages = [
+      { pageIndex: 0, width: 612, height: 792, columns: [] },
+      { pageIndex: 1, width: 612, height: 792, columns: [] },
+    ];
+    const prefix = 'The accelerator selects the correct input elements for every butterfly operation. If we naively';
+    const continuation = 'scale up the bitwidth beyond 256, the area and energy overheads increase significantly.';
+    const remainder = 'Furthermore, the required computation resources also scale in a super-linear fashion.';
+    doc.blocks = [
+      {
+        id: 'before-figure', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 314, y: 620, w: 238, h: 80 }, order: 10,
+        fragments: [
+          { pageIndex: 0, rect: { x: 314, y: 620, w: 238, h: 80 } },
+          { pageIndex: 1, rect: { x: 58, y: 80, w: 238, h: 120 } },
+        ],
+        text: `${prefix}\n… … … …`, splitAllowed: true, widthMode: 'column',
+      },
+      {
+        id: 'figure-caption', docId: 'en', type: 'caption', pageIndex: 1,
+        rect: { x: 58, y: 214, w: 238, h: 10 }, order: 11,
+        text: 'Figure 4: Recursive transform', splitAllowed: false, widthMode: 'column',
+      },
+      {
+        id: 'after-figure', docId: 'en', type: 'paragraph', pageIndex: 1,
+        rect: { x: 58, y: 245, w: 238, h: 70 }, order: 12,
+        text: `${continuation} ${remainder}`, splitAllowed: true, widthMode: 'column',
+      },
+    ];
+    doc.semanticUnits = [
+      {
+        id: 'before-figure', kind: 'paragraph', sourceText: `${prefix}\n… … … …`,
+        protectedTokens: [], layoutRegionId: 'page-one', order: 10,
+      },
+      {
+        id: 'figure-caption', kind: 'caption', sourceText: 'Figure 4: Recursive transform',
+        protectedTokens: [], layoutRegionId: 'page-two', order: 11,
+      },
+      {
+        id: 'after-figure', kind: 'paragraph', sourceText: `${continuation} ${remainder}`,
+        protectedTokens: [], layoutRegionId: 'page-two', order: 12,
+      },
+    ];
+    doc.layoutRegions = [
+      {
+        id: 'page-one', mode: 'double', sourcePage: 0,
+        bounds: { x: 314, y: 620, w: 238, h: 80 }, orderedUnitIds: ['before-figure'],
+      },
+      {
+        id: 'page-two', mode: 'double', sourcePage: 1,
+        bounds: { x: 58, y: 80, w: 238, h: 235 },
+        orderedUnitIds: ['figure-caption', 'after-figure'],
+      },
+    ];
+
+    const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: [{
+      id: 'figure-asset', kind: 'figure', pageIndex: 1,
+      rect: { x: 58, y: 80, w: 238, h: 128 }, widthMode: 'column',
+      captionUnitId: 'figure-caption',
+    }] });
+
+    expect(prepared.units.find((unit) => unit.id === 'before-figure')?.sourceText)
+      .toBe(`${prefix}\n${continuation}`);
+    expect(prepared.units.find((unit) => unit.id === 'after-figure')?.sourceText)
+      .toBe(remainder);
+    expect(prepared.regions.find((region) => region.id === 'page-two')?.orderedUnitIds)
+      .toEqual(['figure-asset', 'figure-caption', 'after-figure']);
+  });
+
+  it('joins a wrapped table caption before repairing a one-word prose continuation across the table', () => {
+    const doc = fixtureDoc();
+    doc.pageCount = 2;
+    doc.pages = [
+      { pageIndex: 0, width: 612, height: 792, columns: [] },
+      { pageIndex: 1, width: 612, height: 792, columns: [] },
+    ];
+    const prefix = 'The transfer time drops by an order of magnitude. This';
+    const continuation = 'is because all required points overlap with device computation.';
+    const remainder = 'Fourth, the multi-device implementation adds little overhead.';
+    doc.blocks = [
+      {
+        id: 'before-table', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 104, y: 680, w: 388, h: 50 }, order: 10,
+        text: prefix, splitAllowed: true, widthMode: 'span',
+      },
+      {
+        id: 'table-caption', docId: 'en', type: 'caption', pageIndex: 1,
+        rect: { x: 104, y: 100, w: 388, h: 10 }, order: 11,
+        text: 'Table 6: Execution time across', splitAllowed: false, widthMode: 'span',
+      },
+      {
+        id: 'table-caption-tail', docId: 'en', type: 'paragraph', pageIndex: 1,
+        rect: { x: 104, y: 112, w: 180, h: 10 }, order: 12,
+        text: 'various constraint scales (S).', splitAllowed: true, widthMode: 'span',
+      },
+      {
+        id: 'after-table', docId: 'en', type: 'paragraph', pageIndex: 1,
+        rect: { x: 104, y: 260, w: 388, h: 60 }, order: 13,
+        text: `${continuation} ${remainder}`, splitAllowed: true, widthMode: 'span',
+      },
+    ];
+    doc.semanticUnits = [
+      { id: 'before-table', kind: 'paragraph', sourceText: prefix, protectedTokens: [], layoutRegionId: 'page-one', order: 10 },
+      { id: 'table-caption', kind: 'caption', sourceText: 'Table 6: Execution time across', protectedTokens: [], layoutRegionId: 'page-two', order: 11 },
+      { id: 'table-caption-tail', kind: 'paragraph', sourceText: 'various constraint scales (S).', protectedTokens: [], layoutRegionId: 'page-two', order: 12 },
+      { id: 'after-table', kind: 'paragraph', sourceText: `${continuation} ${remainder}`, protectedTokens: [], layoutRegionId: 'page-two', order: 13 },
+    ];
+    doc.layoutRegions = [
+      { id: 'page-one', mode: 'full-width', sourcePage: 0, bounds: { x: 104, y: 680, w: 388, h: 50 }, orderedUnitIds: ['before-table'] },
+      { id: 'page-two', mode: 'full-width', sourcePage: 1, bounds: { x: 104, y: 100, w: 388, h: 220 }, orderedUnitIds: ['table-caption', 'table-caption-tail', 'after-table'] },
+    ];
+
+    const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: [{
+      id: 'table-asset', kind: 'table', pageIndex: 1,
+      rect: { x: 100, y: 140, w: 396, h: 100 }, widthMode: 'span',
+      captionUnitId: 'table-caption',
+    }] });
+
+    expect(prepared.units.find((unit) => unit.id === 'table-caption')?.sourceText)
+      .toBe('Table 6: Execution time across various constraint scales (S).');
+    expect(prepared.units.some((unit) => unit.id === 'table-caption-tail')).toBe(false);
+    expect(prepared.units.find((unit) => unit.id === 'before-table')?.sourceText)
+      .toBe(`${prefix}\n${continuation}`);
+    expect(prepared.units.find((unit) => unit.id === 'after-table')?.sourceText).toBe(remainder);
   });
 
   it('keeps bibliography entries verbatim instead of sending them through translation', () => {
@@ -3462,10 +3601,10 @@ describe('production pipeline preparation', () => {
     const prepared = prepareImmutableStructure(doc);
 
     expect(prepared.units.find((unit) => unit.id === 'section-2-4')).toEqual(
-      expect.objectContaining({ sourceText: '2.4 Sparse Matrix' }),
+      expect.objectContaining({ sourceText: 'Sparse Matrix', headingNumber: '2.4', headingLevel: 2 }),
     );
     expect(buildTranslationRequestsFromDoc({ ...doc, semanticUnits: prepared.units })
-      .find((request) => request.blockId === 'section-2-4')?.protectedTokens).toEqual(['2.4']);
+      .find((request) => request.blockId === 'section-2-4')).toMatchObject({ source: 'Sparse Matrix' });
   });
 
   it('repairs a single letter-spaced small-caps word in a heading only', () => {

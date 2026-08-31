@@ -9,6 +9,7 @@ export interface ProjectAiLogEntry {
   page?: number;
   totalPages?: number;
   reviewedPages?: number;
+  attempt?: number;
   message: string;
 }
 
@@ -40,6 +41,7 @@ export type ProjectArtifactKind =
   | 'alignment-manifest'
   | 'vision-layout'
   | 'formula-ocr'
+  | 'quality-report'
   | 'project-package';
 
 export interface ProjectArtifactRecord {

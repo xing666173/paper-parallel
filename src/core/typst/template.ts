@@ -45,6 +45,9 @@ export function buildAcademicTemplate(options: AcademicTemplateOptions): string 
   const minorHeading = singleColumn
     ? SINGLE_COLUMN_TYPOGRAPHY.minorHeading
     : majorHeading;
+  const doubleLayout = singleColumn
+    ? '#let pp-double(body) = body'
+    : `#let pp-double(body) = columns(2, gutter: ${points(gutter)})[#body]`;
   return `#set page(
   width: ${points(options.paperWidth)},
   height: ${points(options.paperHeight)},
@@ -61,7 +64,7 @@ export function buildAcademicTemplate(options: AcademicTemplateOptions): string 
 #set heading(numbering: "1.1")
 
 #let pp-full-width(body) = body
-#let pp-double(body) = columns(2, gutter: ${points(gutter)})[#body]
+${doubleLayout}
 #let pp-single(body) = body
 #let pp-unit(id, body) = link("https://paper-parallel.invalid/unit/" + id)[#body]
 #let pp-title(body) = {
@@ -72,13 +75,17 @@ export function buildAcademicTemplate(options: AcademicTemplateOptions): string 
   set par(first-line-indent: 0pt, leading: 0.45em)
   block(width: 100%, below: 3pt)[#align(center)[#text(size: 10pt)[#body]]]
 }
-#let pp-heading(body) = {
-  set par(first-line-indent: 0pt, leading: 0.35em)
-  block(width: 100%, sticky: true, above: ${majorHeading.abovePt}pt, below: ${majorHeading.belowPt}pt)[#text(size: ${majorHeading.sizePt}pt, weight: "bold")[#body]]
+#let pp-front-matter(label, body) = {
+  set par(first-line-indent: 0pt, leading: 0.7em)
+  block(width: 100%, above: 4pt, below: 6pt)[#text(size: 9.5pt)[#text(weight: "bold")[#label] #body]]
 }
-#let pp-subheading(body) = {
+#let pp-heading(body, extra-below: 0pt) = {
   set par(first-line-indent: 0pt, leading: 0.35em)
-  block(width: 100%, sticky: true, above: ${minorHeading.abovePt}pt, below: ${minorHeading.belowPt}pt)[#text(size: ${minorHeading.sizePt}pt, weight: "bold")[#body]]
+  block(width: 100%, sticky: true, above: ${majorHeading.abovePt}pt, below: ${majorHeading.belowPt}pt + extra-below)[#text(size: ${majorHeading.sizePt}pt, weight: "bold")[#body]]
+}
+#let pp-subheading(body, extra-below: 0pt) = {
+  set par(first-line-indent: 0pt, leading: 0.35em)
+  block(width: 100%, sticky: true, above: ${minorHeading.abovePt}pt, below: ${minorHeading.belowPt}pt + extra-below)[#text(size: ${minorHeading.sizePt}pt, weight: "bold")[#body]]
 }
 #let pp-caption(body) = {
   set par(first-line-indent: 0pt, leading: 0.4em)

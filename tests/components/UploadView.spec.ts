@@ -113,6 +113,7 @@ describe('upload workflow', () => {
     const task = await createProjectRepository().loadTask(projectId);
     expect(task?.settings).toMatchObject({
       modelId: 'deepseek-v4-flash', thinkingMode: 'enabled', sourceFileName: 'paper.pdf',
+      targetLayoutPolicy: 'single-column', layoutProfileVersion: 'zh-single-column-v1',
     });
     expect(JSON.stringify(task)).not.toContain('sk-browser-test');
     expect(sessionStorage.getItem('paper-parallel.deepseek-key-session')).toBe('sk-browser-test');
