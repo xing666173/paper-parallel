@@ -3406,7 +3406,18 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
           bodyIds.push(candidate.id);
           previousBottom = Math.max(previousBottom, candidate.rect.y + candidate.rect.h);
         }
-        if (!bodyIds.length || !boundaryFound) {
+        const isolatedSpanningBody = bodyIds.length > 0
+          && (captionBlock.widthMode === 'span' || region.mode === 'full-width')
+          && bodyIds.every((id) => {
+            const block = blocks.get(id);
+            return Boolean(block && (looksLikeNumericTableBody(block) || looksLikeShortTableCellLabel(block)));
+          })
+          && region.orderedUnitIds.every((id) => id === caption.id || bodyIds.includes(id));
+        // A full-width table can own an isolated parser region that ends at
+        // the last numeric row. In that case there is deliberately no
+        // same-column prose boundary: the region membership itself is the
+        // deterministic lower boundary (SZKP Tables 7-9).
+        if (!bodyIds.length || (!boundaryFound && !isolatedSpanningBody)) {
           throw new Error(`无法可靠确定表 ${caption.id} 的不可变区域（未检测到表后边界）`);
         }
         const lastBody = blocks.get(bodyIds.at(-1)!)!;

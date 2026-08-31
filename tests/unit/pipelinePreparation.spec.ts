@@ -2789,6 +2789,51 @@ describe('production pipeline preparation', () => {
     expect(prepared.regions[0].orderedUnitIds).not.toContain('table-body');
   });
 
+  it('uses an isolated full-width numeric region as the lower boundary of a table', () => {
+    const doc = fixtureDoc();
+    const tableText = [
+      'Workload Size Poly Dense SpG1 SpG2 Total Speedup',
+      'AES 16383 0.103 0.345 1.07 0.43 1.20 480x',
+      'SHA2 32767 0.212 0.626 2.05 0.03 2.05 434x',
+      'RSA 131071 0.994 2.207 3.84 0.95 6.85 544x',
+    ].join('\n');
+    doc.blocks = [
+      {
+        id: 'isolated-table-caption', docId: 'en', type: 'caption', pageIndex: 0,
+        rect: { x: 212, y: 82, w: 188, h: 9 }, order: 1,
+        text: 'Table 7: Full Proof Runtime vs. CPU', splitAllowed: false, widthMode: 'span',
+      },
+      {
+        id: 'isolated-table-body', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 89, y: 109, w: 423, h: 79 }, order: 2,
+        text: tableText, splitAllowed: true, widthMode: 'span',
+      },
+    ];
+    doc.semanticUnits = [
+      {
+        id: 'isolated-table-caption', kind: 'caption',
+        sourceText: 'Table 7: Full Proof Runtime vs. CPU', protectedTokens: [],
+        layoutRegionId: 'isolated-table-region', order: 1,
+      },
+      {
+        id: 'isolated-table-body', kind: 'paragraph', sourceText: tableText,
+        protectedTokens: [], layoutRegionId: 'isolated-table-region', order: 2,
+      },
+    ];
+    doc.layoutRegions = [{
+      id: 'isolated-table-region', mode: 'full-width', sourcePage: 0,
+      bounds: { x: 89, y: 82, w: 423, h: 106 },
+      orderedUnitIds: ['isolated-table-caption', 'isolated-table-body'],
+    }];
+
+    const prepared = prepareImmutableStructure(doc);
+    const table = prepared.assetRegions.find((asset) => asset.id === 'isolated-table-caption-asset');
+
+    expect(table).toMatchObject({ kind: 'table', widthMode: 'span' });
+    expect(table!.rect.y + table!.rect.h).toBeCloseTo(194);
+    expect(prepared.units.some((unit) => unit.id === 'isolated-table-body')).toBe(false);
+  });
+
   it('extends a caption-derived span table through a right-column label block', () => {
     const doc = fixtureDoc();
     const rightLabels = [
