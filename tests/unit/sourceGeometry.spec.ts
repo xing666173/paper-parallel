@@ -546,6 +546,37 @@ describe('source PDF geometry', () => {
     });
   });
 
+  it('falls back to both explicit source blocks for a reconstructed cross-lane sentence', () => {
+    const doc = emptyDoc();
+    doc.blocks = [
+      {
+        id: 'footnote-left', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 100, y: 340, w: 180, h: 80 }, order: 0,
+        splitAllowed: true, widthMode: 'column',
+        text: '(3) Proof represents the execution time for the including data tr',
+      },
+      {
+        id: 'footnote-right', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 300, y: 340, w: 180, h: 80 }, order: 1,
+        splitAllowed: true, widthMode: 'column',
+        text: 'proof generation which consists of operations ansfer and other operations',
+      },
+    ];
+    const unit = alignmentUnit({
+      id: 'footnote-g-3', parentId: 'footnote-left', sourceBlockId: 'footnote-left',
+      sourceBlockIds: ['footnote-left', 'footnote-right'],
+      kind: 'semantic-group', relation: '1:1',
+      sourceText: '(3) Proof represents the execution time for the proof generation which consists of operations including data transfer and other operations.',
+    });
+
+    const [resolved] = resolveSourceGeometry([unit], doc, []);
+    expect(resolved).toMatchObject({
+      status: 'low-confidence', confidence: 0.75,
+      fallbackReason: 'source-reconstructed-across-explicit-blocks',
+    });
+    expect(resolved.source.flatMap((set) => set.rects)).toEqual([doc.blocks[0].rect, doc.blocks[1].rect]);
+  });
+
   it('allows block geometry only when a semantic group covers nearly the complete block', () => {
     const doc = emptyDoc();
     doc.blocks = [{

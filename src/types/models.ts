@@ -121,6 +121,8 @@ export interface SemanticUnit {
   parentId?: string;
   /** 原始英文 PDF 中承载该单元文字与字符坐标的块 ID。 */
   sourceBlockId?: string;
+  /** 重建跨栏/跨块语义时共同承载源文字的块 ID。 */
+  sourceBlockIds?: string[];
   kind: SemanticUnitKind;
   /** 标题层级和编号必须从英文源文档确定，不能根据译文反推。 */
   headingLevel?: 1 | 2 | 3;
@@ -181,6 +183,8 @@ export interface AlignmentUnit {
   parentId?: string;
   /** 原始英文 PDF 中承载该对齐单元的块 ID。 */
   sourceBlockId?: string;
+  /** 对齐单元由多个英文源块共同重建时的完整块集合。 */
+  sourceBlockIds?: string[];
   kind: 'semantic-group' | 'block' | 'asset' | 'reference';
   relation: AlignmentRelation;
   sourceUnitIds: string[];

@@ -168,6 +168,27 @@ function withAdjacentCaptionClearance(rect: Rect, caption: Rect | undefined, typ
   return rect;
 }
 
+function tableContentCorroboratesRegion(
+  doc: Doc,
+  pageIndex: number,
+  rect: Rect,
+  confidence: number,
+): boolean {
+  if (confidence < 0.45) return false;
+  const page = doc.pages[pageIndex];
+  if (!page || rect.w < page.width * 0.5 || rect.h < page.height * 0.045) return false;
+  const intersecting = doc.blocks.filter((block) => (
+    block.pageIndex === pageIndex
+    && intersectionArea(block.rect, rect) / Math.max(1, block.rect.w * block.rect.h) >= 0.12
+  ));
+  const text = intersecting.map((block) => block.text ?? '').join('\n');
+  const numbers = text.match(/(?<![A-Za-z])[-+]?\d+(?:[.,]\d+)?(?:%|x)?/g) ?? [];
+  const rowSignals = text.match(/(?:^|\s)(?:CPU|GPU|ASIC|FPGA|MHz|GHz|mW|[A-Z][A-Za-z-]+)\s+[-+]?\d/g) ?? [];
+  return numbers.length >= 18
+    && (intersecting.length >= 2 || numbers.length >= 30)
+    && (rowSignals.length >= 2 || numbers.length >= 40);
+}
+
 function isAuthorBiographyPage(doc: Doc, pageIndex: number): boolean {
   const text = doc.blocks
     .filter((block) => block.pageIndex === pageIndex)
@@ -357,6 +378,11 @@ function withAdjacentVisualLabelExtent(
 ): Rect {
   if (type !== 'figure') return rect;
   const page = doc.pages[pageIndex]!;
+  // A high-confidence wide Vision box already spans the complete visual. PDF
+  // text labels inside it must not enlarge the crop: aggregate diagram blocks
+  // can otherwise pull the rectangle across most of the page and cause the
+  // correct Vision region to be rejected as excessive.
+  if (rect.w >= page.width * 0.62) return rect;
   const candidates = doc.blocks.filter((block) => {
     if (block.pageIndex !== pageIndex || block.type === 'caption' || !looksLikeVisualText(block)) return false;
     const verticalOverlap = Math.max(0, Math.min(
@@ -383,6 +409,61 @@ function withAdjacentVisualLabelExtent(
     ...candidates.map((block) => block.rect.y + block.rect.h),
   ) + 2);
   return { x: left, y: top, w: right - left, h: bottom - top };
+}
+
+function withoutLeadingTableCaptionContinuation(
+  doc: Doc,
+  pageIndex: number,
+  rect: Rect,
+  type: VisionRegion['type'],
+): Rect {
+  if (type !== 'table') return rect;
+  const lines = characterLines(doc, pageIndex, rect);
+  if (!lines.length) return rect;
+  let top = rect.y;
+  let consumed = 0;
+  for (const line of lines.slice(0, 3)) {
+    if (line.y - top > 18) break;
+    const text = line.text.replace(/\s+/g, ' ').trim();
+    const words = text.match(/[A-Za-z]{2,}/g) ?? [];
+    const numbers = text.match(/\d+(?:[.]\d+)?/g) ?? [];
+    const captionLike = words.length >= 4
+      && numbers.length <= 2
+      && (/^[\p{Ll}(]/u.test(text) || /[.!?]\s*$/u.test(text));
+    if (!captionLike) break;
+    top = line.bottom + 3;
+    consumed += 1;
+  }
+  const bottom = rect.y + rect.h;
+  return consumed > 0 && top < bottom - 12 ? { ...rect, y: top, h: bottom - top } : rect;
+}
+
+function trimOverlappingSiblingAssets(regions: DetectedAssetRegion[]): DetectedAssetRegion[] {
+  for (const code of regions.filter((region) => region.kind === 'code')) {
+    for (const visual of regions.filter((region) => (
+      region.pageIndex === code.pageIndex && (region.kind === 'figure' || region.kind === 'table')
+    ))) {
+      const overlap = intersectionArea(code.rect, visual.rect);
+      const smaller = Math.max(1, Math.min(
+        code.rect.w * code.rect.h,
+        visual.rect.w * visual.rect.h,
+      ));
+      const horizontal = Math.max(0, Math.min(
+        code.rect.x + code.rect.w,
+        visual.rect.x + visual.rect.w,
+      ) - Math.max(code.rect.x, visual.rect.x));
+      if (overlap / smaller < 0.2
+        || horizontal / Math.max(1, Math.min(code.rect.w, visual.rect.w)) < 0.45) continue;
+      if (code.rect.y < visual.rect.y && visual.rect.y > code.rect.y + 12) {
+        code.rect = { ...code.rect, h: Math.max(12, visual.rect.y - code.rect.y - 3) };
+      } else if (visual.rect.y < code.rect.y && visual.rect.y + visual.rect.h < code.rect.y + code.rect.h - 12) {
+        const bottom = code.rect.y + code.rect.h;
+        const top = visual.rect.y + visual.rect.h + 3;
+        code.rect = { ...code.rect, y: top, h: Math.max(12, bottom - top) };
+      }
+    }
+  }
+  return regions;
 }
 
 function looksLikeVisualText(block: Doc['blocks'][number]): boolean {
@@ -619,7 +700,9 @@ export function reconcileVisionLayout(
       rect = withoutAdjacentFormulaProse(doc, page.pageIndex, rect, sourceVisionRect, vision.type);
       const captionRect = vision.captionBBox ? sourceRect(vision.captionBBox, page) : undefined;
       const caption = captionFor(doc, page.pageIndex, captionRect, vision.type, rect);
-      if (captionRect && !caption) {
+      const tableGeometryCorroborated = vision.type === 'table'
+        && tableContentCorroboratesRegion(doc, page.pageIndex, rect, vision.confidence);
+      if (captionRect && !caption && !tableGeometryCorroborated) {
         unresolved.push({ pageIndex: page.pageIndex, regionIndex, type: vision.type, reason: 'caption-unmatched' });
         return;
       }
@@ -632,7 +715,8 @@ export function reconcileVisionLayout(
       );
       if (vision.confidence < minimumConfidence
         && !portraitIndices.has(regionIndex)
-        && !captionCorroboratesRegion) {
+        && !captionCorroboratesRegion
+        && !tableGeometryCorroborated) {
         unresolved.push({ pageIndex: page.pageIndex, regionIndex, type: vision.type, reason: 'low-confidence' });
         return;
       }
@@ -646,8 +730,13 @@ export function reconcileVisionLayout(
       rect = withAdjacentVisualLabelExtent(doc, page.pageIndex, rect, vision.type);
       rect = withoutCaption(rect, captionBoundaries, vision.type);
       rect = withAdjacentCaptionClearance(rect, caption?.rect, vision.type);
+      if (!tableGeometryCorroborated || caption) {
+        rect = withoutLeadingTableCaptionContinuation(doc, page.pageIndex, rect, vision.type);
+      }
       rect = withoutFollowingTableCaption(doc, page.pageIndex, rect, caption?.id, vision.type);
-      rect = withoutTopMarginFurniture(doc, page.pageIndex, rect, vision.type);
+      if (!tableGeometryCorroborated || caption) {
+        rect = withoutTopMarginFurniture(doc, page.pageIndex, rect, vision.type);
+      }
       rect = withoutTrailingProse(doc, page.pageIndex, rect, vision.type);
       rect = withPrecedingTextClearance(doc, page.pageIndex, rect, vision.type);
       if (vision.type === 'figure' || vision.type === 'table') {
@@ -691,7 +780,7 @@ export function reconcileVisionLayout(
     });
   }
   return {
-    assetRegions: withoutNestedFormulaRegions(deduplicateRegions(assetRegions)),
+    assetRegions: withoutNestedFormulaRegions(trimOverlappingSiblingAssets(deduplicateRegions(assetRegions))),
     unresolved,
   };
 }

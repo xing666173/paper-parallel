@@ -98,20 +98,27 @@ function calibratedSeverity(
   }
   if (type === 'missing_text') return 'warning';
   if (severity === 'severe') return severity;
+  if (confidence >= 0.7
+    && (type === 'overlap' || type === 'clipped_text' || type === 'untranslated_body')) return 'severe';
   if (confidence >= 0.8
     && (type === 'asset_changed' || type === 'formula_changed' || type === 'table_changed')) return 'severe';
   if (type === 'unreadable_glyphs' && confidence >= 0.6
     && /(?:garbled|乱码|unclear symbols?|corrupt(?:ed)? glyph)/i.test(evidence)) return 'severe';
+  if (type === 'layout_drift'
+    && confidence >= 0.7
+    && /(?:isolated|orphan|scattered|stray|garbled|mixed\s+(?:with|into)\s+(?:the\s+)?body|author.*body|caption.*overlap|孤立|散落|乱码|游离|作者单位.*正文混排|正文混排|题注.*重叠)/i.test(evidence)) return 'severe';
   if (confidence < 0.85) return severity;
   if (type === 'unreadable_glyphs') return 'severe';
-  if (type === 'layout_drift'
-    && /(?:isolated|orphan|scattered|stray|garbled|孤立|散落|乱码|游离)/i.test(evidence)) return 'severe';
   return severity;
 }
 
 function isBlockingIssue(issue: VisionFinalIssue): boolean {
   if (issue.severity !== 'severe') return false;
   if (issue.confidence >= 0.8) return true;
+  if (issue.confidence >= 0.7
+    && (issue.type === 'overlap' || issue.type === 'clipped_text' || issue.type === 'untranslated_body'
+      || (issue.type === 'layout_drift'
+        && /(?:isolated|orphan|scattered|stray|mixed|overlap|孤立|散落|混排|重叠)/i.test(issue.evidence)))) return true;
   return issue.type === 'unreadable_glyphs'
     && issue.confidence >= 0.6
     && /(?:garbled|乱码|unclear symbols?|corrupt(?:ed)? glyph)/i.test(issue.evidence);

@@ -18,6 +18,15 @@ describe('production pipeline preparation', () => {
     expect(parseHeadingParts('III. EVALUATION')).toEqual([
       { number: 'III', level: 1, text: 'EVALUATION' },
     ]);
+    expect(parseHeadingParts('A. Experimental Setup')).toEqual([
+      { number: 'A', level: 2, text: 'Experimental Setup' },
+    ]);
+    expect(parseHeadingParts('V. OVERALL SYSTEM')).toEqual([
+      { number: 'V', level: 1, text: 'OVERALL SYSTEM' },
+    ]);
+    expect(parseHeadingParts('C. Evaluating zk-SNARK Workloads')).toEqual([
+      { number: 'C', level: 2, text: 'Evaluating zk-SNARK Workloads' },
+    ]);
   });
 
   it('recognizes degree and role-led author biographies after a bibliography', () => {
@@ -116,6 +125,89 @@ describe('production pipeline preparation', () => {
     expect(prepared.units.find((unit) => unit.id === 'title')?.sourceText)
       .toBe('A Faster Parallel Multi-Scalar Multiplication\nAlgorithm on GPUs');
     expect(prepared.units.some((unit) => unit.id === 'title-tail')).toBe(false);
+  });
+
+  it('demotes a later-page parser title to a numbered section heading', () => {
+    const doc = fixtureDoc();
+    doc.pageCount = 2;
+    doc.pages.push({ pageIndex: 1, width: 612, height: 792, columns: [] });
+    doc.blocks.push({
+      id: 'later-title', docId: 'en', type: 'title', pageIndex: 1,
+      rect: { x: 104, y: 676, w: 336, h: 14 }, order: 4,
+      text: '4 An Efficient GPU Implementation of zkSNARK', splitAllowed: false, widthMode: 'span',
+    });
+    doc.semanticUnits.push({
+      id: 'later-title', kind: 'title', sourceText: '4 An Efficient GPU Implementation of zkSNARK',
+      protectedTokens: [], layoutRegionId: 'later-region', order: 4,
+    });
+    doc.layoutRegions.push({
+      id: 'later-region', mode: 'single', sourcePage: 1,
+      bounds: { x: 104, y: 676, w: 336, h: 14 }, orderedUnitIds: ['later-title'],
+    });
+
+    const prepared = prepareImmutableStructure(doc);
+    expect(prepared.units.find((unit) => unit.id === 'later-title')).toMatchObject({
+      kind: 'heading', headingNumber: '4', headingLevel: 1,
+      sourceText: 'An Efficient GPU Implementation of zkSNARK',
+    });
+  });
+
+  it('strips front-matter labels and rejoins a geometrically adjacent URL path', () => {
+    const doc = fixtureDoc();
+    const paragraph = doc.blocks.find((block) => block.id === 'p1')!;
+    paragraph.text = 'Abstract. Results are available in https://github.com/';
+    paragraph.rect = { x: 50, y: 100, w: 360, h: 40 };
+    const paragraphUnit = doc.semanticUnits.find((unit) => unit.id === 'p1')!;
+    paragraphUnit.kind = 'abstract';
+    paragraphUnit.sourceText = paragraph.text;
+    doc.blocks.push({
+      id: 'url-tail', docId: 'en', type: 'paragraph', pageIndex: 0,
+      rect: { x: 50, y: 142, w: 90, h: 10 }, order: 8,
+      text: 'org/project .', splitAllowed: true, widthMode: 'column',
+    });
+    doc.semanticUnits.push({
+      id: 'url-tail', kind: 'paragraph', sourceText: 'org/project .',
+      protectedTokens: [], layoutRegionId: 'r1', order: 8,
+    });
+    doc.layoutRegions[0].orderedUnitIds.push('url-tail');
+
+    const prepared = prepareImmutableStructure(doc);
+    expect(prepared.units.find((unit) => unit.id === 'p1')?.sourceText)
+      .toBe('Results are available in https://github.com/org/project.');
+    expect(prepared.units.some((unit) => unit.id === 'url-tail')).toBe(false);
+  });
+
+  it('splits a mixed first-page title, author and affiliation block into stable front matter order', () => {
+    const doc = fixtureDoc();
+    const title = doc.blocks.find((block) => block.id === 'title')!;
+    title.text = 'cuZK: A Faster Parallel Multi-Scalar Multiplication';
+    doc.semanticUnits.find((unit) => unit.id === 'title')!.sourceText = title.text;
+    doc.blocks.push({
+      id: 'mixed-front-matter', docId: 'en', type: 'paragraph', pageIndex: 0,
+      rect: { x: 150, y: 82, w: 312, h: 45 }, order: 0.5,
+      text: 'Algorithm on GPUs\nAlice Smith and Bob Jones\nDepartment of Computing, Example University',
+      splitAllowed: true, widthMode: 'span',
+    });
+    doc.semanticUnits.push({
+      id: 'mixed-front-matter', kind: 'paragraph',
+      sourceText: 'Algorithm on GPUs\nAlice Smith and Bob Jones\nDepartment of Computing, Example University',
+      protectedTokens: [], layoutRegionId: 'r1', order: 0.5,
+    });
+    doc.layoutRegions[0].orderedUnitIds.splice(1, 0, 'mixed-front-matter');
+
+    const prepared = prepareImmutableStructure(doc);
+    const order = prepared.regions[0].orderedUnitIds;
+
+    expect(prepared.units.find((unit) => unit.id === 'title')?.sourceText)
+      .toBe('cuZK: A Faster Parallel Multi-Scalar Multiplication\nAlgorithm on GPUs');
+    expect(prepared.units).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'author', sourceText: 'Alice Smith and Bob Jones' }),
+      expect.objectContaining({ kind: 'affiliation', sourceText: 'Department of Computing, Example University' }),
+    ]));
+    expect(order.findIndex((id) => prepared.units.find((unit) => unit.id === id)?.kind === 'author'))
+      .toBeLessThan(order.indexOf('p1'));
+    expect(order.findIndex((id) => prepared.units.find((unit) => unit.id === id)?.kind === 'affiliation'))
+      .toBeLessThan(order.indexOf('p1'));
   });
 
   it('moves a late-emitted heading before the first paragraph physically below it', () => {
@@ -349,7 +441,9 @@ describe('production pipeline preparation', () => {
 
     const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: [{
       id: 'table-asset', kind: 'table', pageIndex: 1,
-      rect: { x: 100, y: 140, w: 396, h: 100 }, widthMode: 'span',
+      // The crop begins through the continuation's baseline. Recovery must
+      // happen before asset masking and move the crop below this text line.
+      rect: { x: 100, y: 116, w: 396, h: 124 }, widthMode: 'span',
       captionUnitId: 'table-caption',
     }] });
 
@@ -359,6 +453,8 @@ describe('production pipeline preparation', () => {
     expect(prepared.units.find((unit) => unit.id === 'before-table')?.sourceText)
       .toBe(`${prefix}\n${continuation}`);
     expect(prepared.units.find((unit) => unit.id === 'after-table')?.sourceText).toBe(remainder);
+    expect(prepared.assetRegions.find((asset) => asset.id === 'table-asset')?.rect.y)
+      .toBeGreaterThanOrEqual(124);
   });
 
   it('keeps bibliography entries verbatim instead of sending them through translation', () => {
@@ -475,6 +571,71 @@ describe('production pipeline preparation', () => {
       .toEqual(['references-heading', ...references.map((unit) => unit.id)]);
   });
 
+  it('splits plus-style reference labels and drops repeated running headers and page numbers', () => {
+    const doc = fixtureDoc();
+    doc.pageCount = 3;
+    doc.pages.push(
+      { pageIndex: 1, width: 612, height: 792, columns: [] },
+      { pageIndex: 2, width: 612, height: 792, columns: [] },
+    );
+    const characters = (text: string, x: number, y: number, pageIndex: number) => [...text].map((ch, sourceIndex) => ({
+      ch, sourceIndex, pageIndex, rect: { x: x + sourceIndex * 4, y, w: 3.8, h: 8 },
+    }));
+    const references = [
+      { id: 'plus-ref-a', text: '[A + 20] First reference.', pageIndex: 0, x: 50, y: 530 },
+      { id: 'plus-ref-b', text: '[B + 21] Second reference.', pageIndex: 0, x: 50, y: 560 },
+      { id: 'plus-ref-c', text: '[C + 22] Third reference.', pageIndex: 0, x: 330, y: 530 },
+      { id: 'plus-ref-d', text: '[D + 23] Fourth reference.', pageIndex: 0, x: 330, y: 560 },
+      { id: 'plus-ref-e', text: '[E + 24] Fifth reference.', pageIndex: 1, x: 50, y: 90 },
+      { id: 'plus-ref-f', text: '[F + 25] Sixth reference.', pageIndex: 1, x: 330, y: 90 },
+      { id: 'plus-ref-g', text: '[G + 26] Seventh reference.', pageIndex: 2, x: 50, y: 90 },
+      { id: 'plus-ref-h', text: '[H + 27] Eighth reference.', pageIndex: 2, x: 330, y: 90 },
+    ];
+    const furniture = [
+      { id: 'running-24', text: '24 cuZK', pageIndex: 1, x: 104 },
+      { id: 'running-author', text: 'T. Example et al.', pageIndex: 1, x: 470 },
+      { id: 'running-26', text: '26 cuZK', pageIndex: 2, x: 104 },
+    ];
+    doc.blocks.push({
+      id: 'plus-references', docId: 'en', type: 'section', pageIndex: 0,
+      rect: { x: 50, y: 500, w: 100, h: 14 }, order: 4,
+      text: 'References', splitAllowed: false, widthMode: 'span',
+    }, ...references.map((reference, index) => ({
+      id: reference.id, docId: 'en' as const, type: 'reference' as const,
+      pageIndex: reference.pageIndex,
+      rect: { x: reference.x, y: reference.y, w: 230, h: 10 }, order: 5 + index,
+      text: reference.text,
+      characterRects: characters(reference.text, reference.x, reference.y, reference.pageIndex),
+      splitAllowed: true, widthMode: 'column' as const,
+    })), ...furniture.map((item, index) => ({
+      id: item.id, docId: 'en' as const, type: 'paragraph' as const,
+      pageIndex: item.pageIndex,
+      rect: { x: item.x, y: 66, w: 40, h: 10 }, order: 20 + index,
+      text: item.text, characterRects: characters(item.text, item.x, 66, item.pageIndex),
+      splitAllowed: false, widthMode: 'column' as const,
+    })));
+    doc.layoutRegions.push({
+      id: 'plus-reference-region', mode: 'double', sourcePage: 0,
+      bounds: { x: 50, y: 500, w: 510, h: 220 },
+      orderedUnitIds: ['plus-references', ...references.map((reference) => reference.id), ...furniture.map((item) => item.id)],
+    });
+    doc.semanticUnits.push({
+      id: 'plus-references', parentId: 'plus-references', kind: 'heading', sourceText: 'References',
+      protectedTokens: [], layoutRegionId: 'plus-reference-region', order: 4,
+    }, ...references.map((reference, index) => ({
+      id: reference.id, parentId: 'plus-references', kind: 'reference' as const,
+      sourceText: reference.text, protectedTokens: [], layoutRegionId: 'plus-reference-region', order: 5 + index,
+    })), ...furniture.map((item, index) => ({
+      id: item.id, kind: 'page-furniture' as const, sourceText: item.text,
+      protectedTokens: [], layoutRegionId: 'plus-reference-region', order: 20 + index,
+    })));
+
+    const prepared = prepareImmutableStructure(doc);
+    const rebuilt = prepared.units.filter((unit) => unit.parentId === 'plus-references' && unit.kind === 'reference');
+    expect(rebuilt.map((unit) => unit.sourceText)).toEqual(references.map((reference) => reference.text));
+    expect(rebuilt.some((unit) => /(?:^|\s)(?:24|26|cuZK|T\. Example et al\.)(?:\s|$)/.test(unit.sourceText!))).toBe(false);
+  });
+
   it('reads independent bibliography columns top-to-bottom instead of interleaving equal-height rows', () => {
     const doc = fixtureDoc();
     const characters = (text: string, x: number, y: number) => [...text].map((ch, index) => ({
@@ -543,6 +704,117 @@ describe('production pipeline preparation', () => {
 
     expect(rebuilt.map((unit) => unit.sourceText)).toEqual(references.map((reference) => reference.text));
     expect(prepared.units.some((unit) => unit.id === 'right-table-above-references')).toBe(true);
+  });
+
+  it('restores a terminal table float emitted after the bibliography in extraction order', () => {
+    const doc = fixtureDoc();
+    doc.blocks = doc.blocks.filter((block) => block.id !== 'fig-caption');
+    doc.semanticUnits = doc.semanticUnits.filter((unit) => unit.id !== 'fig-caption');
+    doc.layoutRegions[0]!.orderedUnitIds = doc.layoutRegions[0]!.orderedUnitIds
+      .filter((unitId) => unitId !== 'fig-caption');
+    const characters = (text: string, x: number, y: number) => [...text].map((ch, sourceIndex) => ({
+      ch, sourceIndex, pageIndex: 0,
+      rect: { x: x + sourceIndex * 4, y, w: 3.8, h: 8 },
+    }));
+    const description = 'R ESULTS FOR SEVERAL WORKLOADS ( LATENCIES IN SECONDS ).';
+    const numericBody = [
+      'Size Baseline Accelerator Speedup',
+      '2^16 10.0 2.0 5.0',
+      '2^17 20.0 4.0 5.0',
+    ].join('\n');
+    doc.blocks.push(
+      {
+        id: 'terminal-references', docId: 'en', type: 'section', pageIndex: 0,
+        rect: { x: 50, y: 288, w: 90, h: 12 }, order: 4,
+        text: 'References', splitAllowed: false, widthMode: 'span',
+      },
+      {
+        id: 'terminal-reference-1', docId: 'en', type: 'reference', pageIndex: 0,
+        rect: { x: 50, y: 306, w: 230, h: 10 }, order: 5,
+        text: '[1] First reference.', characterRects: characters('[1] First reference.', 50, 306),
+        splitAllowed: true, widthMode: 'column',
+      },
+      {
+        id: 'terminal-reference-2', docId: 'en', type: 'reference', pageIndex: 0,
+        rect: { x: 50, y: 324, w: 230, h: 10 }, order: 6,
+        text: '[2] Second reference.', characterRects: characters('[2] Second reference.', 50, 324),
+        splitAllowed: true, widthMode: 'column',
+      },
+      {
+        id: 'terminal-table-caption', docId: 'en', type: 'caption', pageIndex: 0,
+        rect: { x: 286, y: 190, w: 40, h: 8 }, order: 7,
+        text: 'TABLE VI', splitAllowed: false, widthMode: 'span',
+      },
+      {
+        id: 'terminal-table-description', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 170, y: 200, w: 272, h: 10 }, order: 8,
+        text: description, splitAllowed: true, widthMode: 'span',
+      },
+      {
+        id: 'terminal-table-header', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 70, y: 214, w: 472, h: 10 }, order: 9,
+        text: 'Circuit Baseline Accelerator Speedup', splitAllowed: true, widthMode: 'span',
+      },
+      {
+        id: 'terminal-table-body', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 70, y: 230, w: 472, h: 35 }, order: 10,
+        text: numericBody, splitAllowed: true, widthMode: 'span',
+      },
+    );
+    doc.semanticUnits.push(
+      {
+        id: 'terminal-references', parentId: 'terminal-references', kind: 'heading',
+        sourceText: 'References', protectedTokens: [], layoutRegionId: 'r1', order: 4,
+      },
+      {
+        id: 'terminal-reference-1', parentId: 'terminal-references', kind: 'reference',
+        sourceText: '[1] First reference.', protectedTokens: [], layoutRegionId: 'r1', order: 5,
+      },
+      {
+        id: 'terminal-reference-2', parentId: 'terminal-references', kind: 'reference',
+        sourceText: '[2] Second reference.', protectedTokens: [], layoutRegionId: 'r1', order: 6,
+      },
+      {
+        id: 'terminal-table-caption', parentId: 'terminal-references', kind: 'caption',
+        sourceText: 'TABLE VI', protectedTokens: [], layoutRegionId: 'r1', order: 7,
+      },
+      {
+        id: 'terminal-table-description', parentId: 'terminal-references', kind: 'paragraph',
+        sourceText: description, protectedTokens: [], layoutRegionId: 'r1', order: 8,
+      },
+      {
+        id: 'terminal-table-header', kind: 'paragraph', sourceText: 'Circuit Baseline Accelerator Speedup',
+        protectedTokens: [], layoutRegionId: 'r1', order: 9,
+      },
+      {
+        id: 'terminal-table-body', kind: 'paragraph', sourceText: numericBody,
+        protectedTokens: [], layoutRegionId: 'r1', order: 10,
+      },
+    );
+    doc.layoutRegions[0]!.orderedUnitIds.push(
+      'terminal-references', 'terminal-reference-1', 'terminal-reference-2',
+      'terminal-table-caption', 'terminal-table-description',
+      'terminal-table-header', 'terminal-table-body',
+    );
+
+    const prepared = prepareImmutableStructure(doc);
+    const table = prepared.assetRegions.find((asset) => asset.id === 'terminal-table-caption-asset');
+    const region = prepared.regions.find((candidate) => candidate.id === 'r1')!;
+    const references = prepared.units.filter((unit) => (
+      unit.parentId === 'terminal-references' && unit.kind === 'reference'
+    ));
+
+    expect(table).toMatchObject({ kind: 'table', pageIndex: 0, widthMode: 'span' });
+    expect(prepared.units.find((unit) => unit.id === 'terminal-table-caption')?.sourceText)
+      .toBe('TABLE VI\nRESULTS FOR SEVERAL WORKLOADS ( LATENCIES IN SECONDS ).');
+    expect(prepared.units.some((unit) => unit.id === 'terminal-table-description')).toBe(false);
+    expect(prepared.units.some((unit) => unit.id === 'terminal-table-header')).toBe(false);
+    expect(prepared.units.some((unit) => unit.id === 'terminal-table-body')).toBe(false);
+    expect(references).toHaveLength(2);
+    expect(region.orderedUnitIds.indexOf('terminal-table-caption-asset'))
+      .toBe(region.orderedUnitIds.indexOf('terminal-table-caption') + 1);
+    expect(region.orderedUnitIds.indexOf('terminal-table-caption-asset'))
+      .toBeLessThan(region.orderedUnitIds.indexOf('terminal-references'));
   });
 
   it('does not absorb lower left-column body text into a right-column bibliography', () => {
@@ -2525,7 +2797,9 @@ describe('production pipeline preparation', () => {
     }] });
 
     expect(prepared.assetRegions.some((asset) => asset.id === 'vision-false-heading-formula')).toBe(false);
-    expect(prepared.units.find((unit) => unit.id === 'p1')?.sourceText).toBe(source);
+    expect(prepared.units.find((unit) => unit.id === 'p1')).toMatchObject({
+      sourceText: 'FPGA Hardware Resource Utilization', headingNumber: 'B', headingLevel: 2,
+    });
   });
 
   it('places a captionless Vision formula through its covered semantic unit in a cross-page region', () => {
@@ -3305,6 +3579,235 @@ describe('production pipeline preparation', () => {
     expect(assetBottom).toBe(211);
   });
 
+  it('moves an uppercase table description into the translated caption and keeps it out of the immutable crop', () => {
+    const doc = fixtureDoc();
+    const description = 'R ESULTS FOR Z CASH ( LATENCIES IN SECONDS ).';
+    const body = `${description}\nASIC CPU GPU\nAES 1.0 2.0 3.0`;
+    const rows = [
+      { text: description, y: 594 },
+      { text: 'ASIC CPU GPU', y: 612 },
+      { text: 'AES 1.0 2.0 3.0', y: 630 },
+    ];
+    let sourceIndex = 0;
+    doc.blocks.push(
+      {
+        id: 'table-v-caption', docId: 'en', type: 'caption', pageIndex: 0,
+        rect: { x: 270, y: 580, w: 72, h: 10 }, order: 4,
+        text: 'TABLE V', splitAllowed: false, widthMode: 'span',
+      },
+      {
+        id: 'table-v-body', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 70, y: 594, w: 470, h: 48 }, order: 5,
+        text: body, splitAllowed: true, widthMode: 'span',
+        characterRects: rows.flatMap((row) => {
+          const result = [...row.text].map((ch, index) => ({
+            ch, sourceIndex: sourceIndex + index, pageIndex: 0,
+            rect: { x: 80 + index * 4, y: row.y, w: 3.8, h: 9 },
+          }));
+          sourceIndex += row.text.length + 1;
+          return result;
+        }),
+      },
+    );
+    doc.semanticUnits.push(
+      {
+        id: 'table-v-caption', kind: 'caption', sourceText: 'TABLE V',
+        protectedTokens: [], layoutRegionId: 'r1', order: 4,
+      },
+      {
+        id: 'table-v-body', kind: 'paragraph', sourceText: body,
+        protectedTokens: [], layoutRegionId: 'r1', order: 5,
+      },
+    );
+    doc.layoutRegions[0].orderedUnitIds.push('table-v-caption', 'table-v-body');
+
+    const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: [{
+      id: 'table-v-asset', kind: 'table', pageIndex: 0,
+      rect: { x: 65, y: 610, w: 480, h: 45 }, widthMode: 'span',
+      captionUnitId: 'table-v-caption',
+    }] });
+
+    expect(prepared.units.find((unit) => unit.id === 'table-v-caption')?.sourceText)
+      .toBe('TABLE V\nRESULTS FOR ZCASH ( LATENCIES IN SECONDS ).');
+    expect(prepared.units.some((unit) => unit.sourceText?.includes('R ESULTS FOR Z CASH'))).toBe(false);
+    expect(prepared.assetRegions.find((asset) => asset.id === 'table-v-asset')?.rect.y)
+      .toBeGreaterThanOrEqual(606);
+  });
+
+  it('moves extracted small-caps descriptions into consecutive table captions without character geometry', () => {
+    const doc = fixtureDoc();
+    doc.blocks.push(
+      {
+        id: 'pipe-table-v-caption', docId: 'en', type: 'caption', pageIndex: 0,
+        rect: { x: 292.171, y: 70.5316, w: 31.8079, h: 7.5715 }, order: 4,
+        text: 'TABLE V', splitAllowed: false, widthMode: 'span',
+      },
+      {
+        id: 'pipe-table-v-description', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 202.2216, y: 79.0495, w: 211.7062, h: 7.5715 }, order: 5,
+        text: 'R ESULTS FOR DIFFERENT WORKLOADS ( LATENCIES IN SECONDS ).', splitAllowed: true, widthMode: 'span',
+      },
+      {
+        id: 'pipe-table-vi-caption', docId: 'en', type: 'caption', pageIndex: 0,
+        rect: { x: 290.91, y: 189.5205, w: 34.3292, h: 7.5715 }, order: 6,
+        text: 'TABLE VI', splitAllowed: false, widthMode: 'span',
+      },
+      {
+        id: 'pipe-table-vi-body', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 230.55, y: 198.0384, w: 275.6944, h: 42.6085 }, order: 7,
+        text: 'R ESULTS FOR Z CASH ( LATENCIES IN SECONDS ).\nASIC\nAcceleration Rate\nMSM\nProof\nASIC/CPU\nPOLY', splitAllowed: true, widthMode: 'span',
+        // Broken PDF source indexes can map the leading description to cells
+        // well below the first physical line. Caption recovery must ignore
+        // those implausible glyph coordinates and use the block-top fallback.
+        characterRects: [...'R ESULTS FOR Z CASH ( LATENCIES IN SECONDS ).'].map((ch, index) => ({
+          ch, sourceIndex: index, pageIndex: 0,
+          rect: { x: 230.55 + index * 3.5, y: 246, w: 3.2, h: 7 },
+        })),
+      },
+    );
+    doc.semanticUnits.push(
+      { id: 'pipe-table-v-caption', kind: 'caption', sourceText: 'TABLE V', protectedTokens: [], layoutRegionId: 'r1', order: 4 },
+      { id: 'pipe-table-v-description', kind: 'paragraph', sourceText: 'R ESULTS FOR DIFFERENT WORKLOADS ( LATENCIES IN SECONDS ).', protectedTokens: [], layoutRegionId: 'r1', order: 5 },
+      { id: 'pipe-table-vi-caption', kind: 'caption', sourceText: 'TABLE VI', protectedTokens: [], layoutRegionId: 'r1', order: 6 },
+      { id: 'pipe-table-vi-body', kind: 'paragraph', sourceText: 'R ESULTS FOR Z CASH ( LATENCIES IN SECONDS ).\nASIC\nAcceleration Rate\nMSM\nProof\nASIC/CPU\nPOLY', protectedTokens: [], layoutRegionId: 'r1', order: 7 },
+    );
+    doc.layoutRegions[0].orderedUnitIds.push(
+      'pipe-table-v-caption', 'pipe-table-v-description', 'pipe-table-vi-caption', 'pipe-table-vi-body',
+    );
+
+    const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: [
+      {
+        id: 'pipe-table-v-asset', kind: 'table', pageIndex: 0,
+        rect: { x: 25.38, y: 89.6218, w: 561.25, h: 85.5242 }, widthMode: 'span',
+        captionUnitId: 'pipe-table-v-caption',
+      },
+      {
+        id: 'pipe-table-vi-asset', kind: 'table', pageIndex: 0,
+        rect: { x: 25.38, y: 208.6099, w: 561.25, h: 59.97 }, widthMode: 'span',
+        captionUnitId: 'pipe-table-vi-caption',
+      },
+    ] });
+
+    expect(prepared.units.find((unit) => unit.id === 'pipe-table-v-caption')?.sourceText)
+      .toBe('TABLE V\nRESULTS FOR DIFFERENT WORKLOADS ( LATENCIES IN SECONDS ).');
+    expect(prepared.units.find((unit) => unit.id === 'pipe-table-vi-caption')?.sourceText)
+      .toBe('TABLE VI\nRESULTS FOR ZCASH ( LATENCIES IN SECONDS ).');
+    expect(prepared.units.some((unit) => unit.id === 'pipe-table-v-description')).toBe(false);
+    expect(prepared.units.some((unit) => unit.id === 'pipe-table-vi-body')).toBe(false);
+  });
+
+  it('drops a short table-cell remainder joined to a caption continuation', () => {
+    const doc = fixtureDoc();
+    const description = 'Execution time across several devices.';
+    const remainderLines = ['Baseline SystemA Baseline SystemA', '409'];
+    const raw = [description, ...remainderLines].join('\n');
+    let sourceIndex = 0;
+    const characterRects = [description, ...remainderLines].flatMap((line, lineIndex) => {
+      const characters = [...line].map((ch, index) => ({
+        ch,
+        sourceIndex: sourceIndex + index,
+        pageIndex: 0,
+        rect: { x: 110 + index * 4, y: 112 + lineIndex * 14, w: 3.8, h: 8 },
+      }));
+      sourceIndex += line.length + 1;
+      return characters;
+    });
+    doc.blocks.push(
+      {
+        id: 'generic-table-caption', docId: 'en', type: 'caption', pageIndex: 0,
+        rect: { x: 260, y: 100, w: 90, h: 10 }, order: 4,
+        text: 'TABLE 4', splitAllowed: false, widthMode: 'span',
+      },
+      {
+        id: 'generic-table-description-and-cells', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 104, y: 112, w: 388, h: 44 }, order: 5,
+        text: raw, splitAllowed: true, widthMode: 'span', characterRects,
+      },
+    );
+    doc.semanticUnits.push(
+      { id: 'generic-table-caption', kind: 'caption', sourceText: 'TABLE 4', protectedTokens: [], layoutRegionId: 'r1', order: 4 },
+      { id: 'generic-table-description-and-cells', kind: 'paragraph', sourceText: raw, protectedTokens: [], layoutRegionId: 'r1', order: 5 },
+    );
+    doc.layoutRegions[0].orderedUnitIds.push(
+      'generic-table-caption', 'generic-table-description-and-cells',
+    );
+
+    const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: [{
+      id: 'generic-table-asset', kind: 'table', pageIndex: 0,
+      rect: { x: 60, y: 125, w: 476, h: 80 }, widthMode: 'span',
+      captionUnitId: 'generic-table-caption',
+    }] });
+
+    expect(prepared.units.find((unit) => unit.id === 'generic-table-caption')?.sourceText)
+      .toBe('TABLE 4\nExecution time across several devices.');
+    expect(prepared.units.some((unit) => unit.id === 'generic-table-description-and-cells')).toBe(false);
+  });
+
+  it('reconstructs split two-lane table footnotes and places them directly after the table', () => {
+    const doc = fixtureDoc();
+    const left = [
+      '(1) MUL in Bellperson is executed in CPU, wh',
+      '(2) DT represents the execution time for CP',
+      '(3) Proof represents the execution time for the',
+      'including MUL, NTT, MSM, CPU-GPU data tr',
+      '(4) The speedup refers to the proof generat',
+      'generation time in cuZK.',
+    ].join('\n');
+    const right = [
+      'ile that in cuZK is executed in GPU.',
+      'U-GPU data transfer.',
+      'proof generation, which consists of operations',
+      'ansfer, and other less critical operations.',
+      'ion time in Bellperson divided by the proof',
+    ].join('\n');
+    doc.blocks.push(
+      {
+        id: 'table-six-caption', docId: 'en', type: 'caption', pageIndex: 0,
+        rect: { x: 104, y: 104, w: 387, h: 10 }, order: 4,
+        text: 'Table 6: Execution time.', splitAllowed: false, widthMode: 'span',
+      },
+      {
+        id: 'table-six-footnote-left', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 116, y: 340, w: 183, h: 92 }, order: 6,
+        text: left, splitAllowed: true, widthMode: 'column',
+      },
+      {
+        id: 'table-six-footnote-right', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 296, y: 341, w: 187, h: 81 }, order: 8,
+        text: right, splitAllowed: true, widthMode: 'column',
+      },
+      {
+        id: 'after-table-section', docId: 'en', type: 'section', pageIndex: 0,
+        rect: { x: 104, y: 450, w: 100, h: 14 }, order: 7,
+        text: '6 Conclusion', splitAllowed: false, widthMode: 'span',
+      },
+    );
+    doc.semanticUnits.push(
+      { id: 'table-six-caption', kind: 'caption', sourceText: 'Table 6: Execution time.', protectedTokens: [], layoutRegionId: 'r1', order: 4 },
+      { id: 'table-six-footnote-left', kind: 'paragraph', sourceText: left, protectedTokens: [], layoutRegionId: 'r1', order: 6 },
+      { id: 'after-table-section', kind: 'heading', sourceText: '6 Conclusion', protectedTokens: [], layoutRegionId: 'r1', order: 7 },
+      { id: 'table-six-footnote-right', kind: 'paragraph', sourceText: right, protectedTokens: [], layoutRegionId: 'r1', order: 8 },
+    );
+    doc.layoutRegions[0].orderedUnitIds.push(
+      'table-six-caption', 'table-six-footnote-left', 'after-table-section', 'table-six-footnote-right',
+    );
+
+    const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: [{
+      id: 'table-six-asset', kind: 'table', pageIndex: 0,
+      rect: { x: 61, y: 127, w: 472, h: 203 }, widthMode: 'span',
+      captionUnitId: 'table-six-caption',
+    }] });
+    const footnote = prepared.units.find((unit) => unit.id === 'table-six-footnote-left');
+    expect(footnote?.sourceText).toContain('CPU, while that in cuZK is executed in GPU.');
+    expect(footnote?.sourceText).toContain('CPU-GPU data transfer.');
+    expect(footnote?.sourceText).toContain('proof generation time in Bellperson');
+    expect(footnote?.sourceText).toContain('CPU-GPU data transfer, and other less critical operations.');
+    expect(prepared.units.some((unit) => unit.id === 'table-six-footnote-right')).toBe(false);
+    const order = prepared.regions.find((region) => region.orderedUnitIds.includes('table-six-asset'))!.orderedUnitIds;
+    expect(order.indexOf('table-six-footnote-left')).toBe(order.indexOf('table-six-asset') + 1);
+    expect(order.indexOf('table-six-footnote-left')).toBeLessThan(order.indexOf('after-table-section'));
+  });
+
   it('reconstructs a complete caption-anchored algorithm and rejects a misplaced Vision code crop', () => {
     const doc = fixtureDoc();
     doc.blocks = doc.blocks.filter((block) => block.id !== 'fig-caption');
@@ -3445,6 +3948,11 @@ describe('production pipeline preparation', () => {
       rect: { x: 50, y: 300, w: 230, h: 34 }, order: 4,
       text: 'Figure 9: Parallelism Analysis\nTable 2: PPA Results',
       splitAllowed: false, widthMode: 'column',
+    }, {
+      id: 'mixed-caption-table-body', docId: 'en', type: 'paragraph', pageIndex: 0,
+      rect: { x: 50, y: 338, w: 230, h: 15 }, order: 4.5,
+      text: 'Size Baseline Accelerator\n2^16 10.0 2.0\n2^17 20.0 4.0',
+      splitAllowed: true, widthMode: 'column',
     });
     doc.semanticUnits.push({
       id: 'mixed-caption', kind: 'caption',

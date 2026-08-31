@@ -18,6 +18,7 @@ export interface OrderedSemanticInput {
   id: string;
   parentId?: string;
   sourceBlockId?: string;
+  sourceBlockIds?: string[];
   kind: SemanticUnitKind;
   sourceText?: string;
   translation?: string;
@@ -149,6 +150,7 @@ export function buildBlockAndAssetAlignmentUnits(
         }),
         parentId: unit.parentId,
         sourceBlockId: unit.sourceBlockId,
+        sourceBlockIds: unit.sourceBlockIds,
         sourceText: unit.sourceText,
         targetText: unit.translation,
         order: unit.order,

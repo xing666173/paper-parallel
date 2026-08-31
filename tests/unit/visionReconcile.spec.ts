@@ -51,6 +51,38 @@ describe('vision: deterministic layout reconciliation', () => {
     expect(result.assetRegions[0]!.rect.x + result.assetRegions[0]!.rect.w).toBeGreaterThanOrEqual(502);
   });
 
+  it('keeps a complete wide Vision figure stable instead of expanding it to detached labels', () => {
+    const doc = fixtureDoc();
+    doc.blocks.push({
+      id: 'detached-labels', docId: 'en', type: 'paragraph', pageIndex: 0,
+      rect: { x: 6, y: 180, w: 45, h: 110 }, order: 0.5,
+      text: '4 bit\n8 bit\n16 bit\n32 bit', splitAllowed: true, widthMode: 'column',
+    });
+    const result = reconcileVisionLayout(doc, [{
+      pageIndex: 0, layout: 'mixed', regions: [{
+        type: 'figure', bbox: [100, 220, 800, 180], column: 'full', confidence: 0.99,
+      }],
+    }]);
+
+    expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions[0]?.rect.x).toBeGreaterThan(50);
+    expect(result.assetRegions[0]?.widthMode).toBe('span');
+  });
+
+  it('removes overlap between a code crop and its following figure crop', () => {
+    const result = reconcileVisionLayout(fixtureDoc(), [{
+      pageIndex: 0, layout: 'mixed', regions: [
+        { type: 'code', bbox: [500, 150, 360, 360], column: 'right', confidence: 0.99 },
+        { type: 'figure', bbox: [500, 400, 360, 260], column: 'right', confidence: 0.99 },
+      ],
+    }]);
+    const code = result.assetRegions.find((asset) => asset.kind === 'code')!;
+    const figure = result.assetRegions.find((asset) => asset.kind === 'figure')!;
+
+    expect(result.unresolved).toEqual([]);
+    expect(code.rect.y + code.rect.h).toBeLessThanOrEqual(figure.rect.y);
+  });
+
   it('matches a nearby approximate caption box and trims a figure crop that includes the real caption', () => {
     const result = reconcileVisionLayout(fixtureDoc(), [{
       pageIndex: 0, layout: 'double', regions: [{
@@ -189,6 +221,38 @@ describe('vision: deterministic layout reconciliation', () => {
     expect(result.unresolved).toEqual([]);
     expect(result.assetRegions[0]!.rect.y + result.assetRegions[0]!.rect.h).toBeGreaterThan(148);
     expect(result.assetRegions[0]!.rect.y + result.assetRegions[0]!.rect.h).toBeLessThan(180);
+  });
+
+  it('accepts a low-confidence wide numeric table when PDF geometry independently corroborates it', () => {
+    const doc = fixtureDoc();
+    const header = 'Application Size CPU ASIC GPU Proof';
+    const rows = Array.from({ length: 8 }, (_, index) => (
+      `Workload-${index + 1} ${16384 * (index + 1)} 0.${index + 1}1 1.${index + 2}3 2.${index + 3}5 49.${index + 4}`
+    ));
+    doc.blocks.push(
+      {
+        id: 'wide-table-header', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 55, y: 90, w: 500, h: 18 }, order: 2,
+        text: header, splitAllowed: true, widthMode: 'span',
+      },
+      {
+        id: 'wide-table-rows', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 55, y: 112, w: 500, h: 88 }, order: 3,
+        text: rows.join('\n'), splitAllowed: true, widthMode: 'span',
+      },
+    );
+    const result = reconcileVisionLayout(doc, [{
+      pageIndex: 0, layout: 'mixed', regions: [{
+        type: 'table', bbox: [80, 95, 840, 170], column: 'full',
+        captionBBox: [320, 70, 360, 20], confidence: 0.5,
+      }],
+    }]);
+
+    expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions).toEqual([
+      expect.objectContaining({ kind: 'table', widthMode: 'span', captionUnitId: undefined }),
+    ]);
+    expect(result.assetRegions[0]!.rect.y).toBeLessThan(90);
   });
 
   it('trims ordinary prose below a complete algorithm crop at the first large line gap', () => {

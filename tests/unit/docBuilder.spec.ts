@@ -296,4 +296,24 @@ describe('parser: docBuilder', () => {
       expect.objectContaining({ ch: 'S', sourceIndex: 6, pageIndex: 1 }),
     ]);
   });
+
+  it('将图中数值标签和页面中部的作者误判降级为正文', () => {
+    const doc = buildDoc([{
+      no: 1, w: 612, h: 792, layoutMode: 'double', blocks: [
+        {
+          id: 'diagram-measurement', type: 'section', col: 'left',
+          rect: { x: 70, y: 340, w: 150, h: 8 }, text: '15 x 1 x 768 = 1.4kB',
+        },
+        {
+          id: 'mid-page-author', type: 'authors', col: 'right',
+          rect: { x: 330, y: 430, w: 220, h: 12 },
+          text: 'The implementation processes each input independently.',
+        },
+      ],
+    }], 'en');
+
+    expect(doc.blocks.find((block) => block.text === '15 x 1 x 768 = 1.4kB')?.type).toBe('paragraph');
+    expect(doc.blocks.find((block) => block.text?.includes('processes each input'))?.type).toBe('paragraph');
+    expect(doc.semanticUnits.filter((unit) => unit.kind === 'heading' || unit.kind === 'author')).toEqual([]);
+  });
 });

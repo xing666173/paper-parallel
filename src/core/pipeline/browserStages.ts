@@ -185,8 +185,10 @@ async function buildAlignmentForCompiled(
       groups.forEach((group, groupIndex) => group.targetUnitIds.forEach((id, index) => {
         segments.push({ id, targetText: response.alignmentGroups[groupIndex].targetSegments[index] });
       }));
-      const sourceBlockId = preparedById.get(request.blockId)?.sourceBlockId;
-      return groups.map((group) => ({ ...group, sourceBlockId }));
+      const preparedUnit = preparedById.get(request.blockId);
+      const sourceBlockId = preparedUnit?.sourceBlockId;
+      const sourceBlockIds = preparedUnit?.sourceBlockIds;
+      return groups.map((group) => ({ ...group, sourceBlockId, sourceBlockIds }));
     });
     const immutable = prepared.units.filter((unit) => Boolean(unit.assetId));
     units.push(...buildBlockAndAssetAlignmentUnits(immutable));
@@ -725,7 +727,7 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
             issueCount: visualReport.issues.length,
           });
           const severeVisualIssues = visualReport.issues.filter((issue) => (
-            issue.severity === 'severe' && issue.confidence >= 0.8
+            issue.severity === 'severe' && issue.confidence >= 0.7
           ));
           attemptReports.push({
             attempt,

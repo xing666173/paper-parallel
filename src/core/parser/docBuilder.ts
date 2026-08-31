@@ -40,6 +40,22 @@ type WorkBlock = ParsedPageBlock & {
 const COL_RANK: Record<ColumnKind, number> = { full: 0, left: 1, right: 2 };
 const ATOMIC_TYPES = new Set<Block['type']>(['figure', 'table', 'equation', 'caption']);
 
+function isSuspiciousSectionBlock(block: WorkBlock): boolean {
+  if (block.type !== 'section') return false;
+  const text = block.text.replace(/\s+/g, ' ').trim();
+  if (!text || /^(?:references|bibliography|acknowledge?ments?)\s*$/i.test(text)) return false;
+  if (block.rect.h < 8.5) return true;
+  if (/^\d+(?:[.]\d+)?\s*(?:GHz|[kMGT]?B|bits?|x\b|[a-z]\s*[−-]\s*\d)/i.test(text)) return true;
+  if (/^\d{1,2}\s+[a-z]\b/.test(text)) return true;
+  const bareNumber = text.match(/^\d{1,2}\s+(.+)$/)?.[1];
+  if (!bareNumber) return false;
+  const words = bareNumber.match(/[A-Za-z][A-Za-z'-]*/g) ?? [];
+  const functionWords = words.filter((word) => (
+    /^(?:a|an|and|as|at|by|for|from|in|is|it|of|on|or|since|that|the|this|to|was|were|which|with)$/i.test(word)
+  ));
+  return words.length >= 7 && functionWords.length >= 2;
+}
+
 function unionCharacterRects(characters: CharacterRect[]): Rect {
   const x1 = Math.min(...characters.map((char) => char.rect.x));
   const y1 = Math.min(...characters.map((char) => char.rect.y));
@@ -377,6 +393,7 @@ export function buildDoc(pages: ParsedPage[], docId: 'en' | 'zh'): Doc {
     true,
     pageHeights,
   );
+  const firstPageIndex = Math.min(...merged.map((block) => block.fragments[0]?.pageIndex ?? block.pageIndex));
 
   // 3) 两遍赋值:先统一换新 id,再建 prev/next 链与章节归属
   //    (不能在单遍里取 merged[i+1].id,否则拿到的是尚未替换的旧 id)
@@ -384,6 +401,10 @@ export function buildDoc(pages: ParsedPage[], docId: 'en' | 'zh'): Doc {
     b.id = `blk-${i + 1}`;
     b.order = i;
     b.pageIndex = b.fragments[0].pageIndex;
+    const sourcePageHeight = pages.find((page) => page.no === b.pageIndex)?.h ?? pages[0]?.h ?? 792;
+    if (b.type === 'authors'
+      && (b.pageIndex !== firstPageIndex || b.rect.y > sourcePageHeight * 0.38)) b.type = 'paragraph';
+    if (isSuspiciousSectionBlock(b)) b.type = 'paragraph';
     b.widthMode = b.col === 'full' ? 'span' : 'column';
     b.splitAllowed = !ATOMIC_TYPES.has(b.type);
   });

@@ -83,6 +83,8 @@ export function buildLayoutRepairPlan(input: BuildLayoutRepairPlanInput): Layout
   };
   for (const issue of input.issues) {
     if (issue.severity !== 'severe' || issue.confidence < 0.8 || NON_REPAIRABLE.has(issue.type)) continue;
+    if (issue.type === 'layout_drift'
+      && /(?:scattered text|stray (?:text|punctuation)|author.*body|mixed\s+(?:with|into)\s+(?:the\s+)?body|作者单位.*正文混排|正文混排|散落文本|孤立标点)/i.test(issue.evidence)) continue;
     const fingerprint = issueFingerprint(issue);
     if (previousFingerprints.has(fingerprint)) continue;
     plan.issueFingerprints.push(fingerprint);

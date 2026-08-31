@@ -60,45 +60,56 @@ export async function recognizeFormulaCrop(options: {
   signal?: AbortSignal;
 }): Promise<FormulaOcrResult> {
   const hint = options.formulaHint?.replace(/\s+/g, ' ').trim().slice(0, 240);
-  const completion = await chatCompletion({
-    baseUrl: options.baseUrl,
-    apiKey: options.apiKey,
-    model: FORMULA_OCR_MODEL,
-    thinkingMode: 'disabled',
-    responseFormat: 'json_object',
-    temperature: 0,
-    maxTokens: 700,
-    timeoutMs: 90_000,
-    signal: options.signal,
-    messages: [{
-      role: 'user',
-      content: [
-        {
-          type: 'text',
-          text: [
-            'Transcribe the one intended mathematical formula in this enlarged academic-paper crop into exact LaTeX.',
-            'The crop can contain parts of English lines above or below the formula; ignore every prose fragment.',
-            'Preserve every vector/bold style, hat, prime, index, lower/upper limit, subscript, superscript, bracket, and operator exactly as visibly printed.',
-            'Never rewrite the formula into an equivalent form and never invent a symbol hidden by prose.',
-            hint ? `The PDF text-layer hint for identifying the intended formula is: ${hint}` : '',
-            options.requiresLargeOperator ? 'The intended formula visibly contains a summation, product, or integral; it must appear in LaTeX.' : '',
-            'Return JSON only: {"latex":"exact LaTeX without delimiters","confidence":0.0}.',
-          ].filter(Boolean).join('\n'),
-        },
-        { type: 'image_url', image_url: { url: await blobDataUrl(options.blob), detail: 'original' } },
-      ],
-    }],
-  });
-  const result = parseFormulaOcrResult(completion.content);
-  if (result.confidence < 0.82) throw new Error('公式视觉转写置信度不足');
-  // In JavaScript regular expressions `_` is a word character, so `\b` does
-  // not match the normal TeX spelling `\sum_{...}`. Match the command itself
-  // and let the TeX parser validate what follows.
-  if (options.requiresLargeOperator && !/\\(?:sum|prod|int)/.test(result.latex)) {
-    throw new Error('公式视觉转写遗漏大运算符');
+  const imageUrl = await blobDataUrl(options.blob);
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const completion = await chatCompletion({
+        baseUrl: options.baseUrl,
+        apiKey: options.apiKey,
+        model: FORMULA_OCR_MODEL,
+        thinkingMode: 'disabled',
+        responseFormat: 'json_object',
+        temperature: 0,
+        maxTokens: 700,
+        timeoutMs: 90_000,
+        signal: options.signal,
+        messages: [{
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: [
+                'Transcribe the one intended mathematical formula in this enlarged academic-paper crop into exact LaTeX.',
+                'The crop can contain parts of English lines above or below the formula; ignore every prose fragment.',
+                'Preserve every vector/bold style, hat, prime, index, lower/upper limit, subscript, superscript, bracket, and operator exactly as visibly printed.',
+                'Never rewrite the formula into an equivalent form and never invent a symbol hidden by prose.',
+                hint ? `The PDF text-layer hint for identifying the intended formula is: ${hint}` : '',
+                options.requiresLargeOperator ? 'The intended formula visibly contains a summation, product, or integral; it must appear in LaTeX.' : '',
+                attempt > 0 ? 'The previous response violated the required protocol. Return one valid JSON object and no Markdown or prose.' : '',
+                'Return JSON only: {"latex":"exact LaTeX without delimiters","confidence":0.0}.',
+              ].filter(Boolean).join('\n'),
+            },
+            { type: 'image_url', image_url: { url: imageUrl, detail: 'original' } },
+          ],
+        }],
+      });
+      const result = parseFormulaOcrResult(completion.content);
+      if (result.confidence < 0.82) throw new Error('公式视觉转写置信度不足');
+      // In JavaScript regular expressions `_` is a word character, so `\b` does
+      // not match the normal TeX spelling `\sum_{...}`. Match the command itself
+      // and let the TeX parser validate what follows.
+      if (options.requiresLargeOperator && !/\\(?:sum|prod|int)/.test(result.latex)) {
+        throw new Error('公式视觉转写遗漏大运算符');
+      }
+      if (hint?.includes('=') && !result.latex.includes('=')) {
+        throw new Error('公式视觉转写遗漏等号');
+      }
+      return result;
+    } catch (error) {
+      if (options.signal?.aborted) throw error;
+      lastError = error;
+    }
   }
-  if (hint?.includes('=') && !result.latex.includes('=')) {
-    throw new Error('公式视觉转写遗漏等号');
-  }
-  return result;
+  throw lastError ?? new Error('公式视觉转写失败');
 }

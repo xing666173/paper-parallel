@@ -113,7 +113,7 @@ function looksLikeFrontMatterAuthorList(text: string): boolean {
   return names.length >= 3 || (hasAffiliationMarker && names.length >= 2);
 }
 
-function classifyLineRole(l: ClassifiedLine, col: ColumnBounds): RawBlock['type'] {
+function classifyLineRole(l: ClassifiedLine, col: ColumnBounds, pageH: number): RawBlock['type'] {
   const t = l.text.trim();
   const compactLetters = t.replace(/\s+/g, '');
   const colCenter = (col.min + col.max) / 2;
@@ -124,9 +124,10 @@ function classifyLineRole(l: ClassifiedLine, col: ColumnBounds): RawBlock['type'
   if (/^(abstract|摘要)[\s—\-:：]/i.test(t)) return 'abstract';
   if (/^key ?words|^关键词/i.test(t)) return 'keywords';
   if (l.col === 'full') {
-    if (l.y < 180 && /\b(?:member\s*,?\s*IEEE|IEEE\s+(?:member|fellow))\b/i.test(t)) return 'authors';
-    if (l.y < 200 && looksLikeFrontMatterAuthorList(t)) return 'authors';
-    if (/[,，]/.test(t) && /university|大学|学院|实验室|lab/i.test(t)) return 'authors';
+    const inFrontMatter = l.y < Math.min(300, pageH * 0.38);
+    if (inFrontMatter && /\b(?:member\s*,?\s*IEEE|IEEE\s+(?:member|fellow))\b/i.test(t)) return 'authors';
+    if (inFrontMatter && looksLikeFrontMatterAuthorList(t)) return 'authors';
+    if (inFrontMatter && /[,，]/.test(t) && /university|大学|学院|实验室|lab/i.test(t)) return 'authors';
     if (t.length < 90 && l.h >= 14) return 'title';
   }
 
@@ -171,7 +172,7 @@ function classifyLineRole(l: ClassifiedLine, col: ColumnBounds): RawBlock['type'
 export function groupLinesToBlocks(
   lines: ClassifiedLine[],
   pageW: number,
-  _pageH: number,
+  pageH: number,
 ): RawBlock[] {
   const byCol: Record<ColumnKind, ClassifiedLine[]> = { full: [], left: [], right: [] };
   for (const l of lines) byCol[l.col].push(l);
@@ -250,7 +251,7 @@ export function groupLinesToBlocks(
 
     for (let i = 0; i < arr.length; i++) {
       const l = arr[i];
-      const role = classifyLineRole(l, colBounds[c]);
+      const role = classifyLineRole(l, colBounds[c], pageH);
       const prev = arr[i - 1];
       const bigGap = prev ? l.y - (prev.y + prev.h) > BREAK : false;
       if (cur.length && (bigGap || role !== curType)) flush();

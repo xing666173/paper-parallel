@@ -43,4 +43,12 @@ describe('deterministic layout repair planning', () => {
       manifest, units: [headingUnit], pageSizes,
     })).toBeUndefined();
   });
+
+  it('fails closed for structural text scattering instead of hiding it with spacing', () => {
+    expect(buildLayoutRepairPlan({
+      attempt: 1,
+      issues: [issue({ evidence: 'Author metadata is mixed with body text and leaves scattered lines.' })],
+      manifest, units: [headingUnit], pageSizes,
+    })).toBeUndefined();
+  });
 });

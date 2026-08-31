@@ -96,6 +96,19 @@ describe('vision: final PDF review', () => {
     expect(isolated.issues[0]?.severity).toBe('severe');
   });
 
+  it('blocks confident author metadata mixed into body text even when Vision labels it a warning', () => {
+    const report = parseVisionFinalPageReport({
+      target_page: 1,
+      issues: [{
+        type: 'layout_drift', severity: 'warning', bbox: [1, 1, 20, 20],
+        confidence: 0.72, evidence: 'Author metadata is mixed with the body paragraph.',
+      }],
+    }, 0);
+
+    expect(report.pass).toBe(false);
+    expect(report.issues[0]?.severity).toBe('severe');
+  });
+
   it('merges repeated findings with the same type and evidence', () => {
     const report = parseVisionFinalPageReport({
       target_page: 1,

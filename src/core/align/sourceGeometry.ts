@@ -458,7 +458,11 @@ export function resolveSourceGeometry(
         : withSource(unit, []);
     }
 
+    const explicitBlocks = (unit.sourceBlockIds ?? [])
+      .map((id) => blocks.get(id))
+      .filter((candidate): candidate is Block => Boolean(candidate));
     let block = blocks.get(unit.sourceBlockId ?? '')
+      ?? explicitBlocks[0]
       ?? blocks.get(unit.parentId ?? '')
       ?? unit.sourceUnitIds.map((id) => blocks.get(id)).find(Boolean)
       ?? blocks.get(unit.id);
@@ -590,6 +594,23 @@ export function resolveSourceGeometry(
             'source-formula-matched-across-stacked-ranges',
           );
         }
+      }
+    }
+
+    if (!range && explicitBlocks.length > 1 && unit.sourceText) {
+      const requestedTokens = new Set(
+        unit.sourceText.toLocaleLowerCase().match(/[a-z0-9]{2,}/g) ?? [],
+      );
+      const supportingBlocks = explicitBlocks.filter((candidate) => (
+        (candidate.text ?? '').toLocaleLowerCase().match(/[a-z0-9]{2,}/g) ?? []
+      ).some((token) => requestedTokens.has(token)));
+      if (supportingBlocks.length > 1) {
+        return withSource(
+          unit,
+          supportingBlocks.flatMap((candidate) => geometryForBlock(candidate)),
+          0.75,
+          'source-reconstructed-across-explicit-blocks',
+        );
       }
     }
 
