@@ -96,6 +96,23 @@ export function isDisplayFormulaCandidate(text: string, centered: boolean): bool
   return naturalWords.length <= 2 && mathScore >= 5;
 }
 
+function looksLikeFrontMatterAuthorList(text: string): boolean {
+  if (!/[,，]|\band\b/i.test(text)) return false;
+  const hasAffiliationMarker = /\b\d+(?:\s*,\s*\d+)*\b/.test(text);
+  const cleaned = text
+    .replace(/\(\s*[A-Z]\s*\)/g, ' ')
+    .replace(/\b\d+(?:\s*,\s*\d+)*\b/g, ' ')
+    .replace(/\band\b/gi, ',');
+  const nameToken = String.raw`(?:[A-Z][A-Za-z'’-]+|[A-Z][.])`;
+  const namePattern = new RegExp(`^${nameToken}(?:\\s+${nameToken}){1,4}$`);
+  const names = cleaned
+    .split(/[,，]/)
+    .map((segment) => segment.trim())
+    .filter(Boolean)
+    .filter((segment) => namePattern.test(segment));
+  return names.length >= 3 || (hasAffiliationMarker && names.length >= 2);
+}
+
 function classifyLineRole(l: ClassifiedLine, col: ColumnBounds): RawBlock['type'] {
   const t = l.text.trim();
   const compactLetters = t.replace(/\s+/g, '');
@@ -108,6 +125,7 @@ function classifyLineRole(l: ClassifiedLine, col: ColumnBounds): RawBlock['type'
   if (/^key ?words|^关键词/i.test(t)) return 'keywords';
   if (l.col === 'full') {
     if (l.y < 180 && /\b(?:member\s*,?\s*IEEE|IEEE\s+(?:member|fellow))\b/i.test(t)) return 'authors';
+    if (l.y < 200 && looksLikeFrontMatterAuthorList(t)) return 'authors';
     if (/[,，]/.test(t) && /university|大学|学院|实验室|lab/i.test(t)) return 'authors';
     if (t.length < 90 && l.h >= 14) return 'title';
   }

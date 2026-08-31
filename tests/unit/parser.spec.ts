@@ -121,6 +121,22 @@ describe('parser: columns', () => {
 });
 
 describe('parser: lines -> blocks', () => {
+  it('classifies a centered author list with affiliation markers as authors', () => {
+    const authorLine = {
+      y: 118, x1: 110, x2: 343, h: 10,
+      text: 'Arasu Arun 1, Srinath Setty 2(B), and Justin Thaler 3,4',
+      items: [], col: 'full' as const,
+    };
+    const titleLine = {
+      y: 50, x1: 100, x2: 353, h: 14,
+      text: 'Jolt: SNARKs for Virtual Machines',
+      items: [], col: 'full' as const,
+    };
+
+    expect(groupLinesToBlocks([authorLine], 439.37, 666.142)[0]?.type).toBe('authors');
+    expect(groupLinesToBlocks([titleLine], 439.37, 666.142)[0]?.type).toBe('title');
+  });
+
   it('requires mathematical dominance before classifying a centered line as a display formula', () => {
     for (const prose of [
       'Zero-knowledge virtual machines (zkVMs) are a key technology for',
