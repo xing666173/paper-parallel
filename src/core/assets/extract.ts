@@ -23,6 +23,8 @@ export interface DetectedAssetRegion {
   rect: Rect;
   widthMode: WidthMode;
   captionUnitId?: string;
+  /** Exact matched caption-line geometry when its PDF block contains extra lines. */
+  captionRect?: Rect;
   crossPageAssetGroupId?: string;
   /** Source-page glyph boxes to paint white in a conventional rectangular crop. */
   eraseRects?: Rect[];

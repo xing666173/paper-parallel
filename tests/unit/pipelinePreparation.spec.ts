@@ -2011,7 +2011,7 @@ describe('production pipeline preparation', () => {
     expect(prepared.units.some((unit) => unit.id === 'continued-table-body')).toBe(false);
   });
 
-  it('extends a shallow verified table through the numeric block attached to its caption', () => {
+  it('translates an attached uppercase table description and keeps the numeric block immutable', () => {
     const doc = fixtureDoc();
     const bodyText = [
       'CONFIGURATIONS AND SUPPORTED CURVES',
@@ -2045,7 +2045,9 @@ describe('production pipeline preparation', () => {
     }] });
     const table = prepared.assetRegions.find((asset) => asset.id === 'vision-attached-table')!;
 
-    expect(table.rect.y).toBeLessThanOrEqual(82);
+    expect(prepared.units.find((unit) => unit.id === 'attached-table-caption')?.sourceText)
+      .toBe('TABLE I\nCONFIGURATIONS AND SUPPORTED CURVES');
+    expect(table.rect.y).toBeGreaterThanOrEqual(94);
     expect(table.rect.y + table.rect.h).toBeGreaterThanOrEqual(180);
     expect(prepared.units.some((unit) => unit.id === 'attached-table-body')).toBe(false);
   });
@@ -3964,6 +3966,36 @@ describe('production pipeline preparation', () => {
       .toContain('must be translated');
   });
 
+  it('uses exact caption-line geometry instead of a coarse merged PDF block at the final gate', () => {
+    const doc = fixtureDoc();
+    doc.blocks.push({
+      id: 'coarse-table-caption', docId: 'en', type: 'caption', pageIndex: 0,
+      rect: { x: 50, y: 90, w: 230, h: 80 }, order: 4,
+      text: 'TABLE I\nTHE DATA WIDTH FOR VARIOUS CURVES\nCurve BN128 MNT4-298 BLS12-381',
+      splitAllowed: false, widthMode: 'column',
+    });
+    doc.semanticUnits.push({
+      id: 'coarse-table-caption', kind: 'caption',
+      sourceText: 'TABLE I\nTHE DATA WIDTH FOR VARIOUS CURVES',
+      protectedTokens: [], layoutRegionId: 'r1', order: 4,
+    });
+    doc.layoutRegions[0].orderedUnitIds.push('coarse-table-caption');
+
+    const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: [{
+      id: 'vision-table-with-line-caption', kind: 'table', pageIndex: 0,
+      rect: { x: 50, y: 130, w: 230, h: 70 }, widthMode: 'column',
+      captionUnitId: 'coarse-table-caption',
+      captionRect: { x: 110, y: 90, w: 100, h: 12 },
+    }] });
+
+    expect(prepared.assetRegions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'vision-table-with-line-caption',
+        captionRect: { x: 110, y: 90, w: 100, h: 12 },
+      }),
+    ]));
+  });
+
   it('preserves trailing table rows when PDF.js merges them with following table notes', () => {
     const doc = fixtureDoc();
     const mergedText = [
@@ -4075,6 +4107,62 @@ describe('production pipeline preparation', () => {
     expect(prepared.units.some((unit) => unit.sourceText?.includes('R ESULTS FOR Z CASH'))).toBe(false);
     expect(prepared.assetRegions.find((asset) => asset.id === 'table-v-asset')?.rect.y)
       .toBeGreaterThanOrEqual(606);
+  });
+
+  it('moves a wrapped unpunctuated small-caps table description without expanding back over it', () => {
+    const doc = fixtureDoc();
+    const rows = [
+      { text: 'T HE D ATA W IDTH OF P RIME AND S CALAR FOR V ARIOUS', y: 500 },
+      { text: 'E LLIPTIC C URVES', y: 511 },
+      { text: 'Curve BN128 MNT4-298 BLS12-381', y: 526 },
+      { text: 'Prime/bits 254 298 381', y: 537 },
+      { text: 'Scalar/bits 254 298 256', y: 548 },
+    ];
+    const body = rows.map((row) => row.text).join('\n');
+    let sourceIndex = 0;
+    doc.blocks.push(
+      {
+        id: 'table-i-caption', docId: 'en', type: 'caption', pageIndex: 0,
+        rect: { x: 147, y: 490, w: 32, h: 8 }, order: 4,
+        text: 'TABLE I', splitAllowed: false, widthMode: 'column',
+      },
+      {
+        id: 'table-i-body', docId: 'en', type: 'paragraph', pageIndex: 0,
+        rect: { x: 52, y: 500, w: 220, h: 58 }, order: 5,
+        text: body, splitAllowed: true, widthMode: 'column',
+        characterRects: rows.flatMap((row) => {
+          const characters = [...row.text].map((ch, index) => ({
+            ch, sourceIndex: sourceIndex + index, pageIndex: 0,
+            rect: { x: 55 + index * 3.2, y: row.y, w: 3, h: 8 },
+          }));
+          sourceIndex += row.text.length + 1;
+          return characters;
+        }),
+      },
+    );
+    doc.semanticUnits.push(
+      {
+        id: 'table-i-caption', kind: 'caption', sourceText: 'TABLE I',
+        protectedTokens: [], layoutRegionId: 'r1', order: 4,
+      },
+      {
+        id: 'table-i-body', kind: 'paragraph', sourceText: body,
+        protectedTokens: [], layoutRegionId: 'r1', order: 5,
+      },
+    );
+    doc.layoutRegions[0].orderedUnitIds.push('table-i-caption', 'table-i-body');
+
+    const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: [{
+      id: 'table-i-asset', kind: 'table', pageIndex: 0,
+      rect: { x: 50, y: 520, w: 230, h: 42 }, widthMode: 'column',
+      captionUnitId: 'table-i-caption',
+      captionRect: { x: 147, y: 490, w: 32, h: 8 },
+    }] });
+    const asset = prepared.assetRegions.find((candidate) => candidate.id === 'table-i-asset');
+
+    expect(prepared.units.find((unit) => unit.id === 'table-i-caption')?.sourceText)
+      .toBe('TABLE I\nTHE DATA WIDTH OF PRIME AND SCALAR FOR VARIOUS ELLIPTIC CURVES');
+    expect(asset?.rect.y).toBeGreaterThanOrEqual(522);
   });
 
   it('moves extracted small-caps descriptions into consecutive table captions without character geometry', () => {
@@ -4281,6 +4369,8 @@ describe('production pipeline preparation', () => {
     expect(prepared.assetRegions).toContainEqual(expect.objectContaining({
       id: 'algorithm-caption-body-asset', kind: 'code', captionUnitId: 'algorithm-caption', widthMode: 'span',
     }));
+    expect(prepared.assetRegions.find((asset) => asset.id === 'algorithm-caption-body-asset')!.rect.y)
+      .toBeGreaterThanOrEqual(215);
     expect(prepared.assetRegions.some((asset) => asset.id === 'vision-misplaced-code')).toBe(false);
     expect(prepared.units.some((unit) => unit.id === 'algorithm-body-1')).toBe(false);
     expect(prepared.units.some((unit) => unit.id === 'algorithm-body-2')).toBe(false);
@@ -4288,6 +4378,63 @@ describe('production pipeline preparation', () => {
     expect(prepared.regions[0].orderedUnitIds).toEqual(expect.arrayContaining([
       'algorithm-caption', 'algorithm-caption-body-asset', 'after-algorithm',
     ]));
+  });
+
+  it('deduplicates Vision formula rows inside a complete algorithm and over a heading', () => {
+    const doc = fixtureDoc();
+    doc.blocks.push(
+      { id: 'dedupe-caption', docId: 'en', type: 'caption', pageIndex: 0, rect: { x: 300, y: 100, w: 220, h: 12 }, order: 10, text: 'Algorithm 3 Window Reduction', splitAllowed: false, widthMode: 'column' },
+      { id: 'dedupe-body-1', docId: 'en', type: 'paragraph', pageIndex: 0, rect: { x: 305, y: 118, w: 210, h: 30 }, order: 11, text: '1: for i ← 1 to n do\n2: G ← G + P', splitAllowed: false, widthMode: 'column' },
+      { id: 'dedupe-body-2', docId: 'en', type: 'paragraph', pageIndex: 0, rect: { x: 305, y: 152, w: 210, h: 28 }, order: 12, text: '3: end for\n4: return G', splitAllowed: false, widthMode: 'column' },
+      { id: 'dedupe-heading', docId: 'en', type: 'section', pageIndex: 0, rect: { x: 300, y: 210, w: 120, h: 14 }, order: 13, text: 'B. Next Method', splitAllowed: false, widthMode: 'column' },
+    );
+    doc.semanticUnits.push(
+      { id: 'dedupe-caption', kind: 'caption', sourceText: 'Algorithm 3 Window Reduction', protectedTokens: [], layoutRegionId: 'r1', order: 10 },
+      { id: 'dedupe-body-1', kind: 'paragraph', sourceText: '1: for i ← 1 to n do\n2: G ← G + P', protectedTokens: [], layoutRegionId: 'r1', order: 11 },
+      { id: 'dedupe-body-2', kind: 'paragraph', sourceText: '3: end for\n4: return G', protectedTokens: [], layoutRegionId: 'r1', order: 12 },
+      { id: 'dedupe-heading', kind: 'heading', sourceText: 'B. Next Method', protectedTokens: [], layoutRegionId: 'r1', order: 13 },
+    );
+    doc.layoutRegions[0].orderedUnitIds.push(
+      'dedupe-caption', 'dedupe-body-1', 'dedupe-body-2', 'dedupe-heading',
+    );
+
+    const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: [
+      { id: 'formula-in-algorithm', kind: 'formula', pageIndex: 0, rect: { x: 302, y: 126, w: 150, h: 20 }, widthMode: 'column' },
+      { id: 'formula-algorithm-tail', kind: 'formula', pageIndex: 0, rect: { x: 302, y: 191, w: 150, h: 12 }, widthMode: 'column' },
+      { id: 'formula-over-heading', kind: 'formula', pageIndex: 0, rect: { x: 298, y: 208, w: 150, h: 20 }, widthMode: 'column' },
+      { id: 'independent-formula', kind: 'formula', pageIndex: 0, rect: { x: 300, y: 250, w: 150, h: 20 }, widthMode: 'column' },
+    ] });
+
+    expect(prepared.assetRegions.some((asset) => asset.id === 'formula-in-algorithm')).toBe(false);
+    expect(prepared.assetRegions.some((asset) => asset.id === 'formula-algorithm-tail')).toBe(false);
+    expect(prepared.assetRegions.some((asset) => asset.id === 'formula-over-heading')).toBe(false);
+    expect(prepared.assetRegions.some((asset) => asset.id === 'independent-formula')).toBe(true);
+    expect(prepared.assetRegions.some((asset) => asset.id === 'dedupe-caption-body-asset')).toBe(true);
+  });
+
+  it('keeps a cited percentage breakdown in prose instead of masking it as a formula', () => {
+    const doc = fixtureDoc();
+    doc.blocks.push({
+      id: 'percentage-breakdown', docId: 'en', type: 'paragraph', pageIndex: 0,
+      rect: { x: 300, y: 300, w: 240, h: 80 }, order: 10,
+      text: 'The execution time breakdown of preprocessing, polynomial work, and proving is 13%, 22%, and 63%, respectively.',
+      splitAllowed: true, widthMode: 'column',
+    });
+    doc.semanticUnits.push({
+      id: 'percentage-breakdown', kind: 'paragraph',
+      sourceText: 'The execution time breakdown of preprocessing, polynomial work, and proving is 13%, 22%, and 63%, respectively.',
+      protectedTokens: ['13%', '22%', '63%'], layoutRegionId: 'r1', order: 10,
+    });
+    doc.layoutRegions[0].orderedUnitIds.push('percentage-breakdown');
+
+    const prepared = prepareImmutableStructure(doc, { verifiedAssetRegions: [{
+      id: 'percentage-tail-formula', kind: 'formula', pageIndex: 0,
+      rect: { x: 330, y: 381, w: 150, h: 16 }, widthMode: 'column',
+    }] });
+
+    expect(prepared.assetRegions.some((asset) => asset.id === 'percentage-tail-formula')).toBe(false);
+    expect(prepared.units.find((unit) => unit.id === 'percentage-breakdown')?.sourceText)
+      .toContain('13%, 22%, and 63%');
   });
 
   it('keeps a complete verified code crop when text-layer algorithm reconstruction is only a fragment', () => {

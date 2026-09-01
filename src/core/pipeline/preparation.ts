@@ -931,6 +931,30 @@ function proseHeavyFormulaRegion(doc: Doc, asset: DetectedAssetRegion): boolean 
     || (!hasStrongMath && (words.length >= 3 || alphabeticCharacters >= 14));
 }
 
+function formulaDuplicatesNumericProseTail(doc: Doc, asset: DetectedAssetRegion): boolean {
+  if (asset.kind !== 'formula' || asset.rect.h > 28) return false;
+  return doc.blocks.some((block) => {
+    if (block.pageIndex !== asset.pageIndex || block.type !== 'paragraph') return false;
+    const source = block.text?.replace(/\s+/g, ' ').trim() ?? '';
+    const percentages = source.match(/\d+(?:\.\d+)?\s*(?:%|‰)/g) ?? [];
+    if (percentages.length < 2 || !/\brespectively\b/i.test(source)) return false;
+    const horizontalOverlap = Math.max(0, Math.min(
+      block.rect.x + block.rect.w,
+      asset.rect.x + asset.rect.w,
+    ) - Math.max(block.rect.x, asset.rect.x));
+    const verticalGap = Math.max(
+      0,
+      block.rect.y - (asset.rect.y + asset.rect.h),
+      asset.rect.y - (block.rect.y + block.rect.h),
+    );
+    // Statistics at the end of a natural-language sentence are translated as
+    // text and already protected by the numeric-token protocol. A shallow
+    // Vision proposal on the same baseline would only mask part of that list.
+    return horizontalOverlap >= Math.min(block.rect.w, asset.rect.w) * 0.25
+      && verticalGap <= 4;
+  });
+}
+
 function looksLikeTableNoteText(value: string | undefined): boolean {
   const source = value?.trim() ?? '';
   if (!source || !/^(?:\(\d+[a-z]?\)|\[\d+[a-z]?\]|[*†‡])\s+/i.test(source)) return false;
@@ -3000,6 +3024,20 @@ interface TableCaptionDescription {
 function hasCaptionDescriptionGrammar(value: string): boolean {
   const normalized = value.trim();
   if (/[.!?]\s*$/.test(normalized)) return true;
+  const letters = normalized.match(/[A-Za-z]/g) ?? [];
+  const uppercaseLetters = letters.filter((letter) => letter === letter.toLocaleUpperCase()).length;
+  const words = normalized.match(/[A-Za-z]{2,}/g) ?? [];
+  const titleConnectors = normalized.match(
+    /\b(?:and|for|from|in|of|on|over|to|versus|via|with|without)\b/gi,
+  ) ?? [];
+  // IEEE small-caps table descriptions frequently omit terminal punctuation,
+  // for example "THE DATA WIDTH ... FOR VARIOUS ELLIPTIC CURVES". Their
+  // uppercase phrase structure and natural-language connectors distinguish
+  // them from the short numeric/header rows that must remain rasterized.
+  if (letters.length >= 12
+    && uppercaseLetters / letters.length >= 0.85
+    && words.length >= 4
+    && titleConnectors.length >= 1) return true;
   if (!/[)]\s*$/.test(normalized)) return false;
   const numericFootnoteMarkers = normalized.match(/\(\s*\d+[a-z]?\s*\)/gi) ?? [];
   const connectors = normalized.match(
@@ -3016,22 +3054,58 @@ function leadingTableCaptionDescription(
   block: Doc['blocks'][number],
 ): TableCaptionDescription | undefined {
   const raw = block.text ?? '';
-  const firstLine = raw.split(/\r?\n/, 1)[0]?.trim() ?? '';
+  const sourceLines: Array<{ text: string; start: number }> = [];
+  let offset = 0;
+  for (const line of raw.split(/\r?\n/)) {
+    sourceLines.push({ text: line.trim(), start: offset + Math.max(0, line.indexOf(line.trim())) });
+    offset += line.length + 1;
+  }
+  const firstLine = sourceLines[0]?.text ?? '';
   if (firstLine.length < 8 || firstLine.length > 180) return undefined;
-  const normalized = firstLine
+  const normalizeLine = (value: string) => value
     .normalize('NFKC')
     .replace(/\b([A-Z])\s+([A-Z]{2,})\b/g, '$1$2')
     .replace(/\s+/g, ' ')
     .trim();
+  const firstNormalized = normalizeLine(firstLine);
+  if (!hasCaptionDescriptionGrammar(firstNormalized)) return undefined;
+  const selected = [sourceLines[0]!];
+  // Continue through at most two short uppercase lines before the numeric or
+  // column-header body. This preserves wrapped small-caps descriptions while
+  // keeping rows such as "Curve BN128 ..." inside the immutable table crop.
+  if (!/[.!?]\s*$/.test(firstNormalized)) {
+    for (const line of sourceLines.slice(1, 3)) {
+      const normalizedLine = normalizeLine(line.text);
+      const letters = normalizedLine.match(/[A-Za-z]/g) ?? [];
+      const uppercaseLetters = letters.filter((letter) => letter === letter.toLocaleUpperCase()).length;
+      const words = normalizedLine.match(/[A-Za-z]{2,}/g) ?? [];
+      const numbers = normalizedLine.match(/\d+(?:[.,]\d+)?/g) ?? [];
+      if (!letters.length
+        || uppercaseLetters / letters.length < 0.85
+        || words.length > 12
+        || numbers.length > 0) break;
+      selected.push(line);
+    }
+  }
+  const normalized = selected.map((line) => normalizeLine(line.text)).join(' ');
   const words = normalized.match(/[A-Za-z]{2,}/g) ?? [];
   const numbers = normalized.match(/\d+(?:[.,]\d+)?/g) ?? [];
   if (words.length < 4 || numbers.length > 2 || !hasCaptionDescriptionGrammar(normalized)) return undefined;
-  const sourceStart = raw.indexOf(firstLine);
+  const sourceStart = selected[0]!.start;
+  const sourceEnd = selected.at(-1)!.start + selected.at(-1)!.text.length;
+  const prefixCharacters = (block.characterRects ?? []).filter((character) => (
+    character.pageIndex === block.pageIndex
+    && character.sourceIndex >= sourceStart
+    && character.sourceIndex < sourceEnd
+    && character.ch.trim()
+  ));
   return {
     text: normalized,
-    bottom: block.rect.y + Math.min(block.rect.h, 12),
-    sourceStart: Math.max(0, sourceStart),
-    sourceEnd: Math.max(0, sourceStart) + firstLine.length,
+    bottom: prefixCharacters.length
+      ? Math.max(...prefixCharacters.map((character) => character.rect.y + character.rect.h))
+      : block.rect.y + Math.min(block.rect.h, selected.length * 12),
+    sourceStart,
+    sourceEnd,
   };
 }
 
@@ -3039,6 +3113,8 @@ function tableCaptionDescription(
   block: Doc['blocks'][number],
   pageIndex: number,
 ): TableCaptionDescription | undefined {
+  const leading = leadingTableCaptionDescription(block);
+  if (leading) return leading;
   const rawPrefix = (block.text ?? '').match(
     /^(.{8,180}?[.)])(?=\s+(?:ASIC|CPU|GPU|FPGA|Application|Curve|Size|Modules|Frequency|Area|Dyn|Lkg)\b|$)/i,
   )?.[1];
@@ -3662,7 +3738,12 @@ function detectedAlgorithmAssets(doc: Doc): DetectedAssetRegion[] {
       ...bodyBlocks.map((block) => block.rect.x + block.rect.w),
     );
     const bodyBottom = Math.max(...bodyBlocks.map((block) => block.rect.y + block.rect.h));
-    const top = captionBottom + 2;
+    const firstBodyTop = Math.min(...bodyBlocks.map((block) => block.rect.y));
+    // The first body text geometry is a stronger lower boundary than the
+    // caption font box: PDF font metrics can under-report title descenders and
+    // leave fragments of the original caption in the crop. Start immediately
+    // before the first pseudocode glyph and intentionally omit the top rule.
+    const top = Math.max(captionBottom + 1, firstBodyTop - 0.5);
     const bottom = Number.isFinite(stopY)
       ? Math.min(stopY - 3, bodyBottom + 8)
       : bodyBottom + 8;
@@ -3694,6 +3775,56 @@ function detectedAlgorithmAssets(doc: Doc): DetectedAssetRegion[] {
     });
   }
   return assets;
+}
+
+function formulaDuplicatesDeterministicAlgorithm(
+  asset: DetectedAssetRegion,
+  algorithms: readonly DetectedAssetRegion[],
+  candidates: readonly DetectedAssetRegion[],
+): boolean {
+  if (asset.kind !== 'formula') return false;
+  return algorithms.some((algorithm) => {
+    if (algorithm.pageIndex !== asset.pageIndex) return false;
+    const horizontalOverlap = Math.max(0, Math.min(
+      asset.rect.x + asset.rect.w,
+      algorithm.rect.x + algorithm.rect.w,
+    ) - Math.max(asset.rect.x, algorithm.rect.x));
+    if (horizontalOverlap < Math.min(asset.rect.w, algorithm.rect.w) * 0.45) return false;
+    const overlapRatio = intersectionArea(asset.rect, algorithm.rect)
+      / Math.max(1, asset.rect.w * asset.rect.h);
+    if (overlapRatio >= 0.2) return true;
+
+    // Vision frequently emits every pseudocode row as an independent formula.
+    // The final row can begin just beyond the padded deterministic crop. Treat
+    // that short continuation as part of the same duplicate cluster only when
+    // another formula proposal demonstrably lies inside the algorithm body.
+    const hasOverlappingCluster = candidates.some((candidate) => (
+      candidate.id !== asset.id
+      && candidate.kind === 'formula'
+      && candidate.pageIndex === algorithm.pageIndex
+      && intersectionArea(candidate.rect, algorithm.rect)
+        / Math.max(1, candidate.rect.w * candidate.rect.h) >= 0.2
+    ));
+    const verticalGap = Math.max(
+      0,
+      asset.rect.y - (algorithm.rect.y + algorithm.rect.h),
+      algorithm.rect.y - (asset.rect.y + asset.rect.h),
+    );
+    return hasOverlappingCluster && verticalGap <= 8;
+  });
+}
+
+function formulaCoversStructuralText(doc: Doc, asset: DetectedAssetRegion): boolean {
+  if (asset.kind !== 'formula') return false;
+  const structuralBlockIds = new Set(doc.semanticUnits
+    .filter((unit) => ['title', 'heading', 'caption', 'table-title'].includes(unit.kind))
+    .map((unit) => unit.sourceBlockId ?? unit.id));
+  return doc.blocks.some((block) => {
+    if (!structuralBlockIds.has(block.id)) return false;
+    const rect = physicalRectOnPage(block, asset.pageIndex);
+    if (!rect) return false;
+    return intersectionArea(rect, asset.rect) / Math.max(1, rect.w * rect.h) >= 0.5;
+  });
 }
 
 function embeddedCaptionText(source: string, kind: 'figure' | 'table'): string | undefined {
@@ -4178,6 +4309,11 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
   const deterministicAlgorithmPages = new Set(retainedAlgorithmAssets.map((asset) => asset.pageIndex));
   const verifiedAssetRegions = suppliedVerifiedAssets
     .filter((asset) => !replacedVerifiedCodeIds.has(asset.id))
+    .filter((asset) => !formulaDuplicatesDeterministicAlgorithm(
+      asset, retainedAlgorithmAssets, suppliedVerifiedAssets,
+    ))
+    .filter((asset) => !formulaCoversStructuralText(doc, asset))
+    .filter((asset) => !formulaDuplicatesNumericProseTail(doc, asset))
     // An uncaptioned code proposal detached from a complete caption-anchored
     // deterministic algorithm is a proven false positive on that page.
     .filter((asset) => asset.kind !== 'code'
@@ -4487,6 +4623,8 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
       ? Math.max(assetBottom, numericBottom)
       : Math.min(assetBottom, numericBottom);
     const rowsCrossingTop = numericRows.filter((block) => (
+      !(attachedBodyIds.has(block.id) && tableCaptionDescription(block, asset.pageIndex))
+      &&
       block.rect.y < asset.rect.y
       && block.rect.y + block.rect.h > asset.rect.y
     ));
@@ -5428,7 +5566,13 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
       && block.rect.y < asset.rect.y + asset.rect.h
       && block.rect.y + block.rect.h > asset.rect.y
     ));
-    const captionRect = asset.captionUnitId ? blocks.get(asset.captionUnitId)?.rect : undefined;
+    // Reconciliation may match one exact caption line inside a coarse PDF.js
+    // block that also contains a table title, diagram labels, or neighbouring
+    // captions. Preserve that line-level evidence across preparation instead
+    // of re-expanding it to the aggregate source block and producing a false
+    // caption-overlap failure.
+    const captionRect = asset.captionRect
+      ?? (asset.captionUnitId ? blocks.get(asset.captionUnitId)?.rect : undefined);
     const geometry = validateImmutableRegion(asset, page, intersecting, captionRect);
     const blockingGeometryIssues = portraitPages.has(asset.pageIndex) && isPortraitAsset(doc, asset)
       ? geometry.issues.filter((issue) => issue !== 'body-prose-density')

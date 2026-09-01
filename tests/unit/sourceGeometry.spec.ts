@@ -390,6 +390,42 @@ describe('source PDF geometry', () => {
     expect(resolved.source.flatMap((set) => set.rects).some((rect) => rect.y === 200)).toBe(false);
   });
 
+  it('maps prose whose bitmap mask leaves only partial boundary words', () => {
+    const source = [
+      'Zhenyan Lu received the bachelor degree from Dalian Maritime University,',
+      'and the master degree from Shenzhen Institute of Advanced Technology (SIAT),',
+      'Chinese Academy of Sciences (CAS).',
+    ].join(' ');
+    const masked = [
+      'Zhenyan Lu received the ba om Dalian Maritime University,',
+      'the master degree from Shenzh d-vanced Technology (SIAT),',
+      'of Sciences (CAS).',
+    ].join(' ');
+    const doc = emptyDoc();
+    doc.blocks = [{
+      id: 'biography', docId: 'en', type: 'paragraph', pageIndex: 8,
+      rect: { x: 20, y: 30, w: 400, h: 60 }, order: 0,
+      splitAllowed: true, widthMode: 'column', text: source,
+      characterRects: [...source].map((ch, sourceIndex) => ({
+        ch, sourceIndex, pageIndex: 8,
+        rect: { x: 20 + (sourceIndex % 70) * 4, y: 30 + Math.floor(sourceIndex / 70) * 12, w: 4, h: 10 },
+      })),
+    }];
+    const unit = alignmentUnit({
+      id: 'biography-g-1', parentId: 'biography', sourceBlockId: 'biography',
+      kind: 'semantic-group', relation: '1:1', sourceText: masked,
+    });
+
+    const [resolved] = resolveSourceGeometry([unit], doc, []);
+
+    expect(resolved).toMatchObject({
+      status: 'aligned', confidence: 0.92,
+      fallbackReason: 'source-sentence-matched-across-masked-ranges',
+    });
+    expect(resolved.source).not.toEqual([]);
+    expect(resolved.source[0].rects[0].w).toBeLessThan(doc.blocks[0].rect.w);
+  });
+
   it('maps a short sentence across a frozen numeric formula without including the formula', () => {
     const source = 'This requires i = 1, 1024 - 15 = 1009 PADD operations.';
     const formulaStart = source.indexOf('1024');

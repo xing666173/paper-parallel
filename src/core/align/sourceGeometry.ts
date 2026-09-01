@@ -249,8 +249,10 @@ function findOrderedTokenRanges(text: string, needle: string, from: number): {
 
   const matchedSourceIndexes: number[] = [];
   let sourceCursor = 0;
+  let skippedBoundaryFragments = 0;
   for (const targetToken of target) {
-    const relativeIndex = source.slice(sourceCursor)
+    const remainingSource = source.slice(sourceCursor);
+    const relativeIndex = remainingSource
       .findIndex((sourceToken) => {
         if (sourceToken.value === targetToken.value) return true;
         const shorter = sourceToken.value.length < targetToken.value.length
@@ -262,13 +264,35 @@ function findOrderedTokenRanges(text: string, needle: string, from: number): {
         // relation; wider or internal fuzzy matches remain disallowed.
         return shorter.length >= 4
           && longer.length - shorter.length <= 4
-          && longer.endsWith(shorter);
+          && (longer.endsWith(shorter) || longer.startsWith(shorter));
       });
-    if (relativeIndex < 0) return null;
+    if (relativeIndex < 0) {
+      // Cropping a bitmap out of a PDF text aggregate can leave only one or
+      // two letters at either edge of the removed area (`ba ... om` for a
+      // masked word and `d-vanced` for the following one). Those fragments do
+      // not describe additional source content. Ignore a small bounded number
+      // of alphabetic edge fragments, while still requiring every meaningful
+      // token to match in order.
+      if (/^\p{L}{1,2}$/u.test(targetToken.value)) {
+        skippedBoundaryFragments += 1;
+        if (skippedBoundaryFragments <= Math.max(2, Math.floor(target.length * 0.25))) continue;
+      }
+      return null;
+    }
+    // A tiny token is useful when it is genuinely next in the source (`Lu`),
+    // but must not jump far ahead to an unrelated initial and consume the
+    // cursor before the next meaningful word.
+    if (/^\p{L}{1,2}$/u.test(targetToken.value) && relativeIndex > 2) {
+      skippedBoundaryFragments += 1;
+      if (skippedBoundaryFragments <= Math.max(2, Math.floor(target.length * 0.25))) continue;
+      return null;
+    }
     const sourceIndex = sourceCursor + relativeIndex;
     matchedSourceIndexes.push(sourceIndex);
     sourceCursor = sourceIndex + 1;
   }
+
+  if (matchedSourceIndexes.length < 4) return null;
 
   const firstIndex = matchedSourceIndexes[0]!;
   const lastIndex = matchedSourceIndexes.at(-1)!;

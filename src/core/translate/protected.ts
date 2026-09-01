@@ -348,12 +348,27 @@ function protectedTokenSequence(text: string, tokens: readonly string[]): string
   return Array.from(text.matchAll(pattern), (match) => match[0]!);
 }
 
+function isCitationAnchoredSourceTerm(source: string, word: string): boolean {
+  // Lowercase software and library names are common in papers (for example a
+  // package name immediately followed by its citation).  They are supposed to
+  // remain verbatim in Chinese, but the residual-English guard cannot infer
+  // that from casing alone.  A source-side citation directly attached to the
+  // same token is deterministic evidence that it is a referenced term, not a
+  // piece of prose accidentally left untranslated.
+  const anchored = new RegExp(
+    `\\b${escapeRegExp(word)}\\b\\s*(?:[,;:]\\s*)?\\[\\s*\\d+(?:\\s*[-,]\\s*\\d+)*\\s*\\]`,
+    'u',
+  );
+  return anchored.test(source);
+}
+
 function untranslatedLowercaseWords(source: TranslationBlockRequest, translation: string): string[] {
   if (!requiresChineseTarget(source)) return [];
   const prose = translation
     .replace(/https?:\/\/\S+|\b\S+@\S+\b/giu, ' ')
     .replace(/[（(][^()（）]{0,240}[）)]/gu, ' ');
-  return [...new Set(prose.match(/\b[a-z]{8,}(?:-[a-z]{4,})*\b/gu) ?? [])];
+  return [...new Set(prose.match(/\b[a-z]{8,}(?:-[a-z]{4,})*\b/gu) ?? [])]
+    .filter((word) => !isCitationAnchoredSourceTerm(source.source, word));
 }
 
 function validateSourceMapping(

@@ -449,6 +449,66 @@ describe('vision: deterministic layout reconciliation', () => {
     expect(result.assetRegions[0]?.captionUnitId).toBe('caption-6');
   });
 
+  it('prefers a unique visible figure number over a nearer adjacent caption', () => {
+    const doc = fixtureDoc();
+    doc.blocks = [
+      {
+        id: 'caption-12', docId: 'en', type: 'caption', pageIndex: 0,
+        rect: { x: 50, y: 350, w: 220, h: 12 }, order: 0,
+        text: 'Fig. 12. Cache hit rate', splitAllowed: false, widthMode: 'column',
+      },
+      {
+        id: 'caption-13', docId: 'en', type: 'caption', pageIndex: 0,
+        rect: { x: 50, y: 410, w: 220, h: 12 }, order: 1,
+        text: 'Fig. 13. Performance breakdown', splitAllowed: false, widthMode: 'column',
+      },
+    ];
+    const result = reconcileVisionLayout(doc, [{
+      pageIndex: 0, layout: 'mixed', regions: [{
+        type: 'figure', bbox: [80, 300, 360, 150], column: 'left',
+        captionBBox: [80, 515, 360, 20], visibleLabel: 'Fig. 12',
+        captionPosition: 'below', confidence: 0.95,
+      }],
+    }]);
+
+    expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions[0]?.captionUnitId).toBe('caption-12');
+    expect(result.assetRegions[0]!.rect.y + result.assetRegions[0]!.rect.h).toBeLessThan(350);
+  });
+
+  it('keeps a confirmed below-caption as a hard boundary after label expansion', () => {
+    const doc = fixtureDoc();
+    doc.blocks = [
+      {
+        id: 'figure-label-aggregate', docId: 'en', type: 'figure', pageIndex: 0,
+        rect: { x: 318, y: 60, w: 240, h: 310 }, order: 0,
+        text: 'SLR0\nSLR1\nSLR2\nSLR3\nCLB\nDSP\nRAM',
+        splitAllowed: false, widthMode: 'column',
+      },
+      {
+        id: 'caption-3', docId: 'en', type: 'caption', pageIndex: 0,
+        rect: { x: 330, y: 120, w: 220, h: 12 }, order: 1,
+        text: 'Fig. 3. Cloud FPGA architecture', splitAllowed: false, widthMode: 'column',
+      },
+      {
+        id: 'caption-4', docId: 'en', type: 'caption', pageIndex: 0,
+        rect: { x: 330, y: 360, w: 220, h: 12 }, order: 2,
+        text: 'Fig. 4. Accelerator architecture', splitAllowed: false, widthMode: 'column',
+      },
+    ];
+    const result = reconcileVisionLayout(doc, [{
+      pageIndex: 0, layout: 'mixed', regions: [{
+        type: 'figure', bbox: [520, 75, 360, 175], column: 'right',
+        captionBBox: [520, 255, 360, 15], visibleLabel: 'Fig. 3',
+        captionPosition: 'below', confidence: 0.95,
+      }],
+    }]);
+
+    expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions[0]?.captionUnitId).toBe('caption-3');
+    expect(result.assetRegions[0]!.rect.y + result.assetRegions[0]!.rect.h).toBeLessThan(120);
+  });
+
   it('snaps a partially detected captioned figure to its exact raster XObject bounds', () => {
     const doc = fixtureDoc();
     doc.blocks = [{
@@ -471,6 +531,28 @@ describe('vision: deterministic layout reconciliation', () => {
     expect(result.assetRegions[0]?.rect).toEqual({
       x: 318, y: 254.1, w: 240.2, h: 175.5,
     });
+  });
+
+  it('does not snap a complete chart to one partial raster object', () => {
+    const doc = fixtureDoc();
+    doc.blocks = [{
+      id: 'caption-10', docId: 'en', type: 'caption', pageIndex: 0,
+      rect: { x: 305, y: 390, w: 205, h: 9 }, order: 1,
+      text: 'Fig. 10. Computing power improvement.', splitAllowed: false, widthMode: 'column',
+    }];
+    const result = reconcileVisionLayout(doc, [{
+      pageIndex: 0, layout: 'mixed', regions: [{
+        type: 'figure', bbox: [500, 280, 450, 300], column: 'right',
+        captionBBox: [500, 490, 400, 18], visibleLabel: 'Fig. 10',
+        captionPosition: 'below', confidence: 0.98,
+      }],
+    }], 0.8, new Map([[0, [
+      { x: 338, y: 246, w: 136, h: 118 },
+    ]]]));
+
+    expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions[0]!.rect.x).toBeCloseTo(306, 0);
+    expect(result.assetRegions[0]!.rect.w).toBeGreaterThan(260);
   });
 
   it('matches every figure title extracted into one multi-caption PDF block', () => {
@@ -506,6 +588,8 @@ describe('vision: deterministic layout reconciliation', () => {
 
     expect(result.unresolved).toEqual([]);
     expect(result.assetRegions[0]?.captionUnitId).toBe('merged-captions');
+    expect(result.assetRegions[0]?.captionRect).toMatchObject({ x: 230, y: 195, h: 10 });
+    expect(result.assetRegions[0]?.captionRect?.w).toBeCloseTo(119.8);
   });
 
   it('keeps adjacent figures distinct when their captions share one PDF block', () => {
@@ -639,6 +723,40 @@ describe('vision: deterministic layout reconciliation', () => {
     }]);
 
     expect(result.unresolved).toEqual([expect.objectContaining({ reason: 'caption-unmatched' })]);
+  });
+
+  it('locally rejects a hallucinated captioned figure that is actually body prose', () => {
+    const doc = fixtureDoc();
+    const text = [
+      'In general, a zero knowledge proof is generated in three phases and each phase',
+      'contains ordinary natural language prose that must remain translated as body text.',
+    ].join(' ');
+    doc.blocks = [{
+      id: 'right-column-prose', docId: 'en', type: 'paragraph', pageIndex: 0,
+      rect: { x: 306, y: 590, w: 294, h: 96 }, order: 0, text,
+      splitAllowed: true, widthMode: 'column',
+      characterRects: [...text].map((ch, index) => ({
+        ch, sourceIndex: index, pageIndex: 0,
+        rect: {
+          x: 306 + (index % 64) * 4.2,
+          y: 590 + Math.floor(index / 64) * 12,
+          w: 4,
+          h: 9,
+        },
+      })),
+    }];
+
+    const result = reconcileVisionLayout(doc, [{
+      pageIndex: 0, layout: 'double', regions: [{
+        type: 'figure', bbox: [500, 750, 480, 120], column: 'right',
+        captionBBox: [500, 720, 480, 25], captionPosition: 'above', confidence: 0.99,
+      }],
+    }]);
+
+    expect(result.assetRegions).toEqual([]);
+    expect(result.unresolved).toEqual([
+      expect.objectContaining({ reason: 'body-prose-density', type: 'figure' }),
+    ]);
   });
 
   it('matches an IEEE Fig. caption embedded after diagram labels', () => {
@@ -814,6 +932,36 @@ describe('vision: deterministic layout reconciliation', () => {
       'bitmap-p1-portrait-1', 'bitmap-p1-portrait-2', 'bitmap-p1-portrait-3',
       'bitmap-p1-portrait-4', 'bitmap-p1-portrait-5', 'bitmap-p1-portrait-6',
     ]);
+  });
+
+  it('locally rejects approximate portrait proposals when exact bitmap portraits exist', () => {
+    const doc = fixtureDoc();
+    doc.blocks = [{
+      id: 'bios', docId: 'en', type: 'paragraph', pageIndex: 0,
+      rect: { x: 45, y: 70, w: 510, h: 620 }, order: 0,
+      text: [
+        'Alice Smith received the Ph.D. degree from Example University.',
+        'Bob Jones received the M.S. degree from Example University.',
+        'Carol Lee received the B.Eng. degree from Example University.',
+      ].join('\n'), splitAllowed: true, widthMode: 'span',
+    }];
+    const exact = [
+      { x: 42, y: 176, w: 72, h: 90 },
+      { x: 42, y: 340, w: 72, h: 90 },
+      { x: 305, y: 67, w: 72, h: 90 },
+    ];
+
+    const result = reconcileVisionLayout(doc, [{
+      pageIndex: 0, layout: 'double', regions: [
+        { localId: 'vision-portrait-1', type: 'figure', bbox: [390, 120, 110, 120], column: 'left', confidence: 0.9 },
+        { localId: 'vision-portrait-2', type: 'figure', bbox: [390, 360, 110, 120], column: 'left', confidence: 0.9 },
+        { localId: 'vision-portrait-3', type: 'figure', bbox: [390, 600, 110, 120], column: 'left', confidence: 0.9 },
+      ],
+    }], 0.8, new Map([[0, exact]]));
+
+    expect(result.assetRegions).toEqual([]);
+    expect(result.unresolved).toHaveLength(3);
+    expect(result.unresolved.every((item) => item.reason === 'body-prose-density')).toBe(true);
   });
 
   it('rejects a repeated stack of thin full-width formula boxes hallucinated from body text lines', () => {

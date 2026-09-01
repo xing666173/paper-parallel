@@ -395,6 +395,27 @@ describe('generic academic translation protocol', () => {
     expect(result.issues.map((issue) => issue.code)).toContain('untranslated-residual');
   });
 
+  it('allows a lowercase referenced software name to remain verbatim', () => {
+    const source: TranslationBlockRequest = {
+      blockId: 'software-name', kind: 'paragraph',
+      source: 'The prover libraries libsnark [30] and bellman [37] are implemented in different languages.',
+      alignmentMode: 'sentence-candidates',
+      sourceSentences: [{
+        id: 'software-name-s-1',
+        text: 'The prover libraries libsnark [30] and bellman [37] are implemented in different languages.',
+      }],
+      protectedTokens: ['[30]', '[37]'],
+    };
+    const translation = '证明器库 libsnark [30] 和 bellman [37] 使用不同语言实现。';
+    const result = validateBatchResponse([source], { blocks: [{
+      blockId: 'software-name', translation,
+      alignmentGroups: [{ sourceSentenceIds: ['software-name-s-1'], targetSegments: [translation] }],
+      newTerms: [], warnings: [],
+    }] });
+
+    expect(result.ok).toBe(true);
+  });
+
   it('counts complete numeric tokens and permits extra numerals introduced from number words', () => {
     const source: TranslationBlockRequest = {
       blockId: 'numeric-words', kind: 'paragraph',

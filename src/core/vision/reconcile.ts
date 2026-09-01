@@ -57,7 +57,11 @@ function withExactRasterFigureBounds(
     // the underlying object but not for the individual figure described by the
     // Vision region. Do not let such a materially wider object absorb its
     // neighbour; a tight Vision box is safer in that case.
-    if (overlapOfSmaller < 0.55 || areaRatio < 0.25 || areaRatio > 3.5 || widthRatio > 1.5) return [];
+    // The reverse mismatch is equally unsafe: charts are often assembled from
+    // several bitmap/vector objects, so snapping a complete Vision box to one
+    // much narrower XObject silently drops neighbouring bars or panels.
+    if (overlapOfSmaller < 0.55 || areaRatio < 0.25 || areaRatio > 3.5
+      || widthRatio < 0.7 || widthRatio > 1.5) return [];
     const unionArea = rectArea + candidateArea - overlap;
     return [{ candidate, score: overlap / Math.max(1, unionArea) }];
   }).sort((left, right) => right.score - left.score);
@@ -125,6 +129,15 @@ function captionFor(
     }
     return matchedCaptionLines.length ? matchedCaptionLines : [block];
   });
+  const expectedIdentity = captionIdentity(visibleLabel);
+  if (expectedIdentity) {
+    const exact = candidates.filter((block) => captionIdentity(block.text) === expectedIdentity);
+    // A unique number printed in both the rendered page and the PDF text
+    // layer is stronger identity evidence than a coarse caption rectangle.
+    // Prefer it before nearest-neighbour geometry so a displaced model box
+    // cannot silently link Fig. N to the adjacent Fig. N+1 caption.
+    if (exact.length === 1) return exact[0];
+  }
   if (captionRect) {
     const overlapping = candidates
       .map((block) => ({ block, overlap: intersectionArea(block.rect, captionRect) }))
@@ -153,12 +166,6 @@ function captionFor(
     if (nearby) return nearby;
   }
 
-  const expectedIdentity = captionIdentity(visibleLabel);
-  if (expectedIdentity) {
-    const exact = candidates.filter((block) => captionIdentity(block.text) === expectedIdentity);
-    if (exact.length === 1) return exact[0];
-  }
-
   if (assetType !== 'figure' && assetType !== 'table' && assetType !== 'code') return undefined;
   return candidates
     .map((block) => {
@@ -180,6 +187,7 @@ function withoutCaption(
   rect: Rect,
   captionRects: readonly (Rect | undefined)[],
   type: VisionRegion['type'],
+  confirmedPosition?: VisionRegion['captionPosition'],
 ): Rect {
   const applicable = captionRects.filter((candidate): candidate is Rect => Boolean(
     candidate && intersectionArea(rect, candidate) > 0,
@@ -187,6 +195,24 @@ function withoutCaption(
   if (!applicable.length) return rect;
   const bottom = rect.y + rect.h;
   const assetCenter = rect.y + rect.h / 2;
+  // Once a caption has been linked to a unique printed identity, its declared
+  // side is a hard crop boundary. Label-recovery may have enlarged the asset
+  // far enough that the old centre heuristic now sees a below-caption above
+  // the enlarged centre and accidentally keeps it inside the immutable crop.
+  if (type === 'figure' && confirmedPosition === 'below') {
+    const confirmedBelow = applicable.filter((candidate) => candidate.y > rect.y + 8);
+    if (confirmedBelow.length) {
+      const trimmedBottom = Math.min(...confirmedBelow.map((candidate) => candidate.y)) - 2;
+      if (trimmedBottom > rect.y + 12) return { ...rect, h: trimmedBottom - rect.y };
+    }
+  }
+  if ((type === 'table' || type === 'code') && confirmedPosition === 'above') {
+    const confirmedAbove = applicable.filter((candidate) => candidate.y + candidate.h < bottom - 8);
+    if (confirmedAbove.length) {
+      const trimmedTop = Math.max(...confirmedAbove.map((candidate) => candidate.y + candidate.h)) + 2;
+      if (trimmedTop < bottom - 12) return { ...rect, y: trimmedTop, h: bottom - trimmedTop };
+    }
+  }
   const below = applicable.filter((candidate) => candidate.y + candidate.h / 2 >= assetCenter);
   if (type === 'figure' && below.length) {
     const trimmedBottom = Math.max(rect.y, Math.min(...below.map((candidate) => candidate.y)) - 2);
@@ -795,8 +821,26 @@ export function reconcileVisionLayout(
     const analysis = byPage.get(page.pageIndex)!;
     const implausibleFormulaIndices = implausibleFormulaClusterIndices(analysis);
     const portraitIndices = portraitClusterIndices(doc, page.pageIndex, analysis);
+    const exactBitmapPortraitsAvailable = (bitmapRegionsByPage.get(page.pageIndex) ?? [])
+      .filter((rect) => isPortraitRect(page, rect)).length >= 3;
     analysis.regions.forEach((vision, regionIndex) => {
       if (!(vision.type in ASSET_KIND)) return;
+      if (exactBitmapPortraitsAvailable && portraitIndices.has(regionIndex)) {
+        // On an author-biography page the PDF raster XObjects provide exact
+        // headshot boundaries. Approximate Vision portrait boxes can be shifted
+        // into the wrapped biography prose even when they look like a coherent
+        // portrait cluster. Reject the whole approximate cluster locally; the
+        // caller replaces it with the deterministic bitmap rectangles after
+        // the accepted page plan has removed these proposals.
+        unresolved.push({
+          pageIndex: page.pageIndex,
+          regionIndex,
+          regionId: vision.localId,
+          type: vision.type,
+          reason: 'body-prose-density',
+        });
+        return;
+      }
       if (implausibleFormulaIndices.has(regionIndex)) {
         unresolved.push({
           pageIndex: page.pageIndex,
@@ -818,7 +862,30 @@ export function reconcileVisionLayout(
       const tableGeometryCorroborated = vision.type === 'table'
         && tableContentCorroboratesRegion(doc, page.pageIndex, rect, vision.confidence);
       if (captionRect && !caption && !tableGeometryCorroborated) {
-        unresolved.push({ pageIndex: page.pageIndex, regionIndex, regionId: vision.localId, type: vision.type, reason: 'caption-unmatched' });
+        // A hallucinated figure over ordinary body prose can also carry a
+        // hallucinated caption box. Treat exact PDF text geometry as stronger
+        // evidence than the missing caption so the existing local recovery can
+        // remove the false-positive region without spending correction calls on
+        // an impossible "find a caption that is not on the page" request.
+        const candidate: DetectedAssetRegion = {
+          id: vision.localId ?? `vision-p${page.pageIndex + 1}-${vision.type}-${regionIndex + 1}`,
+          kind: ASSET_KIND[vision.type as keyof typeof ASSET_KIND],
+          pageIndex: page.pageIndex,
+          rect,
+          widthMode: rect.w >= page.width * 0.55 ? 'span' : 'column',
+        };
+        const intersecting = doc.blocks.filter((block) => (
+          block.pageIndex === page.pageIndex && intersectionArea(block.rect, rect) > 0
+        ));
+        const locallyProvenProseFalsePositive = vision.type === 'figure'
+          && validateImmutableRegion(candidate, page, intersecting).issues.includes('body-prose-density');
+        unresolved.push({
+          pageIndex: page.pageIndex,
+          regionIndex,
+          regionId: vision.localId,
+          type: vision.type,
+          reason: locallyProvenProseFalsePositive ? 'body-prose-density' : 'caption-unmatched',
+        });
         return;
       }
       const captionCorroboratesRegion = Boolean(
@@ -840,14 +907,14 @@ export function reconcileVisionLayout(
         unresolved.push({ pageIndex: page.pageIndex, regionIndex, regionId: vision.localId, type: vision.type, reason: 'body-prose-density' });
         return;
       }
-      const captionBoundaries = vision.type === 'table' && caption
-        ? [caption.rect]
-        : [caption?.rect, captionRect];
       rect = withExactRasterFigureBounds(
         rect, vision.type, page.pageIndex, bitmapRegionsByPage,
       );
       rect = withAdjacentVisualLabelExtent(doc, page.pageIndex, rect, vision.type);
-      rect = withoutCaption(rect, captionBoundaries, vision.type);
+      rect = withoutCaption(rect, [caption?.rect], vision.type, vision.captionPosition);
+      if (vision.type !== 'table' || !caption) {
+        rect = withoutCaption(rect, [captionRect], vision.type);
+      }
       rect = withAdjacentCaptionClearance(rect, caption?.rect, vision.type);
       if (!tableGeometryCorroborated || caption) {
         rect = withoutLeadingTableCaptionContinuation(doc, page.pageIndex, rect, vision.type);
@@ -898,6 +965,7 @@ export function reconcileVisionLayout(
         // signal for whether it must span the target columns.
         widthMode: rect.w >= page.width * 0.55 ? 'span' : 'column',
         captionUnitId: caption?.id,
+        ...(caption ? { captionRect: { ...caption.rect } } : {}),
       };
       const intersecting = doc.blocks.filter((block) => (
         block.pageIndex === page.pageIndex && intersectionArea(block.rect, rect) > 0
