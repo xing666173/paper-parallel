@@ -465,6 +465,48 @@ describe('vision: deterministic layout reconciliation', () => {
     })]);
   });
 
+  it('accepts a moderately confident figure when a coarse caption box is one line from the matching PDF caption', () => {
+    const result = reconcileVisionLayout(fixtureDoc(), [{
+      pageIndex: 0, layout: 'mixed', regions: [{
+        type: 'figure', bbox: [200, 301, 600, 150], column: 'full',
+        captionBBox: [80, 460, 360, 15], confidence: 0.5,
+      }],
+    }]);
+
+    expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions).toEqual([expect.objectContaining({
+      kind: 'figure', captionUnitId: 'caption-1',
+    })]);
+  });
+
+  it('accepts a moderately confident formula only when a local equation block corroborates it', () => {
+    const doc = fixtureDoc();
+    doc.blocks.push({
+      id: 'equation-1', docId: 'en', type: 'equation', pageIndex: 0,
+      rect: { x: 220, y: 520, w: 90, h: 18 }, order: 2,
+      text: 'Q = kP = ∑ k_i P_i', splitAllowed: false, widthMode: 'column',
+    });
+    const result = reconcileVisionLayout(doc, [{
+      pageIndex: 0, layout: 'mixed', regions: [{
+        type: 'display_formula', bbox: [350, 640, 300, 130], column: 'full', confidence: 0.5,
+      }],
+    }]);
+
+    expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions).toEqual([expect.objectContaining({ kind: 'formula' })]);
+  });
+
+  it('still rejects a moderately confident formula with no independent PDF equation evidence', () => {
+    const result = reconcileVisionLayout(fixtureDoc(), [{
+      pageIndex: 0, layout: 'mixed', regions: [{
+        type: 'display_formula', bbox: [350, 640, 300, 130], column: 'full', confidence: 0.5,
+      }],
+    }]);
+
+    expect(result.assetRegions).toEqual([]);
+    expect(result.unresolved[0]?.reason).toBe('low-confidence');
+  });
+
   it('accepts a low-confidence cluster of uncaptioned author portraits on a biography page', () => {
     const doc = fixtureDoc();
     doc.blocks = [{

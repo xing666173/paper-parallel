@@ -21,6 +21,8 @@ jobs:
       - run: npm ci --no-audit --no-fund
       - name: Type check
         run: npm run typecheck
+      - name: Lint
+        run: npm run lint
       - name: Production build
         run: npm run build
       - name: Deploy to GitHub Pages

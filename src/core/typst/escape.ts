@@ -20,7 +20,7 @@ const SUPERSCRIPT = new Map(Object.entries({
 function escapePlainTypstText(text: string): string {
   return text
     .replace(/\\/g, '\\\\')
-    .replace(/([#$\[\]<>@*_`/])/g, '\\$1');
+    .replace(/([#$[\]<>@*_`/])/g, '\\$1');
 }
 
 export function escapeTypstText(text: string): string {

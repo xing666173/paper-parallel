@@ -67,8 +67,6 @@ const TEXT_TYPES = new Set([
   'paragraph',
   'reference',
 ]);
-const ATOMIC_SPLIT_FORBIDDEN = new Set(['figure', 'table', 'equation', 'caption']);
-
 /**
  * 按句边界切块:每片高度 <= maxH;超长句按字硬切。
  * @param {string} text

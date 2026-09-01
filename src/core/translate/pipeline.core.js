@@ -54,7 +54,7 @@
  * @returns {TermEntry[]}
  */
 function extractTerms(text) {
-  const re = /([\u4e00-\u9fa5][\u4e00-\u9fa5A-Za-z·\- ]{0,30}?)（([A-Za-z][A-Za-z0-9\- ]{2,60}?)(?:,\s*([A-Za-z0-9\-]{2,10}))?）/g;
+  const re = /([\u4e00-\u9fa5][\u4e00-\u9fa5A-Za-z· -]{0,30}?)（([A-Za-z][A-Za-z0-9 -]{2,60}?)(?:,\s*([A-Za-z0-9-]{2,10}))?）/g;
   const out = [];
   const seen = new Set();
   let m;

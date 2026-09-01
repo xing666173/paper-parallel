@@ -190,7 +190,6 @@ async function alignBlocksWithAnchors(enBlocks, zhBlocks, opts) {
   }
   pairs.sort((a, b) => (a.enOrder ?? 0) - (b.enOrder ?? 0));
 
-  const anchorSet = new Set(pairs.map((p) => `${p.enBlockId}|${p.zhBlockId}`));
   const cut = (list, id) => list.findIndex((b) => b.id === id);
 
   const units = [];

@@ -68,6 +68,13 @@ function mappedUnitId(
 }
 
 export function buildLayoutRepairPlan(input: BuildLayoutRepairPlanInput): LayoutRepairPlan | undefined {
+  // Content integrity is immutable. If even one blocking content issue is
+  // present, do not spend later attempts moving or shrinking unrelated layout
+  // units: that can hide the symptom but cannot restore missing/changing data.
+  if (input.issues.some((issue) => (
+    isBlockingVisionFinalIssue(issue) && NON_REPAIRABLE.has(issue.type)
+  ))) return undefined;
+
   const previousFingerprints = new Set(input.previous?.issueFingerprints ?? []);
   const plan: LayoutRepairPlan = {
     attempt: input.attempt,

@@ -44,6 +44,17 @@ describe('deterministic layout repair planning', () => {
     })).toBeUndefined();
   });
 
+  it('stops the entire repair round when content integrity fails beside a repairable layout issue', () => {
+    expect(buildLayoutRepairPlan({
+      attempt: 1,
+      issues: [
+        issue({ type: 'formula_changed', evidence: 'Formula symbols changed' }),
+        issue({ type: 'layout_drift', evidence: 'Heading crowds the following body paragraph' }),
+      ],
+      manifest, units: [headingUnit], pageSizes,
+    })).toBeUndefined();
+  });
+
   it('fails closed for structural text scattering instead of hiding it with spacing', () => {
     expect(buildLayoutRepairPlan({
       attempt: 1,

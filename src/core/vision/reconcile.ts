@@ -189,6 +189,45 @@ function tableContentCorroboratesRegion(
     && (rowSignals.length >= 2 || numbers.length >= 40);
 }
 
+function captionGeometryCorroboratesRegion(
+  caption: Doc['blocks'][number] | undefined,
+  captionRect: Rect | undefined,
+): boolean {
+  if (!caption || !captionRect) return false;
+  const overlap = intersectionArea(caption.rect, captionRect);
+  if (overlap / Math.max(1, caption.rect.w * caption.rect.h) >= 0.2) return true;
+
+  // Multimodal layout responses are often coarse by one rendered text line.
+  // A nearby box still independently identifies the PDF caption when it shares
+  // most of the same horizontal lane; accepting that evidence is safer than
+  // falling back to a guessed caption-gap crop that may preserve only half of
+  // a vector figure.
+  const horizontalOverlap = Math.max(0, Math.min(
+    caption.rect.x + caption.rect.w,
+    captionRect.x + captionRect.w,
+  ) - Math.max(caption.rect.x, captionRect.x));
+  const horizontalRatio = horizontalOverlap / Math.max(1, Math.min(caption.rect.w, captionRect.w));
+  const centerDistanceY = Math.abs(
+    caption.rect.y + caption.rect.h / 2 - (captionRect.y + captionRect.h / 2),
+  );
+  return horizontalRatio >= 0.6
+    && centerDistanceY <= Math.max(36, caption.rect.h * 2.5, captionRect.h * 2.5);
+}
+
+function formulaGeometryCorroboratesRegion(
+  doc: Doc,
+  pageIndex: number,
+  rect: Rect,
+  confidence: number,
+): boolean {
+  if (confidence < 0.45 || implausibleFormulaInk(doc, pageIndex, rect)) return false;
+  return doc.blocks.some((block) => {
+    if (block.pageIndex !== pageIndex || block.type !== 'equation') return false;
+    const overlap = intersectionArea(block.rect, rect);
+    return overlap / Math.max(1, block.rect.w * block.rect.h) >= 0.5;
+  });
+}
+
 function isAuthorBiographyPage(doc: Doc, pageIndex: number): boolean {
   const text = doc.blocks
     .filter((block) => block.pageIndex === pageIndex)
@@ -709,14 +748,15 @@ export function reconcileVisionLayout(
       const captionCorroboratesRegion = Boolean(
         vision.confidence >= 0.45
         && (vision.type === 'figure' || vision.type === 'table')
-        && captionRect
-        && caption
-        && intersectionArea(caption.rect, captionRect) / Math.max(1, caption.rect.w * caption.rect.h) >= 0.2,
+        && captionGeometryCorroboratesRegion(caption, captionRect),
       );
+      const formulaGeometryCorroborated = vision.type === 'display_formula'
+        && formulaGeometryCorroboratesRegion(doc, page.pageIndex, rect, vision.confidence);
       if (vision.confidence < minimumConfidence
         && !portraitIndices.has(regionIndex)
         && !captionCorroboratesRegion
-        && !tableGeometryCorroborated) {
+        && !tableGeometryCorroborated
+        && !formulaGeometryCorroborated) {
         unresolved.push({ pageIndex: page.pageIndex, regionIndex, type: vision.type, reason: 'low-confidence' });
         return;
       }

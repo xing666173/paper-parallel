@@ -15,7 +15,7 @@ function parseLlmJson(text) {
   if (start < 0 || end <= start) return null;
   try {
     return JSON.parse(body.slice(start, end + 1));
-  } catch (e) {
+  } catch {
     return null;
   }
 }

@@ -24,8 +24,21 @@ describe('production pipeline preparation', () => {
     expect(parseHeadingParts('V. OVERALL SYSTEM')).toEqual([
       { number: 'V', level: 1, text: 'OVERALL SYSTEM' },
     ]);
+    expect(parseHeadingParts('V. Related Work and Motivation')).toEqual([
+      { number: 'V', level: 1, text: 'Related Work and Motivation' },
+    ]);
+    expect(parseHeadingParts('I. Introduction')).toEqual([
+      { number: 'I', level: 1, text: 'Introduction' },
+    ]);
+    expect(parseHeadingParts('X. Future Work')).toEqual([
+      { number: 'X', level: 1, text: 'Future Work' },
+    ]);
     expect(parseHeadingParts('C. Evaluating zk-SNARK Workloads')).toEqual([
       { number: 'C', level: 2, text: 'Evaluating zk-SNARK Workloads' },
+    ]);
+    expect(parseHeadingParts('V. Related Work A. Prior Accelerators')).toEqual([
+      { number: 'V', level: 1, text: 'Related Work' },
+      { number: 'A', level: 2, text: 'Prior Accelerators' },
     ]);
   });
 

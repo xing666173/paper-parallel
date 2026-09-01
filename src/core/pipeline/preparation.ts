@@ -205,34 +205,34 @@ export function parseHeadingParts(source: string): ParsedHeadingPart[] {
     contentStart: number;
     number: string;
     level: 1 | 2 | 3;
-    singleLetter: boolean;
   }> = [];
-  const pattern = /(^|\s)((?:\d{1,2}(?:\.\d{1,2}){0,2})\.?|(?:[IVXLCDM]{1,8})\.?|(?:[A-Z]\.))\s+(?=[A-Za-z\u00c0-\u024f\u3400-\u9fff])/g;
+  // The alternatives must be disjoint. In particular, I/V/X are plausible
+  // single-token Roman section numbers, while C/D/L/M are overwhelmingly used
+  // as alphabetic subsection labels in papers (a paper is not expected to
+  // reach section 50, 100, 500, or 1000). Keeping the token kind in the match
+  // avoids inferring hierarchy from whether the heading text happens to be all
+  // uppercase, which misclassified title-case headings such as `V. Related Work`.
+  const pattern = /(^|\s)(?:(\d{1,2}(?:\.\d{1,2}){0,2})\.?|((?:[IVXLCDM]{2,8}|[IVX]))\.?|([A-Z])\.)(?:\s+)(?=[A-Za-z\u00c0-\u024f\u3400-\u9fff])/g;
   for (const match of normalized.matchAll(pattern)) {
     const prefix = match[1] ?? '';
-    const rawNumber = match[2]!;
-    const number = rawNumber.replace(/\.$/, '');
+    const decimalNumber = match[2];
+    const romanNumber = match[3];
+    const alphabeticNumber = match[4];
+    const number = decimalNumber ?? romanNumber ?? alphabeticNumber!;
     const start = (match.index ?? 0) + prefix.length;
-    const numericLevel = /^\d/.test(number) ? number.split('.').length : 1;
+    const numericLevel = decimalNumber ? decimalNumber.split('.').length : 1;
     matches.push({
       start,
       contentStart: (match.index ?? 0) + match[0].length,
       number,
-      level: Math.min(3, numericLevel) as 1 | 2 | 3,
-      singleLetter: /^[A-Z]\.?$/.test(rawNumber),
+      level: alphabeticNumber ? 2 : Math.min(3, numericLevel) as 1 | 2 | 3,
     });
   }
   if (!matches.length || matches[0]!.start > 0) return [{ level: 1, text: normalized }];
   return matches.flatMap((match, index) => {
     const text = normalized.slice(match.contentStart, matches[index + 1]?.start ?? normalized.length).trim();
     if (!text) return [];
-    const uppercaseLetters = text.match(/[A-Z]/g)?.length ?? 0;
-    const lowercaseLetters = text.match(/[a-z]/g)?.length ?? 0;
-    const mainRomanSingle = /^[IVX]$/.test(match.number)
-      && uppercaseLetters >= 3
-      && lowercaseLetters === 0;
-    const level = match.singleLetter && !mainRomanSingle ? 2 : match.level;
-    return [{ number: match.number, level, text }];
+    return [{ number: match.number, level: match.level, text }];
   });
 }
 
@@ -558,7 +558,7 @@ function normalizeHeadingHierarchy(
   units: SemanticUnit[],
   regions: LayoutRegion[],
 ): SemanticUnit[] {
-  let normalized = [...units];
+  const normalized = [...units];
   for (const unit of [...normalized]) {
     if (unit.kind !== 'heading' || !unit.sourceText) continue;
     const parts = parseHeadingParts(unit.sourceText);
@@ -1091,11 +1091,11 @@ function withoutScatteredMathLines(source: string): string {
       if (/^[([{'"“‘]+\s*$/.test(fragmentPrefix)) return line;
       if (shortWords.length > 0
         && shortWords.every((word) => ordinaryShortWords.has(word.toLocaleLowerCase()))) return line;
-      if (/^[+\-]?\d+(?:[.,]\d+)?%?(?:\s*(?:×|x))?\s*$/i.test(fragmentPrefix)) return line;
+      if (/^[-+]?\d+(?:[.,]\d+)?%?(?:\s*(?:×|x))?\s*$/i.test(fragmentPrefix)) return line;
       // A display expression may wrap immediately after a binary operator,
       // with its remaining terms followed by explanatory prose on this line.
       // That prefix is part of the equation, not an unrelated PDF glyph run.
-      if (/[=+\-*/]\s*$/.test(filtered[lineIndex - 1]?.trim() ?? '')) return line;
+      if (/[-=+*/]\s*$/.test(filtered[lineIndex - 1]?.trim() ?? '')) return line;
       const mathematicalPrefix = /[=+*/∑∫√≤≥≈≠⌈⌉⎧⎨⎩⎫⎬⎭λ𝑎-𝑧𝛼-𝜔α-ωΑ-Ω\d]/u.test(fragmentPrefix)
         || (shortWords.length > 0 && shortWords.every((word) => word.length === 1));
       if (!mathematicalPrefix) return line;
@@ -1971,6 +1971,9 @@ function normalizePdfNumericSpacing(source: string, allowSingleSmallCaps = false
     // U+0003) in PDF.js text. They cannot be rendered by Typst and otherwise
     // become visible replacement squares. The surrounding variable and
     // subscript remain readable; immutable source pixels retain decoration.
+    // PDF.js can expose C0 controls from embedded symbol fonts. These code
+    // points are intentionally matched and removed before Typst rendering.
+    // eslint-disable-next-line no-control-regex
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
     // PDF.js may emit a decimal point and its digits as separate glyph runs.
     // Canonicalizing only digit-surrounded punctuation keeps prose and formula
@@ -4607,14 +4610,14 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
     const bodyIds: string[] = [];
     const precedingGeometry = precedingTableGeometry(doc, captionBlock);
     const spanningGeometry = centeredSpanningTableGeometry(doc, captionBlock);
-    let top = precedingGeometry?.rect.y ?? spanningGeometry?.rect.y ?? captionBottom + 6;
+    const top = precedingGeometry?.rect.y ?? spanningGeometry?.rect.y ?? captionBottom + 6;
     let bottom: number;
-    let column = precedingGeometry
+    const column = precedingGeometry
       ? { x: precedingGeometry.rect.x, w: precedingGeometry.rect.w }
       : spanningGeometry
       ? { x: spanningGeometry.rect.x, w: spanningGeometry.rect.w }
       : visualColumnBounds(doc, captionBlock);
-    let widthMode = spanningGeometry ? 'span' as const : captionBlock.widthMode;
+    const widthMode = spanningGeometry ? 'span' as const : captionBlock.widthMode;
     if (precedingGeometry) {
       bottom = precedingGeometry.rect.y + precedingGeometry.rect.h;
     } else if (spanningGeometry) {

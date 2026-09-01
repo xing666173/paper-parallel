@@ -13,7 +13,7 @@ export interface TaskStoreDependencies {
   repository: ProjectRepository;
 }
 
-export interface AiLogEntry extends ProjectAiLogEntry {}
+export type AiLogEntry = ProjectAiLogEntry;
 
 export type TaskRunner = (signal: AbortSignal) => Promise<void>;
 

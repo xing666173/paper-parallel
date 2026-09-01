@@ -21,6 +21,8 @@ function splitSentences(text) {
   const parts = protectedText.split(/(?<=[。！？!?;；.．])\s*|\n+/);
   const out = [];
   for (const p of parts) {
+    // U+0001 is an internal sentence-splitting sentinel introduced above.
+    // eslint-disable-next-line no-control-regex
     const s = p.replace(/\u0001/g, '.').trim();
     if (s) out.push(s);
   }
@@ -212,7 +214,7 @@ async function alignBlockPair(enBlock, zhBlock, opts) {
       if (opts.spansForPair) {
         try {
           pairSpans = await opts.spansForPair({ enText, zhText, enIndices: u.enIndices, zhIndices: u.zhIndices });
-        } catch (e) {
+        } catch {
           pairSpans = [];
         }
       }
