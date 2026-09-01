@@ -11,6 +11,16 @@ interface PromptBlock {
   sourceSentences: Array<{ id: string; text: string }>;
 }
 
+function mockChineseTranslation(source: string): string {
+  // Translation prompts replace citations, numerals and other immutable
+  // tokens with PP markers.  A browser mock must behave like a translator:
+  // keep every marker exactly once while returning Chinese natural language,
+  // rather than echoing English prose that the production language gate is
+  // specifically designed to reject.
+  const protectedMarkers = Array.from(source.matchAll(/⟦[^⟧]+⟧/g), (match) => match[0]);
+  return `译文：这是用于端到端流程验证的中文内容${protectedMarkers.length ? `，保留技术标记 ${protectedMarkers.join(' ')}` : ''}。`;
+}
+
 async function mockDeepSeek(
   page: Page,
   options: {
@@ -113,7 +123,7 @@ async function mockDeepSeek(
         })
         : JSON.stringify({
           blocks: prompt.blocks.map((block, blockIndex) => {
-            const translation = `译文：${block.source}`;
+            const translation = mockChineseTranslation(block.source);
             return {
               block_id: block.blockId,
               translation,

@@ -54,6 +54,8 @@ describe('upload workflow', () => {
     expect(wrapper.text()).toContain('上传英文论文');
     expect(wrapper.text()).toContain('DeepSeek V4 Flash');
     expect(wrapper.text()).toContain('DeepSeek V4 Pro');
+    expect(wrapper.findAll('select')[0]!.findAll('option').map((option) => option.attributes('value')))
+      .not.toContain('deepseek-v4-flash-vision-exp');
     expect(wrapper.text()).not.toContain('deepseek-chat');
     expect(wrapper.text()).not.toContain('无文件合成演示');
     expect(wrapper.text()).not.toContain('版式继承');
@@ -67,6 +69,7 @@ describe('upload workflow', () => {
         return new Response(JSON.stringify({
           data: [
             { id: 'deepseek-v4-flash', object: 'model', owned_by: 'deepseek' },
+            { id: 'deepseek-v4-flash-vision-exp', object: 'model', owned_by: 'deepseek' },
             { id: 'deepseek-v4-pro', object: 'model', owned_by: 'deepseek' },
           ],
         }), { status: 200 });
@@ -137,7 +140,8 @@ describe('upload workflow', () => {
     expect(JSON.stringify(artifact)).not.toContain('sk-browser-test');
     const task = await createProjectRepository().loadTask(projectId);
     expect(task?.settings).toMatchObject({
-      modelId: 'deepseek-v4-flash', thinkingMode: 'enabled', sourceFileName: 'paper.pdf',
+      modelId: 'deepseek-v4-flash', visionModelId: 'deepseek-v4-flash-vision-exp',
+      thinkingMode: 'enabled', sourceFileName: 'paper.pdf',
       targetLayoutPolicy: 'single-column', layoutProfileVersion: 'zh-single-column-v1',
     });
     expect(JSON.stringify(task)).not.toContain('sk-browser-test');

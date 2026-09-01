@@ -33,8 +33,9 @@ import {
 import { verifyVisionPagePlan } from './planVerifier';
 import { RecoverablePipelineError } from '../task/recoverable';
 import { CachePersistenceError, persistCacheRecord } from '../project/cacheErrors';
+import { REQUIRED_VISION_MODEL_ID } from './model';
 
-export const VISION_LAYOUT_MODEL = 'deepseek-v4-flash-vision-exp';
+export const VISION_LAYOUT_MODEL = REQUIRED_VISION_MODEL_ID;
 export const VISION_RENDER_VERSION = 'pdfjs-2x-white-v1';
 export const VISION_LAYOUT_RENDER_SCALE = 2;
 export const VISION_LAYOUT_FALLBACK_RENDER_SCALE = 1.25;
@@ -42,7 +43,7 @@ export const VISION_LAYOUT_LAST_RESORT_RENDER_SCALE = 0.8;
 export const VISION_LAYOUT_RENDER_TIMEOUT_MS = 30_000;
 export const VISION_LAYOUT_REQUEST_ATTEMPTS = 2;
 export const VISION_PAGE_PLAN_PROTOCOL_VERSION = 'vision-page-plan-v1';
-export const VISION_LAYOUT_PARSER_VERSION = 'vision-layout-parser-v3';
+export const VISION_LAYOUT_PARSER_VERSION = 'vision-layout-parser-v4';
 export const VISION_LAYOUT_VERIFIER_VERSION = 'vision-plan-verifier-v1';
 export const VISION_LAYOUT_RECOVERY_VERSION = 'vision-plan-recovery-v5';
 
@@ -100,6 +101,12 @@ function renderedPageFingerprint(imageUrl: string): string {
 
 export async function analyzePdfLayoutWithVision(options: AnalyzePdfLayoutOptions): Promise<VisionPageAnalysis[]> {
   if (!options.apiKey.trim()) throw new Error('Vision Exp 版式识别需要 DeepSeek API Key');
+  const taskController = new AbortController();
+  const abortFromCaller = (): void => taskController.abort(options.signal?.reason);
+  if (options.signal?.aborted) abortFromCaller();
+  else options.signal?.addEventListener('abort', abortFromCaller, { once: true });
+  const taskSignal = taskController.signal;
+  try {
   const complete = options.complete ?? chatCompletion;
   const renderPage = options.renderPage ?? ((page, renderOptions) => renderPdfPageAsPng(page, renderOptions));
   const results: VisionPageAnalysis[] = Array.from({ length: options.pdf.numPages });
@@ -123,12 +130,12 @@ export async function analyzePdfLayoutWithVision(options: AnalyzePdfLayoutOption
 
   const renderLayoutPage = async (pageIndex: number): Promise<{ imageUrl: string; renderScale: number }> => serializeRender(async () => {
     const renderAttempt = async (scale: number): Promise<string> => {
-      if (options.signal?.aborted) throw new DOMException('已停止', 'AbortError');
+      if (taskSignal.aborted) throw new DOMException('已停止', 'AbortError');
       const page = await options.pdf.getPage(pageIndex + 1);
       try {
         return await renderPage(page, {
           scale,
-          signal: options.signal,
+          signal: taskSignal,
           timeoutMs: VISION_LAYOUT_RENDER_TIMEOUT_MS,
         });
       } finally {
@@ -145,7 +152,7 @@ export async function analyzePdfLayoutWithVision(options: AnalyzePdfLayoutOption
       try {
         return { imageUrl: await renderAttempt(scale), renderScale: scale };
       } catch (error) {
-        if (!(error instanceof PdfPageRenderTimeoutError) || options.signal?.aborted) throw error;
+        if (!(error instanceof PdfPageRenderTimeoutError) || taskSignal.aborted) throw error;
         if (index === scales.length - 1) break;
         options.onPagePhase?.({
           pageIndex,
@@ -168,7 +175,7 @@ export async function analyzePdfLayoutWithVision(options: AnalyzePdfLayoutOption
   });
 
   const analyzePage = async (pageIndex: number): Promise<void> => {
-    if (options.signal?.aborted) throw new DOMException('已停止', 'AbortError');
+    if (taskSignal.aborted) throw new DOMException('已停止', 'AbortError');
     const legacyCacheKey = buildVisionLayoutCacheKey({
       fileHash: options.fileHash,
       pageIndex,
@@ -294,12 +301,13 @@ export async function analyzePdfLayoutWithVision(options: AnalyzePdfLayoutOption
           responseFormat: 'json_object',
           maxTokens: 2_048,
           timeoutMs: 90_000,
-          signal: options.signal,
+          signal: taskSignal,
           messages: [{ role: 'user', content: [
             { type: 'text', text: `${buildVisionLayoutPrompt(pageIndex + 1)}${retryInstruction}` },
             { type: 'image_url', image_url: { url: imageUrl, detail: 'original' } },
           ] }],
         });
+        if (taskSignal.aborted) throw new DOMException('已停止', 'AbortError');
         pagePromptTokens += completion.usage.promptTokens;
         pageCompletionTokens += completion.usage.completionTokens;
         totalPromptTokens += completion.usage.promptTokens;
@@ -339,7 +347,7 @@ export async function analyzePdfLayoutWithVision(options: AnalyzePdfLayoutOption
         });
         return;
       } catch (error) {
-        if (options.signal?.aborted || (error instanceof Error && error.name === 'AbortError')) throw error;
+        if (taskSignal.aborted || (error instanceof Error && error.name === 'AbortError')) throw error;
         if (error instanceof CachePersistenceError) throw error;
         if (isNonRetryableDeepSeekAccountError(error)) throw error;
         lastError = error;
@@ -383,12 +391,25 @@ export async function analyzePdfLayoutWithVision(options: AnalyzePdfLayoutOption
       await analyzePage(pageIndex);
     }
   };
+  let firstWorkerError: unknown;
+  const guardedWorker = async (): Promise<void> => {
+    try {
+      await worker();
+    } catch (error) {
+      if (firstWorkerError === undefined) firstWorkerError = error;
+      taskController.abort(error);
+    }
+  };
   await Promise.all(Array.from(
     { length: Math.min(VISION_LAYOUT_CONCURRENCY, options.pdf.numPages) },
-    () => worker(),
+    () => guardedWorker(),
   ));
   if (options.signal?.aborted) {
     throw new DOMException('已停止', 'AbortError');
   }
+  if (firstWorkerError !== undefined) throw firstWorkerError;
   return results;
+  } finally {
+    options.signal?.removeEventListener('abort', abortFromCaller);
+  }
 }

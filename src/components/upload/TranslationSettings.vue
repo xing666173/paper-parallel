@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { DeepSeekModel } from '../../core/translate/client';
+import { REQUIRED_VISION_MODEL_LABEL } from '../../core/vision/model';
 
 defineProps<{
   models: DeepSeekModel[];
@@ -31,7 +32,7 @@ defineEmits<{
     </div>
     <div class="settings-grid">
       <label class="field">
-        <span>模型</span>
+        <span>正文翻译模型</span>
         <select :value="modelValue" @change="$emit('update:modelValue', ($event.target as HTMLSelectElement).value)">
           <option v-for="model in models" :key="model.id" :value="model.id">{{ model.label }}</option>
         </select>
@@ -58,6 +59,10 @@ defineEmits<{
         >
       </label>
     </div>
+    <p class="layout-policy-note">
+      <strong>视觉分析模型（固定）：</strong>{{ REQUIRED_VISION_MODEL_LABEL }}。
+      用于版式识别、公式恢复和最终逐页质检；与正文翻译模型分开。
+    </p>
     <p class="layout-policy-note"><strong>输出格式：</strong>英文 PDF 保持不变，中文固定重排为单栏。</p>
     <div class="connection-row">
       <label class="check-field">

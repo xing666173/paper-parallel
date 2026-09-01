@@ -54,4 +54,24 @@ describe('prepared structure invariants', () => {
     ]));
     expect(issues.every((item) => item.fingerprint)).toBe(true);
   });
+
+  it('rejects duplicate asset units, kind mismatches and multiply owned captions', () => {
+    const fixture = validFixture();
+    fixture.units.push({
+      id: 'asset-unit-2', kind: 'table', assetId: 'asset-1', protectedTokens: [],
+      layoutRegionId: 'region-1', order: 2,
+    });
+    fixture.regions[0]!.orderedUnitIds.push('asset-unit-2');
+    fixture.assets.push({
+      id: 'asset-2', kind: 'table', pageIndex: 0,
+      rect: { x: 20, y: 120, w: 100, h: 80 }, widthMode: 'column', captionUnitId: 'caption-1',
+    });
+    const codes = validatePreparedStructure({ stage: 'pre-translation', ...fixture })
+      .map((issue) => issue.code);
+    expect(codes).toEqual(expect.arrayContaining([
+      'local-structural.multiple-asset-units',
+      'local-structural.asset-kind-mismatch',
+      'local-structural.multiple-caption-owners',
+    ]));
+  });
 });

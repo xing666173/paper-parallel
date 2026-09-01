@@ -27,7 +27,7 @@ const OUTPUT_KINDS = new Set<ProjectArtifactRecord['kind']>([
 
 const PAGE_PLAN_KINDS = new Set<ProjectArtifactRecord['kind']>([
   'recovered-page-plan', 'accepted-page-plan', 'accepted-document-plan',
-  'vision-correction-patch', 'vision-diagnostic',
+  'vision-correction-patch',
 ]);
 
 function intersects(left: readonly number[] | undefined, right: ReadonlySet<number>): boolean {
@@ -55,8 +55,6 @@ export function computeInvalidationPlan(
     }
     if (facets.has('asset-geometry')) {
       if (artifact.kind === 'formula-ocr'
-        && (pages.size === 0 || intersects(artifact.dependencies?.pageIndices, pages))) return [artifact.key];
-      if (artifact.kind === 'vision-diagnostic'
         && (pages.size === 0 || intersects(artifact.dependencies?.pageIndices, pages))) return [artifact.key];
     }
     return [];

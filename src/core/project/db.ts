@@ -17,6 +17,8 @@ export interface ProjectAiLogEntry {
   completionTokens?: number;
   networkAttempts?: number;
   errorCode?: string;
+  regionType?: 'figure' | 'table' | 'display_formula' | 'code' | 'page';
+  repairAction?: 'adjust-geometry' | 'adjust-caption' | 'adjust-reading-order' | 'add-or-remove-region';
   message: string;
 }
 

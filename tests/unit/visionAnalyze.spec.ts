@@ -153,6 +153,43 @@ describe('vision: pre-layout analysis', () => {
     expect(maxActive).toBe(2);
   });
 
+  it('aborts sibling workers after the first terminal failure and blocks late cache writes', async () => {
+    const page = { getViewport: () => ({ width: 1, height: 1 }), render: () => ({ promise: Promise.resolve() }) };
+    let releaseSecond!: () => void;
+    const secondPending = new Promise<void>((resolve) => { releaseSecond = resolve; });
+    let markSecondStarted!: () => void;
+    const secondStarted = new Promise<void>((resolve) => { markSecondStarted = resolve; });
+    let secondSignal: AbortSignal | undefined;
+    const savedPages: number[] = [];
+    const completedPages: number[] = [];
+    const run = analyzePdfLayoutWithVision({
+      pdf: { numPages: 2, getPage: async () => page },
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test', fileHash: 'sha256:cancel-siblings',
+      renderPage: async () => 'data:image/png;base64,PAGE',
+      complete: async (request: any) => {
+        const pageNumber = Number(request.messages[0].content[0].text.match(/source page (\d+)/)?.[1] ?? '0');
+        if (pageNumber === 1) {
+          await secondStarted;
+          throw new Error('DeepSeek HTTP 401');
+        }
+        secondSignal = request.signal;
+        markSecondStarted();
+        await secondPending; // Deliberately ignores AbortSignal like a non-cooperative provider shim.
+        return {
+          content: JSON.stringify({ page: pageNumber, layout: 'single', regions: [] }),
+          usage: { promptTokens: 1, completionTokens: 1 },
+        };
+      },
+      saveCached: async (_key, pageIndex) => { savedPages.push(pageIndex); },
+      onPage: ({ pageIndex }) => completedPages.push(pageIndex),
+    });
+    await vi.waitFor(() => expect(secondSignal?.aborted).toBe(true));
+    releaseSecond();
+    await expect(run).rejects.toThrow('DeepSeek HTTP 401');
+    expect(savedPages).toEqual([]);
+    expect(completedPages).toEqual([]);
+  });
+
   it('retries an invalid Vision response and caches only the validated result', async () => {
     const phases: string[] = [];
     const saved: unknown[] = [];

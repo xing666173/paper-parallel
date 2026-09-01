@@ -119,6 +119,7 @@ function readerRepository(task?: TaskSnapshot): ProjectRepository {
     putArtifact: vi.fn(),
     findArtifact: vi.fn(async (key: string) => artifacts.get(key)),
     saveAlignmentManifest: vi.fn(),
+    commitValidatedOutputs: vi.fn(),
     loadAlignmentManifest: vi.fn(async () => ({
       schemaVersion: 1, projectId: 'p1', createdAt: 1, units: [],
       stats: { total: 0, aligned: 0, lowConfidence: 0, unmatched: 0, coverage: 1 },

@@ -1,6 +1,7 @@
 import JSZip from 'jszip';
 import { hashBlob } from '../assets/hash';
 import { SYSTEM_PROMPT_VERSION } from '../translate/prompts';
+import { REQUIRED_VISION_MODEL_ID } from '../vision/model';
 import type { ProjectRepository } from './repository';
 
 export interface ProjectPackageContext {
@@ -8,6 +9,7 @@ export interface ProjectPackageContext {
     name?: string;
     sourceFileHash?: string;
     modelId?: string;
+    visionModelId?: string;
     thinkingMode?: 'enabled' | 'disabled';
     targetLayoutPolicy?: 'single-column' | 'source-layout';
     layoutProfileVersion?: string;
@@ -79,6 +81,9 @@ export async function buildProjectPackage(
     updatedAt: task?.updatedAt ?? Math.max(english.updatedAt, chinese.updatedAt),
     promptVersion: SYSTEM_PROMPT_VERSION,
     modelId: context.project?.modelId ?? task?.settings?.modelId ?? null,
+    visionModelId: context.project?.visionModelId
+      ?? task?.settings?.visionModelId
+      ?? REQUIRED_VISION_MODEL_ID,
     thinkingMode: context.project?.thinkingMode ?? task?.settings?.thinkingMode ?? null,
     targetLayoutPolicy: context.project?.targetLayoutPolicy
       ?? task?.settings?.targetLayoutPolicy

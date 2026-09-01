@@ -53,6 +53,7 @@ function hasOrderCycle(plan: VisionPagePlan): boolean {
 export function verifyVisionPagePlan(plan: VisionPagePlan): VisionPlanValidationIssue[] {
   const issues: VisionPlanValidationIssue[] = [];
   const ids = new Set<string>();
+  const supportedRegionTypes = new Set(['figure', 'table', 'display_formula', 'code']);
   for (const region of plan.regions) {
     if (ids.has(region.id)) {
       issues.push({
@@ -62,6 +63,14 @@ export function verifyVisionPagePlan(plan: VisionPagePlan): VisionPlanValidation
       });
     }
     ids.add(region.id);
+    if (!supportedRegionTypes.has(region.type)) {
+      issues.push({
+        stage: 'source-plan', code: 'source-plan.unsupported-region-type', severity: 'error',
+        pageIndex: plan.pageIndex, regionId: region.id, reason: '视觉页面计划包含非不可变资产区域',
+        actual: region.type, threshold: 'figure|table|display_formula|code',
+        allowedFields: [], fingerprint: fingerprint([plan.pageIndex, 'unsupported-region-type', region.id, region.type]),
+      });
+    }
     if (!validBox(region.bbox)) {
       issues.push({
         stage: 'source-plan', code: 'source-plan.invalid-bbox', severity: 'error',

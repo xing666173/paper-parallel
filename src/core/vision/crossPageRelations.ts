@@ -30,8 +30,20 @@ export interface CrossPageAssetGroup extends CrossPageAssetCandidate {
   status: 'validated';
 }
 
+export interface AcceptedDocumentPlan {
+  schemaVersion: 1;
+  documentPlanDigest: string;
+  pagePlanDigests: Array<{ pageIndex: number; planDigest: string }>;
+  crossPageAssetGroups: CrossPageAssetGroup[];
+}
+
 export interface CrossPageRelationIssue {
-  code: 'cross-page.insufficient-evidence' | 'cross-page.invalid-members' | 'cross-page.unknown-region';
+  code:
+    | 'cross-page.insufficient-evidence'
+    | 'cross-page.invalid-members'
+    | 'cross-page.unknown-region'
+    | 'cross-page.multiple-group-membership'
+    | 'cross-page.invalid-caption-owner';
   candidateIndex: number;
   message: string;
 }
@@ -46,8 +58,17 @@ export function inferCrossPageAssetCandidates(
   plans: readonly VisionPagePlan[],
 ): CrossPageAssetCandidate[] {
   const byPage = new Map(plans.map((plan) => [plan.pageIndex, plan]));
-  const candidates: CrossPageAssetCandidate[] = [];
-  const used = new Set<string>();
+  type Link = {
+    tailPageIndex: number;
+    tail: VisionPagePlan['regions'][number];
+    headPageIndex: number;
+    head: VisionPagePlan['regions'][number];
+    geometryDistance: number;
+    hintCompatible: boolean;
+    weakEvidence: WeakCrossPageEvidence[];
+    strongEvidence?: CrossPageAssetCandidate['strongEvidence'];
+  };
+  const possibleLinks: Link[] = [];
   for (const plan of [...plans].sort((left, right) => left.pageIndex - right.pageIndex)) {
     const next = byPage.get(plan.pageIndex + 1);
     if (!next) continue;
@@ -58,9 +79,7 @@ export function inferCrossPageAssetCandidates(
       ['figure', 'table', 'code'].includes(region.type) && region.bbox[1] <= 120
     ));
     for (const tail of tails) {
-      const compatible = heads
-        .filter((head) => head.type === tail.type && !used.has(`${next.pageIndex}:${head.id}`))
-        .map((head) => {
+      for (const head of heads.filter((candidate) => candidate.type === tail.type)) {
           const sameColumn = head.column === tail.column;
           const geometryDistance = Math.abs(head.bbox[0] - tail.bbox[0])
             + Math.abs(head.bbox[2] - tail.bbox[2]);
@@ -74,7 +93,10 @@ export function inferCrossPageAssetCandidates(
           if (sameColumn) weakEvidence.push('same-column');
           if (geometryDistance <= 100) weakEvidence.push('graphic-continuity');
           if (tail.type === 'table' && sameLabel) weakEvidence.push('repeated-table-header');
-          return {
+          const link: Link = {
+            tailPageIndex: plan.pageIndex,
+            tail,
+            headPageIndex: next.pageIndex,
             head,
             geometryDistance,
             hintCompatible,
@@ -85,33 +107,79 @@ export function inferCrossPageAssetCandidates(
                 ? 'same-numbered-caption' as const
                 : undefined,
           };
-        })
-        // Automatic inference is deliberately stricter than validating an
-        // explicit Exp candidate: without a visible continued label, require
-        // page-edge, column and graphic continuity together.
-        .filter((candidate) => candidate.strongEvidence
-          || new Set(candidate.weakEvidence).size >= (candidate.hintCompatible ? 2 : 3))
-        .sort((left, right) => (
-          Number(right.hintCompatible) - Number(left.hintCompatible)
-          || left.geometryDistance - right.geometryDistance
-        ))[0];
-      if (!compatible) continue;
-      used.add(`${plan.pageIndex}:${tail.id}`);
-      used.add(`${next.pageIndex}:${compatible.head.id}`);
-      candidates.push({
-        kind: tail.type as CrossPageAssetCandidate['kind'],
-        members: [
-          { pageIndex: plan.pageIndex, regionId: tail.id, role: 'head' },
-          { pageIndex: next.pageIndex, regionId: compatible.head.id, role: 'tail' },
-        ],
-        ...(compatible.strongEvidence ? { strongEvidence: compatible.strongEvidence } : {}),
-        weakEvidence: compatible.weakEvidence,
-        provenance: [
-          'local-page-edge-inference',
-          ...(compatible.hintCompatible ? ['exp-page-continuation-proposal'] : []),
-        ],
-      });
+          // Automatic inference is deliberately stricter than validating an
+          // explicit Exp candidate: without a visible continued label, require
+          // page-edge, column and graphic continuity together.
+          if (link.strongEvidence
+            || new Set(link.weakEvidence).size >= (link.hintCompatible ? 2 : 3)) {
+            possibleLinks.push(link);
+          }
+      }
     }
+  }
+
+  // Select a deterministic one-to-one edge matching.  A region may be the
+  // head of one edge and the tail of the next edge, which is what allows a
+  // table or algorithm to span three or more pages without being split into
+  // overlapping two-page groups.
+  possibleLinks.sort((left, right) => (
+    Number(Boolean(right.strongEvidence)) - Number(Boolean(left.strongEvidence))
+    || Number(right.hintCompatible) - Number(left.hintCompatible)
+    || new Set(right.weakEvidence).size - new Set(left.weakEvidence).size
+    || left.geometryDistance - right.geometryDistance
+    || left.tailPageIndex - right.tailPageIndex
+    || left.tail.id.localeCompare(right.tail.id)
+    || left.head.id.localeCompare(right.head.id)
+  ));
+  const outgoing = new Map<string, Link>();
+  const incoming = new Set<string>();
+  for (const link of possibleLinks) {
+    const tailKey = `${link.tailPageIndex}:${link.tail.id}`;
+    const headKey = `${link.headPageIndex}:${link.head.id}`;
+    if (outgoing.has(tailKey) || incoming.has(headKey)) continue;
+    outgoing.set(tailKey, link);
+    incoming.add(headKey);
+  }
+
+  const candidates: CrossPageAssetCandidate[] = [];
+  const visited = new Set<string>();
+  for (const [startKey] of [...outgoing.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+    if (incoming.has(startKey) || visited.has(startKey)) continue;
+    const chain: Link[] = [];
+    let currentKey: string | undefined = startKey;
+    while (currentKey) {
+      const link = outgoing.get(currentKey);
+      if (!link || visited.has(currentKey)) break;
+      visited.add(currentKey);
+      chain.push(link);
+      currentKey = `${link.headPageIndex}:${link.head.id}`;
+    }
+    if (!chain.length) continue;
+    const first = chain[0]!;
+    const regions = [first.tail, ...chain.map((link) => link.head)];
+    const pageIndices = [first.tailPageIndex, ...chain.map((link) => link.headPageIndex)];
+    const captionIndex = regions.findIndex((region) => (
+      Boolean(normalizedLabel(region.visibleLabel)) && region.captionPosition !== 'none'
+    ));
+    const strongEvidence = chain.find((link) => link.strongEvidence)?.strongEvidence;
+    candidates.push({
+      kind: first.tail.type as CrossPageAssetCandidate['kind'],
+      members: regions.map((region, index) => ({
+        pageIndex: pageIndices[index]!,
+        regionId: region.id,
+        role: index === 0 ? 'head' : index === regions.length - 1 ? 'tail' : 'continuation',
+      })),
+      ...(captionIndex >= 0 ? {
+        captionPageIndex: pageIndices[captionIndex],
+        captionAnchor: normalizedLabel(regions[captionIndex]!.visibleLabel),
+      } : {}),
+      ...(strongEvidence ? { strongEvidence } : {}),
+      weakEvidence: [...new Set(chain.flatMap((link) => link.weakEvidence))],
+      provenance: [
+        'local-page-edge-inference',
+        ...(chain.some((link) => link.hintCompatible) ? ['exp-page-continuation-proposal'] : []),
+      ],
+    });
   }
   return candidates;
 }
@@ -129,8 +197,18 @@ export function digestAcceptedDocumentPlan(
   plans: readonly VisionPagePlan[],
   groups: readonly CrossPageAssetGroup[],
 ): string {
+  return digestAcceptedDocumentPlanParts(
+    plans.map((plan) => ({ pageIndex: plan.pageIndex, planDigest: plan.planDigest })),
+    groups,
+  );
+}
+
+function digestAcceptedDocumentPlanParts(
+  pagePlanDigests: readonly { pageIndex: number; planDigest: string }[],
+  groups: readonly CrossPageAssetGroup[],
+): string {
   const normalized = {
-    pages: [...plans]
+    pages: [...pagePlanDigests]
       .sort((left, right) => left.pageIndex - right.pageIndex)
       .map((plan) => ({ pageIndex: plan.pageIndex, planDigest: plan.planDigest })),
     crossPageAssetGroups: [...groups]
@@ -148,6 +226,131 @@ export function digestAcceptedDocumentPlan(
   return stableHash(JSON.stringify(normalized));
 }
 
+/** Strictly reconstructs a persisted document plan before it influences invalidation or commits. */
+export function parseAcceptedDocumentPlan(value: unknown): AcceptedDocumentPlan {
+  const root = documentPlanRecord(value, 'documentPlan');
+  documentPlanKeys(root, [
+    'schemaVersion', 'documentPlanDigest', 'pagePlanDigests', 'crossPageAssetGroups',
+  ], 'documentPlan');
+  if (root.schemaVersion !== 1
+    || !Array.isArray(root.pagePlanDigests) || root.pagePlanDigests.length > 10_000
+    || !Array.isArray(root.crossPageAssetGroups) || root.crossPageAssetGroups.length > 1_000) {
+    throw new Error('文档页面计划版本或数组字段无效');
+  }
+  const pagePlanDigests = root.pagePlanDigests.map((value, index) => {
+    const item = documentPlanRecord(value, `pagePlanDigests[${index}]`);
+    documentPlanKeys(item, ['pageIndex', 'planDigest'], `pagePlanDigests[${index}]`);
+    if (!Number.isInteger(item.pageIndex) || (item.pageIndex as number) < 0) {
+      throw new Error(`文档页面计划 pagePlanDigests[${index}].pageIndex 无效`);
+    }
+    return {
+      pageIndex: item.pageIndex as number,
+      planDigest: documentPlanText(item.planDigest, `pagePlanDigests[${index}].planDigest`, 160),
+    };
+  });
+  if (new Set(pagePlanDigests.map((item) => item.pageIndex)).size !== pagePlanDigests.length) {
+    throw new Error('文档页面计划包含重复页面');
+  }
+  const groups = root.crossPageAssetGroups.map((value, index): CrossPageAssetGroup => {
+    const item = documentPlanRecord(value, `crossPageAssetGroups[${index}]`);
+    documentPlanKeys(item, [
+      'id', 'status', 'kind', 'members', 'captionPageIndex', 'captionAnchor',
+      'strongEvidence', 'weakEvidence', 'provenance',
+    ], `crossPageAssetGroups[${index}]`);
+    if (item.status !== 'validated' || !['figure', 'table', 'code'].includes(String(item.kind))
+      || !Array.isArray(item.members) || item.members.length < 2 || item.members.length > 1_000
+      || !Array.isArray(item.weakEvidence) || !Array.isArray(item.provenance)) {
+      throw new Error(`文档页面计划 crossPageAssetGroups[${index}] 字段无效`);
+    }
+    const members = item.members.map((value, memberIndex): CrossPageAssetCandidateMember => {
+      const member = documentPlanRecord(value, `crossPageAssetGroups[${index}].members[${memberIndex}]`);
+      documentPlanKeys(member, ['pageIndex', 'regionId', 'role'], `crossPageAssetGroups[${index}].members[${memberIndex}]`);
+      if (!Number.isInteger(member.pageIndex) || (member.pageIndex as number) < 0
+        || !['head', 'continuation', 'tail'].includes(String(member.role))) {
+        throw new Error(`文档页面计划 crossPageAssetGroups[${index}].members[${memberIndex}] 无效`);
+      }
+      return {
+        pageIndex: member.pageIndex as number,
+        regionId: documentPlanText(member.regionId, `crossPageAssetGroups[${index}].members[${memberIndex}].regionId`, 160),
+        role: member.role as CrossPageMemberRole,
+      };
+    });
+    const pages = members.map((member) => member.pageIndex);
+    if (members[0]?.role !== 'head' || members.at(-1)?.role !== 'tail'
+      || members.slice(1, -1).some((member) => member.role !== 'continuation')
+      || pages.some((page, pageIndex) => pageIndex > 0 && page !== pages[pageIndex - 1]! + 1)) {
+      throw new Error(`文档页面计划 crossPageAssetGroups[${index}] 成员顺序无效`);
+    }
+    const weakEvidence = item.weakEvidence.map((evidence, evidenceIndex) => documentPlanEnum(
+      evidence,
+      ['page-edge-continuity', 'repeated-table-header', 'same-column', 'text-anchor-continuity', 'graphic-continuity'] as const,
+      `crossPageAssetGroups[${index}].weakEvidence[${evidenceIndex}]`,
+    ));
+    const captionPageIndex = item.captionPageIndex;
+    if (captionPageIndex !== undefined
+      && (!Number.isInteger(captionPageIndex) || !pages.includes(captionPageIndex as number))) {
+      throw new Error(`文档页面计划 crossPageAssetGroups[${index}].captionPageIndex 无效`);
+    }
+    return {
+      id: documentPlanText(item.id, `crossPageAssetGroups[${index}].id`, 200),
+      status: 'validated',
+      kind: item.kind as CrossPageAssetGroup['kind'],
+      members,
+      ...(captionPageIndex === undefined ? {} : { captionPageIndex: captionPageIndex as number }),
+      ...(item.captionAnchor === undefined ? {} : {
+        captionAnchor: documentPlanText(item.captionAnchor, `crossPageAssetGroups[${index}].captionAnchor`, 240),
+      }),
+      ...(item.strongEvidence === undefined ? {} : {
+        strongEvidence: documentPlanEnum(
+          item.strongEvidence,
+          ['continued-label', 'same-numbered-caption'] as const,
+          `crossPageAssetGroups[${index}].strongEvidence`,
+        ),
+      }),
+      weakEvidence,
+      provenance: item.provenance.map((entry, entryIndex) => documentPlanText(
+        entry, `crossPageAssetGroups[${index}].provenance[${entryIndex}]`, 160,
+      )),
+    };
+  });
+  const claimed = new Set<string>();
+  for (const group of groups) {
+    for (const member of group.members) {
+      const key = `${member.pageIndex}:${member.regionId}`;
+      if (claimed.has(key)) throw new Error(`文档页面计划跨页成员重复归属 ${key}`);
+      claimed.add(key);
+    }
+  }
+  const documentPlanDigest = documentPlanText(root.documentPlanDigest, 'documentPlan.documentPlanDigest', 160);
+  if (digestAcceptedDocumentPlanParts(pagePlanDigests, groups) !== documentPlanDigest) {
+    throw new Error('文档页面计划摘要不一致');
+  }
+  return { schemaVersion: 1, documentPlanDigest, pagePlanDigests, crossPageAssetGroups: groups };
+}
+
+function documentPlanRecord(value: unknown, path: string): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`文档页面计划 ${path} 必须为对象`);
+  return value as Record<string, unknown>;
+}
+
+function documentPlanKeys(value: Record<string, unknown>, allowed: readonly string[], path: string): void {
+  const keys = new Set(allowed);
+  const unknown = Object.keys(value).find((key) => !keys.has(key));
+  if (unknown) throw new Error(`文档页面计划 ${path} 包含未知字段 ${unknown}`);
+}
+
+function documentPlanText(value: unknown, path: string, maxLength: number): string {
+  if (typeof value !== 'string' || !value.trim() || value.length > maxLength) {
+    throw new Error(`文档页面计划 ${path} 字符串无效`);
+  }
+  return value;
+}
+
+function documentPlanEnum<T extends string>(value: unknown, allowed: readonly T[], path: string): T {
+  if (typeof value !== 'string' || !allowed.includes(value as T)) throw new Error(`文档页面计划 ${path} 枚举无效`);
+  return value as T;
+}
+
 export function validateCrossPageAssetCandidates(
   plans: readonly VisionPagePlan[],
   candidates: readonly CrossPageAssetCandidate[],
@@ -158,6 +361,7 @@ export function validateCrossPageAssetCandidates(
   ] as const)));
   const groups: CrossPageAssetGroup[] = [];
   const issues: CrossPageRelationIssue[] = [];
+  const claimedMembers = new Map<string, number>();
   candidates.forEach((candidate, candidateIndex) => {
     const members = [...candidate.members].sort((left, right) => left.pageIndex - right.pageIndex);
     const uniquePages = new Set(members.map((member) => member.pageIndex));
@@ -188,6 +392,22 @@ export function validateCrossPageAssetCandidates(
       });
       return;
     }
+    const duplicateMembership = members.find((member) => claimedMembers.has(`${member.pageIndex}:${member.regionId}`));
+    if (duplicateMembership) {
+      issues.push({
+        code: 'cross-page.multiple-group-membership', candidateIndex,
+        message: `跨页资产区域 ${duplicateMembership.regionId} 已属于另一个候选组`,
+      });
+      return;
+    }
+    if (candidate.captionPageIndex !== undefined
+      && !members.some((member) => member.pageIndex === candidate.captionPageIndex)) {
+      issues.push({
+        code: 'cross-page.invalid-caption-owner', candidateIndex,
+        message: '跨页资产标题页必须属于该组成员页面',
+      });
+      return;
+    }
     const independentWeakEvidence = new Set(candidate.weakEvidence);
     if (!candidate.strongEvidence && independentWeakEvidence.size < 2) {
       issues.push({
@@ -206,6 +426,7 @@ export function validateCrossPageAssetCandidates(
       id: `cross-page-${candidate.kind}-${stableHash(identity)}`,
       status: 'validated',
     });
+    members.forEach((member) => claimedMembers.set(`${member.pageIndex}:${member.regionId}`, candidateIndex));
   });
   return { groups, issues };
 }

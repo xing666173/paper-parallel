@@ -139,4 +139,34 @@ describe('project repository', () => {
       'alignment-manifest', 'quality-report', 'project-package',
     ]) expect(await repo.findArtifact(`a:${kind}`)).toBeUndefined();
   });
+
+  it('atomically commits formal outputs only against the current accepted document plan', async () => {
+    const repo = createTestRepository();
+    await repo.putArtifact({
+      key: 'a:accepted-document-plan', projectId: 'a', kind: 'accepted-document-plan',
+      blob: new Blob(['{}'], { type: 'application/json' }), updatedAt: 1,
+      dependencies: { planVersion: 'document-plan-current' },
+    });
+    const artifacts = [{
+      key: 'a:chinese-pdf', projectId: 'a', kind: 'chinese-pdf' as const,
+      blob: new Blob(['%PDF-new']), updatedAt: 2,
+    }];
+    const manifest = {
+      schemaVersion: 1 as const, projectId: 'a', createdAt: 2, units: [],
+      stats: { total: 0, aligned: 0, lowConfidence: 0, unmatched: 0, coverage: 1 },
+    };
+    await expect(repo.commitValidatedOutputs({
+      projectId: 'a', expectedDocumentPlanDigest: 'document-plan-stale', artifacts, manifest,
+    })).rejects.toThrow('页面计划已经变化');
+    expect(await repo.findArtifact('a:chinese-pdf')).toBeUndefined();
+    expect(await repo.findArtifact('a:alignment-manifest')).toBeUndefined();
+
+    await repo.commitValidatedOutputs({
+      projectId: 'a', expectedDocumentPlanDigest: 'document-plan-current', artifacts, manifest,
+    });
+    expect((await repo.findArtifact('a:chinese-pdf'))?.dependencies?.planVersion)
+      .toBe('document-plan-current');
+    expect((await repo.findArtifact('a:alignment-manifest'))?.dependencies?.planVersion)
+      .toBe('document-plan-current');
+  });
 });

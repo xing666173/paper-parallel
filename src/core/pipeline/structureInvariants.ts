@@ -16,7 +16,11 @@ export interface StructureInvariantIssue {
     | 'local-structural.region-owner-mismatch'
     | 'local-structural.missing-asset-record'
     | 'local-structural.missing-asset-unit'
+    | 'local-structural.multiple-asset-units'
+    | 'local-structural.asset-kind-mismatch'
     | 'local-structural.missing-caption-unit'
+    | 'local-structural.invalid-caption-unit-kind'
+    | 'local-structural.multiple-caption-owners'
     | 'local-structural.marker-namespace-collision';
   severity: 'error';
   entityType: 'unit' | 'region' | 'asset' | 'caption' | 'marker-namespace';
@@ -154,10 +158,26 @@ export function validatePreparedStructure(
     }
   }
   for (const asset of input.assets) {
-    if (!input.units.some((unit) => unit.assetId === asset.id)) {
+    const assetUnits = input.units.filter((unit) => unit.assetId === asset.id);
+    if (!assetUnits.length) {
       issues.push(issue({
         stage: input.stage, code: 'local-structural.missing-asset-unit', entityType: 'asset',
         entityId: asset.id, message: `不可变资产 ${asset.id} 没有对应语义单元`,
+      }));
+    }
+    if (assetUnits.length > 1) {
+      issues.push(issue({
+        stage: input.stage, code: 'local-structural.multiple-asset-units', entityType: 'asset',
+        entityId: asset.id, firstSource: assetUnits[0]!.id, conflictSource: assetUnits[1]!.id,
+        message: `不可变资产 ${asset.id} 被多个语义单元引用`,
+      }));
+    }
+    const mismatchedUnit = assetUnits.find((unit) => unit.kind !== asset.kind);
+    if (mismatchedUnit) {
+      issues.push(issue({
+        stage: input.stage, code: 'local-structural.asset-kind-mismatch', entityType: 'asset',
+        entityId: asset.id, firstSource: asset.kind, conflictSource: `${mismatchedUnit.id}:${mismatchedUnit.kind}`,
+        message: `不可变资产 ${asset.id} 与语义单元 ${mismatchedUnit.id} 类型不一致`,
       }));
     }
     if (asset.captionUnitId && !units.has(asset.captionUnitId)) {
@@ -166,7 +186,32 @@ export function validatePreparedStructure(
         entityId: asset.captionUnitId, conflictSource: asset.id,
         message: `不可变资产 ${asset.id} 引用不存在的标题单元 ${asset.captionUnitId}`,
       }));
+    } else if (asset.captionUnitId) {
+      const caption = units.get(asset.captionUnitId)!;
+      if (caption.kind !== 'caption' && caption.kind !== 'table-title') {
+        issues.push(issue({
+          stage: input.stage, code: 'local-structural.invalid-caption-unit-kind', entityType: 'caption',
+          entityId: asset.captionUnitId, firstSource: caption.kind, conflictSource: asset.id,
+          message: `不可变资产 ${asset.id} 的标题引用不是 caption 或 table-title 单元`,
+        }));
+      }
     }
+  }
+
+  const captionOwners = new Map<string, string[]>();
+  for (const asset of input.assets) {
+    if (!asset.captionUnitId) continue;
+    const owners = captionOwners.get(asset.captionUnitId) ?? [];
+    owners.push(asset.id);
+    captionOwners.set(asset.captionUnitId, owners);
+  }
+  for (const [captionId, owners] of captionOwners) {
+    if (owners.length < 2) continue;
+    issues.push(issue({
+      stage: input.stage, code: 'local-structural.multiple-caption-owners', entityType: 'caption',
+      entityId: captionId, firstSource: owners[0], conflictSource: owners[1],
+      message: `标题单元 ${captionId} 同时属于多个不可变资产`,
+    }));
   }
 
   const namespaces = new Map<string, string>();

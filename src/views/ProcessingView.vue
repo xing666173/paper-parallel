@@ -16,6 +16,8 @@ import type { TaskSnapshot } from '../types/models';
 import { resetTaskForSingleColumnLayout, usesCurrentSingleColumnLayout } from '../core/layout/profile';
 import type { QualityReport, SourceLayoutQualityReport } from '../core/quality/report';
 import type { StructureDiagnosticReport } from '../core/quality/structureDiagnostic';
+import { parseAcceptedDocumentPlan } from '../core/vision/crossPageRelations';
+import { expandVisionReanalysisPages } from '../core/vision/reanalysis';
 
 const route = useRoute();
 const router = useRouter();
@@ -148,17 +150,32 @@ async function resumePausedTask() {
     return;
   }
   if (store.current.pauseReason === 'vision-correction-budget-exhausted') {
-    const failedPages = visionDiagnostic.value?.unresolvedIssues.map((issue) => issue.pageIndex) ?? [];
-    const affectedPages = new Set(failedPages);
-    for (const group of visionDiagnostic.value?.crossPageAssetGroups ?? []) {
-      if (group.members.some((member) => affectedPages.has(member.pageIndex))) {
-        group.members.forEach((member) => affectedPages.add(member.pageIndex));
+    const failedPages = [
+      ...(visionDiagnostic.value?.unresolvedIssues.map((issue) => issue.pageIndex) ?? []),
+      ...(store.current.visionAttempt?.failedPages ?? []),
+      ...(store.current.visionAttempt?.pageIndex === undefined ? [] : [store.current.visionAttempt.pageIndex]),
+    ];
+    let crossPageGroups = visionDiagnostic.value?.crossPageAssetGroups ?? [];
+    const acceptedDocumentPlan = await repository.findArtifact(`${projectId.value}:accepted-document-plan`);
+    if (acceptedDocumentPlan) {
+      try {
+        crossPageGroups = parseAcceptedDocumentPlan(
+          JSON.parse(await acceptedDocumentPlan.blob.text()),
+        ).crossPageAssetGroups;
+      } catch {
+        // A stale/corrupt document plan is never trusted for expansion. The
+        // failed page itself is still invalidated from the persisted attempt.
       }
+    }
+    const affectedPages = expandVisionReanalysisPages(failedPages, crossPageGroups);
+    if (!affectedPages.length) {
+      loadError.value = '无法确定需要重新分析的失败页面；已保留现有缓存，请导出诊断后重试。';
+      return;
     }
     await repository.invalidateProjectDependencies({
       projectId: projectId.value,
-      facets: ['page-plan', 'cross-page-group'],
-      pageIndices: [...affectedPages],
+      facets: ['page-plan', 'asset-geometry', 'caption-link', 'cross-page-group'],
+      pageIndices: affectedPages,
     });
     visionDiagnostic.value = undefined;
     const settings = store.current.settings ? { ...store.current.settings } : undefined;
@@ -278,6 +295,10 @@ onBeforeRouteLeave(() => {
             {{ visionDiagnostic.initialAnalysisCalls ?? 0 }} · 纠错调用
             {{ visionDiagnostic.correctionCallsUsed }} / {{ visionDiagnostic.maxCorrectionCalls }}
             · token {{ visionDiagnostic.promptTokens + visionDiagnostic.completionTokens }}
+            <template v-if="visionDiagnostic.runHistory?.length">
+              · 已保留 {{ visionDiagnostic.runHistory.length }} 次历史运行（纠错调用
+              {{ visionDiagnostic.runHistory.reduce((sum, run) => sum + run.correctionCallsUsed, 0) }}）
+            </template>
           </span>
           <button class="button secondary" type="button" @click="downloadVisionDiagnostic">导出诊断报告</button>
         </div>

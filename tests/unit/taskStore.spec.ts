@@ -248,11 +248,13 @@ describe('project task store', () => {
       type: 'vision-correction-started', at: 11, page: 2, totalPages: 4,
       round: 1, correctionCallsUsed: 1, maxCorrectionCalls: 4,
       errorCode: 'source-plan.caption-overlap',
+      regionType: 'table', repairAction: 'adjust-caption',
     });
     store.recordAiEvent({
       type: 'vision-correction-completed', at: 12, page: 2, totalPages: 4,
       round: 1, correctionCallsUsed: 1, maxCorrectionCalls: 4,
       promptTokens: 120, completionTokens: 30,
+      regionType: 'table', repairAction: 'adjust-caption',
     });
 
     await store.safeStop(13);

@@ -316,6 +316,10 @@ export interface VisionAttemptState {
   maxCorrectionCalls: number;
   promptTokens: number;
   completionTokens: number;
+  regionType?: 'figure' | 'table' | 'display_formula' | 'code' | 'page';
+  repairAction?: 'adjust-geometry' | 'adjust-caption' | 'adjust-reading-order' | 'add-or-remove-region';
+  roundPromptTokens?: number;
+  roundCompletionTokens?: number;
   errorCode?: string;
   errorMessage?: string;
 }
@@ -339,7 +343,10 @@ export interface TaskSnapshot {
   pauseReason?: RecoverablePauseReason;
   visionAttempt?: VisionAttemptState;
   settings?: {
+    /** User-selected model for natural-language translation only. */
     modelId: string;
+    /** Fixed formal visual-analysis/review model, persisted for reproducibility. */
+    visionModelId?: string;
     thinkingMode: 'enabled' | 'disabled';
     sourceFileName: string;
     sourceFileHash: string;

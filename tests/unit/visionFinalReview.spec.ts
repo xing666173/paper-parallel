@@ -54,7 +54,6 @@ describe('vision: final PDF review', () => {
   it('derives failure from a confident visibly clipped finding instead of trusting a model pass flag', () => {
     const report = parseVisionFinalPageReport({
       target_page: 1,
-      pass: true,
       issues: [{
         type: 'clipped_text', severity: 'severe', bbox: [0, 0, 1000, 1000],
         confidence: 0.98, evidence: 'Text strokes are cut at the page boundary.',
@@ -183,25 +182,24 @@ describe('vision: final PDF review', () => {
     expect(issue?.evidence).toBe('overlap（模型未提供说明）');
   });
 
-  it('accepts a valid JSON object wrapped in incidental model prose', () => {
-    const report = parseVisionFinalPageReport(
-      'Here is the requested result:\n```json\n{"target_page":1,"issues":[]}\n```\nDone.',
-      0,
-    );
-    expect(report).toEqual({ targetPageIndex: 0, pass: true, issues: [] });
+  it('accepts a complete JSON fence but rejects prose wrappers and unknown fields', () => {
+    expect(parseVisionFinalPageReport('```json\n{"target_page":1,"issues":[]}\n```', 0))
+      .toEqual({ targetPageIndex: 0, pass: true, issues: [] });
+    expect(() => parseVisionFinalPageReport(
+      'Here is the result: {"target_page":1,"issues":[]}', 0,
+    )).toThrow('JSON 无法解析');
+    expect(() => parseVisionFinalPageReport({ target_page: 1, issues: [], pass: true }, 0))
+      .toThrow('不允许字段 pass');
   });
 
-  it('keeps a finding and uses a conservative full-page box when Vision returns invalid coordinates', () => {
-    const issue = parseVisionFinalPageReport({
+  it('rejects invalid issue geometry instead of silently expanding it to the whole page', () => {
+    expect(() => parseVisionFinalPageReport({
       target_page: 1,
       issues: [{
         type: 'clipped_text', severity: 'severe', bbox: [-10, 20, 1_200, 980],
         confidence: 0.95, evidence: 'Text is clipped.',
       }],
-    }, 0).issues[0];
-
-    expect(issue?.bbox).toEqual([0, 0, 1000, 1000]);
-    expect(issue?.severity).toBe('severe');
+    }, 0)).toThrow('bbox');
   });
 
   it('maps naturally repaginated target pages to the two dominant aligned source pages', () => {

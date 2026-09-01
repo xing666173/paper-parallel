@@ -158,6 +158,16 @@ const lastResponse = computed(() => (
         : '等待首次响应'
     : new Date(props.lastResponseAt).toLocaleTimeString('zh-CN', { hour12: false })
 ));
+
+const visionRegionLabel = computed(() => ({
+  figure: '插图', table: '表格', display_formula: '公式', code: '代码', page: '整页',
+}[props.task.visionAttempt?.regionType ?? 'page']));
+const visionActionLabel = computed(() => ({
+  'adjust-geometry': '调整资产边界',
+  'adjust-caption': '重连或收紧标题',
+  'adjust-reading-order': '验证阅读顺序候选',
+  'add-or-remove-region': '增删错误区域',
+}[props.task.visionAttempt?.repairAction ?? 'adjust-geometry']));
 </script>
 
 <template>
@@ -184,6 +194,17 @@ const lastResponse = computed(() => (
       <div v-if="task.visionAttempt?.correctionRound"><dt>本页剩余轮次</dt><dd>{{ task.visionAttempt.remainingPageRounds }}</dd></div>
       <div v-if="task.visionAttempt?.errorCode"><dt>当前版式问题</dt><dd>{{ task.visionAttempt.errorCode }}</dd></div>
     </dl>
+    <section v-if="task.visionAttempt" class="vision-attempt-card" aria-label="当前视觉处理状态">
+      <strong>当前视觉处理</strong>
+      <dl>
+        <div><dt>页面</dt><dd>{{ (task.visionAttempt.pageIndex ?? 0) + 1 }} / {{ task.visionAttempt.totalPages }}</dd></div>
+        <div><dt>区域</dt><dd>{{ visionRegionLabel }}</dd></div>
+        <div><dt>动作</dt><dd>{{ visionActionLabel }}</dd></div>
+        <div><dt>轮次</dt><dd>{{ task.visionAttempt.correctionRound }} / 2</dd></div>
+        <div><dt>页面统计</dt><dd>通过 {{ task.visionAttempt.validatedPages }} · 失败 {{ task.visionAttempt.failedPages.length }} · 缓存 {{ task.visionAttempt.cachedPages }}</dd></div>
+        <div><dt>本轮 token</dt><dd>{{ (task.visionAttempt.roundPromptTokens ?? 0) + (task.visionAttempt.roundCompletionTokens ?? 0) }}</dd></div>
+      </dl>
+    </section>
     <button
       v-if="task.status === 'running' || task.status === 'stopping'"
       class="button danger" type="button" :disabled="task.status === 'stopping'" @click="$emit('stop')"
@@ -197,3 +218,23 @@ const lastResponse = computed(() => (
     </p>
   </section>
 </template>
+
+<style scoped>
+.vision-attempt-card {
+  margin: 1rem 0;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--line, #d9e2ef);
+  border-radius: 0.75rem;
+  background: var(--surface-soft, #f7faff);
+}
+
+.vision-attempt-card dl {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: 0.6rem 1rem;
+  margin: 0.65rem 0 0;
+}
+
+.vision-attempt-card dt { color: var(--text-muted, #607089); font-size: 0.8rem; }
+.vision-attempt-card dd { margin: 0.15rem 0 0; font-weight: 600; }
+</style>

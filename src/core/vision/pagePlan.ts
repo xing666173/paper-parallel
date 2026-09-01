@@ -1,3 +1,4 @@
+import { parseNormalizedVisionBox } from './protocol';
 import type {
   NormalizedVisionBox,
   VisionColumn,
@@ -78,17 +79,28 @@ function regionAnchor(region: Pick<VisionPlanRegion, 'type' | 'bbox' | 'visibleL
     .join('|');
 }
 
+export function allocateVisionPlanRegionId(
+  pageIndex: number,
+  region: Pick<VisionPlanRegion, 'type' | 'bbox' | 'visibleLabel'>,
+  existingIds: ReadonlySet<string> = new Set(),
+): string {
+  const anchor = regionAnchor(region);
+  const base = `vp-p${pageIndex + 1}-${region.type.replace('display_', '')}-${fnv1a(anchor)}`;
+  if (!existingIds.has(base)) return base;
+  let collision = 2;
+  while (existingIds.has(`${base}-${collision}`)) collision += 1;
+  return `${base}-${collision}`;
+}
+
 function stableRegionIds(
   pageIndex: number,
   regions: readonly Omit<VisionPlanRegion, 'id'>[],
 ): VisionPlanRegion[] {
-  const collisions = new Map<string, number>();
+  const existingIds = new Set<string>();
   return regions.map((region) => {
-    const anchor = regionAnchor(region);
-    const base = `vp-p${pageIndex + 1}-${region.type.replace('display_', '')}-${fnv1a(anchor)}`;
-    const collision = (collisions.get(base) ?? 0) + 1;
-    collisions.set(base, collision);
-    return { ...region, id: collision === 1 ? base : `${base}-${collision}` };
+    const id = allocateVisionPlanRegionId(pageIndex, region, existingIds);
+    existingIds.add(id);
+    return { ...region, id };
   });
 }
 
@@ -237,27 +249,155 @@ export function withRecomputedPlanVersion(
 }
 
 export function parseCachedVisionPagePlan(value: unknown, expectedPageIndex: number): VisionPagePlan {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('缓存页面计划必须为对象');
-  const plan = value as Partial<VisionPagePlan>;
-  if (plan.schemaVersion !== VISION_PAGE_PLAN_SCHEMA_VERSION
-    || plan.canonicalizationVersion !== VISION_PLAN_CANONICALIZATION_VERSION
-    || plan.pageIndex !== expectedPageIndex
-    || typeof plan.planVersion !== 'string'
-    || typeof plan.planDigest !== 'string'
-    || typeof plan.renderFingerprint !== 'string'
-    || typeof plan.renderScale !== 'number'
-    || !Number.isFinite(plan.renderScale)
-    || plan.renderScale <= 0
-    || !Array.isArray(plan.regions)
-    || !Array.isArray(plan.orderCandidates)
-    || !Array.isArray(plan.recoveryActions)
-    || !Array.isArray(plan.appliedPatchIds)) {
-    throw new Error('缓存页面计划版本或字段无效');
+  const object = cacheRecord(value, 'plan');
+  cacheAllowedKeys(object, [
+    'schemaVersion', 'canonicalizationVersion', 'pageIndex', 'layout', 'planVersion',
+    'basePlanVersion', 'renderFingerprint', 'renderScale', 'origin', 'regions',
+    'orderCandidates', 'recoveryActions', 'appliedPatchIds', 'planDigest',
+  ], 'plan');
+  if (object.schemaVersion !== VISION_PAGE_PLAN_SCHEMA_VERSION
+    || object.canonicalizationVersion !== VISION_PLAN_CANONICALIZATION_VERSION
+    || object.pageIndex !== expectedPageIndex) {
+    throw new Error('缓存页面计划版本或页面无效');
   }
-  const candidate = plan as VisionPagePlan;
+  if (!Array.isArray(object.regions) || object.regions.length > 32
+    || !Array.isArray(object.orderCandidates) || object.orderCandidates.length > 64
+    || !Array.isArray(object.recoveryActions) || object.recoveryActions.length > 64
+    || !Array.isArray(object.appliedPatchIds) || object.appliedPatchIds.length > 2) {
+    throw new Error('缓存页面计划数组字段无效或超过上限');
+  }
+  const renderScale = cacheFiniteNumber(object.renderScale, 'plan.renderScale');
+  if (renderScale <= 0 || renderScale > 8) throw new Error('缓存页面计划 renderScale 无效');
+  const regions = object.regions.map((value, index): VisionPlanRegion => {
+    const region = cacheRecord(value, `plan.regions[${index}]`);
+    cacheAllowedKeys(region, [
+      'id', 'modelTemporaryId', 'type', 'bbox', 'column', 'captionBBox', 'visibleLabel',
+      'captionPosition', 'crossPageHint', 'beforeAnchor', 'afterAnchor', 'confidence',
+      'evidence', 'locked',
+    ], `plan.regions[${index}]`);
+    const confidence = cacheFiniteNumber(region.confidence, `plan.regions[${index}].confidence`);
+    if (confidence < 0 || confidence > 1) throw new Error(`缓存页面计划 regions[${index}].confidence 无效`);
+    if (typeof region.locked !== 'boolean') throw new Error(`缓存页面计划 regions[${index}].locked 无效`);
+    return {
+      id: cacheText(region.id, `plan.regions[${index}].id`, 160),
+      ...(region.modelTemporaryId === undefined ? {} : {
+        modelTemporaryId: cacheText(region.modelTemporaryId, `plan.regions[${index}].modelTemporaryId`, 100),
+      }),
+      type: cacheEnum(region.type, ['figure', 'table', 'display_formula', 'code'] as const, `plan.regions[${index}].type`),
+      bbox: parseNormalizedVisionBox(region.bbox, `plan.regions[${index}].bbox`),
+      column: cacheEnum(region.column, ['left', 'right', 'full'] as const, `plan.regions[${index}].column`),
+      ...(region.captionBBox === undefined ? {} : {
+        captionBBox: parseNormalizedVisionBox(region.captionBBox, `plan.regions[${index}].captionBBox`),
+      }),
+      ...(region.visibleLabel === undefined ? {} : {
+        visibleLabel: cacheText(region.visibleLabel, `plan.regions[${index}].visibleLabel`, 100),
+      }),
+      captionPosition: cacheEnum(
+        region.captionPosition,
+        ['above', 'below', 'none', 'unknown'] as const,
+        `plan.regions[${index}].captionPosition`,
+      ),
+      ...(region.crossPageHint === undefined ? {} : {
+        crossPageHint: cacheEnum(
+          region.crossPageHint,
+          ['none', 'starts', 'continues', 'ends', 'unknown'] as const,
+          `plan.regions[${index}].crossPageHint`,
+        ),
+      }),
+      ...(region.beforeAnchor === undefined ? {} : {
+        beforeAnchor: parseCachedTextAnchor(region.beforeAnchor, `plan.regions[${index}].beforeAnchor`),
+      }),
+      ...(region.afterAnchor === undefined ? {} : {
+        afterAnchor: parseCachedTextAnchor(region.afterAnchor, `plan.regions[${index}].afterAnchor`),
+      }),
+      confidence,
+      evidence: cacheText(region.evidence, `plan.regions[${index}].evidence`, 240, true),
+      locked: region.locked,
+    };
+  });
+  const orderCandidates = object.orderCandidates.map((value, index): VisionOrderCandidate => {
+    const edge = cacheRecord(value, `plan.orderCandidates[${index}]`);
+    cacheAllowedKeys(edge, ['beforeRegionId', 'afterRegionId', 'confidence', 'evidence'], `plan.orderCandidates[${index}]`);
+    const confidence = cacheFiniteNumber(edge.confidence, `plan.orderCandidates[${index}].confidence`);
+    if (confidence < 0 || confidence > 1) throw new Error(`缓存页面计划 orderCandidates[${index}].confidence 无效`);
+    return {
+      beforeRegionId: cacheText(edge.beforeRegionId, `plan.orderCandidates[${index}].beforeRegionId`, 160),
+      afterRegionId: cacheText(edge.afterRegionId, `plan.orderCandidates[${index}].afterRegionId`, 160),
+      confidence,
+      evidence: cacheText(edge.evidence, `plan.orderCandidates[${index}].evidence`, 240, true),
+    };
+  });
+  const recoveryActions = object.recoveryActions.map((value, index): VisionPagePlan['recoveryActions'][number] => {
+    const action = cacheRecord(value, `plan.recoveryActions[${index}]`);
+    cacheAllowedKeys(action, ['type', 'regionId', 'reason'], `plan.recoveryActions[${index}]`);
+    return {
+      type: cacheEnum(action.type, ['remove-rejected-region', 'geometry-snap'] as const, `plan.recoveryActions[${index}].type`),
+      regionId: cacheText(action.regionId, `plan.recoveryActions[${index}].regionId`, 160),
+      reason: cacheText(action.reason, `plan.recoveryActions[${index}].reason`, 240),
+    };
+  });
+  const appliedPatchIds = object.appliedPatchIds.map((id, index) => (
+    cacheText(id, `plan.appliedPatchIds[${index}]`, 160)
+  ));
+  const candidate: VisionPagePlan = {
+    schemaVersion: VISION_PAGE_PLAN_SCHEMA_VERSION,
+    canonicalizationVersion: VISION_PLAN_CANONICALIZATION_VERSION,
+    pageIndex: expectedPageIndex,
+    layout: cacheEnum(object.layout, ['single', 'double', 'mixed'] as const, 'plan.layout'),
+    planVersion: cacheText(object.planVersion, 'plan.planVersion', 160),
+    ...(object.basePlanVersion === undefined ? {} : {
+      basePlanVersion: cacheText(object.basePlanVersion, 'plan.basePlanVersion', 160),
+    }),
+    renderFingerprint: cacheText(object.renderFingerprint, 'plan.renderFingerprint', 240),
+    renderScale,
+    origin: cacheEnum(object.origin, ['initial', 'correction-1', 'correction-2'] as const, 'plan.origin'),
+    regions,
+    orderCandidates,
+    recoveryActions,
+    appliedPatchIds,
+    planDigest: cacheText(object.planDigest, 'plan.planDigest', 160),
+  };
   if (digestVisionPagePlan(candidate) !== candidate.planDigest
     || candidate.planVersion !== `plan-${versionVisionPagePlan(candidate)}`) {
     throw new Error('缓存页面计划摘要不一致');
   }
   return candidate;
+}
+
+function cacheRecord(value: unknown, path: string): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`缓存页面计划 ${path} 必须为对象`);
+  return value as Record<string, unknown>;
+}
+
+function cacheAllowedKeys(value: Record<string, unknown>, allowed: readonly string[], path: string): void {
+  const allow = new Set(allowed);
+  const unknown = Object.keys(value).find((key) => !allow.has(key));
+  if (unknown) throw new Error(`缓存页面计划 ${path} 包含未知字段 ${unknown}`);
+}
+
+function cacheText(value: unknown, path: string, maxLength: number, allowEmpty = false): string {
+  if (typeof value !== 'string' || (!allowEmpty && !value.trim()) || value.length > maxLength) {
+    throw new Error(`缓存页面计划 ${path} 字符串无效`);
+  }
+  return value;
+}
+
+function cacheFiniteNumber(value: unknown, path: string): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) throw new Error(`缓存页面计划 ${path} 数值无效`);
+  return value;
+}
+
+function cacheEnum<T extends string>(value: unknown, allowed: readonly T[], path: string): T {
+  if (typeof value !== 'string' || !allowed.includes(value as T)) throw new Error(`缓存页面计划 ${path} 枚举无效`);
+  return value as T;
+}
+
+function parseCachedTextAnchor(value: unknown, path: string): VisionTextAnchor {
+  const anchor = cacheRecord(value, path);
+  cacheAllowedKeys(anchor, ['blockId', 'textDigest', 'edge'], path);
+  return {
+    blockId: cacheText(anchor.blockId, `${path}.blockId`, 160),
+    textDigest: cacheText(anchor.textDigest, `${path}.textDigest`, 160),
+    edge: cacheEnum(anchor.edge, ['before', 'after'] as const, `${path}.edge`),
+  };
 }

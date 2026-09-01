@@ -132,7 +132,7 @@ describe('vision: page analysis protocol', () => {
   it('rejects the whole page when any independent Vision region is malformed', () => {
     expect(() => parseVisionPageAnalysis({
       page: 1, layout: 'double', regions: [
-        { type: 'body_text', bbox: [50, 80, 400, 800], column: 'left', confidence: 0.9 },
+        { type: 'table', bbox: [50, 80, 400, 800], column: 'left', confidence: 0.9 },
         { type: 'figure', bbox: [0, 1, 1201, 20], column: 'full', confidence: 0.9 },
       ],
     }, 0)).toThrow('regions[1].bbox');
@@ -155,6 +155,28 @@ describe('vision: page analysis protocol', () => {
       .toEqual({ pageIndex: 0, layout: 'single', regions: [] });
     expect(() => parseVisionPageAnalysis('private prose instead of JSON', 0))
       .toThrow(VisionProtocolError);
+  });
+
+  it('rejects unknown protocol fields, non-asset regions and oversized pages', () => {
+    expect(() => parseVisionPageAnalysis({
+      page: 1, layout: 'single', regions: [], ignored: true,
+    }, 0)).toThrow('不允许字段 ignored');
+    expect(() => parseVisionPageAnalysis({
+      page: 1, layout: 'single', regions: [{
+        type: 'body_text', bbox: [10, 10, 100, 100], column: 'left', confidence: 0.9,
+      }],
+    }, 0)).toThrow('type');
+    expect(() => parseVisionPageAnalysis({
+      page: 1, layout: 'single', regions: Array.from({ length: 33 }, () => ({
+        type: 'figure', bbox: [10, 10, 100, 100], column: 'left', confidence: 0.9,
+      })),
+    }, 0)).toThrow('32');
+    expect(() => parseVisionPageAnalysis({
+      page: 1, layout: 'single', regions: [{
+        type: 'figure', bbox: { x: 10, y: 10, width: 100, height: 100, right: 110 },
+        column: 'left', confidence: 0.9,
+      }],
+    }, 0)).toThrow('不允许字段 right');
   });
 
   it('serializes the normalized analysis into the same strict cache protocol', () => {

@@ -31,7 +31,7 @@ function projectAiMessage(event: AiLogEvent): string {
     case 'vision-layout-page':
       return `Vision Exp 版式识别：第 ${event.page}/${event.totalPages} 页${event.cached ? '（缓存命中）' : '已完成'}`;
     case 'vision-correction-started':
-      return `Exp 第 ${event.round}/2 轮版式纠错：第 ${event.page}/${event.totalPages} 页，错误 ${event.errorCode}，任务调用 ${event.correctionCallsUsed}/${event.maxCorrectionCalls}`;
+      return `Exp 第 ${event.round}/2 轮版式纠错：第 ${event.page}/${event.totalPages} 页，${event.regionType} · ${event.repairAction}，错误 ${event.errorCode}，任务调用 ${event.correctionCallsUsed}/${event.maxCorrectionCalls}`;
     case 'vision-correction-completed':
       return `Exp 第 ${event.round}/2 轮版式纠错：第 ${event.page}/${event.totalPages} 页补丁已返回，任务调用 ${event.correctionCallsUsed}/${event.maxCorrectionCalls}`;
     case 'vision-correction-stopped':
@@ -180,6 +180,8 @@ export function createTaskStore(dependencies: TaskStoreDependencies, id = 'task'
         ...('completionTokens' in event ? { completionTokens: event.completionTokens } : {}),
         ...('networkAttempts' in event ? { networkAttempts: event.networkAttempts } : {}),
         ...('errorCode' in event ? { errorCode: event.errorCode } : {}),
+        ...('regionType' in event ? { regionType: event.regionType } : {}),
+        ...('repairAction' in event ? { repairAction: event.repairAction } : {}),
         message: projectAiMessage(event),
       };
       if (event.type === 'batch-progress') {
@@ -276,6 +278,18 @@ export function createTaskStore(dependencies: TaskStoreDependencies, id = 'task'
                 + (event.type === 'vision-correction-completed' ? event.promptTokens : 0),
               completionTokens: (previous?.completionTokens ?? 0)
                 + (event.type === 'vision-correction-completed' ? event.completionTokens : 0),
+              regionType: event.type === 'vision-correction-started' || event.type === 'vision-correction-completed'
+                ? event.regionType
+                : previous?.regionType,
+              repairAction: event.type === 'vision-correction-started' || event.type === 'vision-correction-completed'
+                ? event.repairAction
+                : previous?.repairAction,
+              roundPromptTokens: event.type === 'vision-correction-completed'
+                ? event.promptTokens
+                : event.type === 'vision-correction-started' ? 0 : previous?.roundPromptTokens,
+              roundCompletionTokens: event.type === 'vision-correction-completed'
+                ? event.completionTokens
+                : event.type === 'vision-correction-started' ? 0 : previous?.roundCompletionTokens,
               ...(event.type === 'vision-correction-started' ? {
                 errorCode: event.errorCode,
                 errorMessage: projectAiMessage(event),

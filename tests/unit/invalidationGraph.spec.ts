@@ -33,7 +33,7 @@ describe('project dependency invalidation graph', () => {
       artifact('quality', 'quality-report'),
     ], translations);
     expect(result.artifactKeys).toEqual([
-      'accepted:1', 'pdf', 'quality', 'structure-diagnostic', 'vision-diagnostic',
+      'accepted:1', 'pdf', 'quality', 'structure-diagnostic',
     ]);
     expect(result.translationKeys).toEqual([]);
   });
@@ -47,10 +47,10 @@ describe('project dependency invalidation graph', () => {
     ];
     expect(computeInvalidationPlan({
       projectId: 'p1', facets: ['caption-link'], pageIndices: [1],
-    }, artifacts, translations).artifactKeys).toEqual(['accepted:1', 'vision-diagnostic']);
+    }, artifacts, translations).artifactKeys).toEqual(['accepted:1']);
     expect(computeInvalidationPlan({
       projectId: 'p1', facets: ['asset-geometry'], pageIndices: [1],
-    }, artifacts, translations).artifactKeys).toEqual(['formula:1', 'vision-diagnostic']);
+    }, artifacts, translations).artifactKeys).toEqual(['formula:1']);
   });
 
   it('preserves unchanged translations for layout-only changes and targets semantic changes', () => {

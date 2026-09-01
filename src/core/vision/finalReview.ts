@@ -46,25 +46,12 @@ function rootObject(value: unknown): Record<string, unknown> {
   let parsed = value;
   if (typeof value === 'string') {
     const trimmed = value.trim();
-    const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-    const objectStart = trimmed.indexOf('{');
-    const objectEnd = trimmed.lastIndexOf('}');
-    const candidates = [
-      fenced?.[1],
-      trimmed,
-      objectStart >= 0 && objectEnd > objectStart ? trimmed.slice(objectStart, objectEnd + 1) : undefined,
-    ].filter((candidate): candidate is string => Boolean(candidate));
-    let parsedCandidate: unknown;
-    let parsedOk = false;
-    for (const candidate of candidates) {
-      try {
-        parsedCandidate = JSON.parse(candidate);
-        parsedOk = true;
-        break;
-      } catch { /* try the next safely bounded JSON candidate */ }
+    const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+    try {
+      parsed = JSON.parse(fenced ? fenced[1] : trimmed);
+    } catch {
+      throw new Error('Vision 成品质检 JSON 无法解析');
     }
-    if (!parsedOk) throw new Error('Vision 成品质检 JSON 无法解析');
-    parsed = parsedCandidate;
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Vision 成品质检 JSON 必须为对象');
   return parsed as Record<string, unknown>;
@@ -79,6 +66,12 @@ const AUTHOR_PORTRAIT_EVIDENCE = /\b(?:author\s+)?(?:portrait|headshot|photo)s?\
 
 function isAuthorPortraitMissing(issue: Pick<VisionFinalIssue, 'type' | 'evidence'>): boolean {
   return issue.type === 'asset_missing' && AUTHOR_PORTRAIT_EVIDENCE.test(issue.evidence);
+}
+
+function assertAllowedKeys(value: Record<string, unknown>, allowed: readonly string[], path: string): void {
+  const allow = new Set(allowed);
+  const unknown = Object.keys(value).find((key) => !allow.has(key));
+  if (unknown) throw new Error(`Vision 成品质检 ${path} 包含不允许字段 ${unknown}`);
 }
 
 function calibratedSeverity(
@@ -131,13 +124,16 @@ export function isBlockingVisionFinalIssue(issue: VisionFinalIssue): boolean {
 
 export function parseVisionFinalPageReport(value: unknown, expectedTargetPageIndex: number): VisionFinalPageReport {
   const root = rootObject(value);
+  assertAllowedKeys(root, ['target_page', 'issues'], 'root');
   if (!Number.isInteger(root.target_page) || root.target_page !== expectedTargetPageIndex + 1) {
     throw new Error('Vision 成品质检 target_page 与请求页面不一致');
   }
   if (!Array.isArray(root.issues)) throw new Error('Vision 成品质检 issues 必须为数组');
+  if (root.issues.length > 6) throw new Error('Vision 成品质检 issues 超过 6 个上限');
   const parsedIssues = root.issues.map((raw, index): VisionFinalIssue => {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error(`Vision 成品质检 issues[${index}] 必须为对象`);
     const item = raw as Record<string, unknown>;
+    assertAllowedKeys(item, ['type', 'severity', 'bbox', 'confidence', 'evidence'], `issues[${index}]`);
     if (typeof item.type !== 'string' || !ISSUE_TYPES.includes(item.type as VisionFinalIssueType)) {
       throw new Error(`Vision 成品质检 issues[${index}].type 无效`);
     }
@@ -145,15 +141,13 @@ export function parseVisionFinalPageReport(value: unknown, expectedTargetPageInd
     if (typeof item.confidence !== 'number' || !Number.isFinite(item.confidence) || item.confidence < 0 || item.confidence > 1) {
       throw new Error(`Vision 成品质检 issues[${index}].confidence 无效`);
     }
+    if (item.evidence !== undefined && typeof item.evidence !== 'string') {
+      throw new Error(`Vision 成品质检 issues[${index}].evidence 无效`);
+    }
     const evidence = typeof item.evidence === 'string' && item.evidence.trim()
       ? item.evidence.trim().slice(0, 300)
       : `${item.type}（模型未提供说明）`;
-    let bbox: [number, number, number, number];
-    try {
-      bbox = parseNormalizedVisionBox(item.bbox, `issues[${index}].bbox`);
-    } catch {
-      bbox = [0, 0, 1000, 1000];
-    }
+    const bbox = parseNormalizedVisionBox(item.bbox, `issues[${index}].bbox`);
     return {
       targetPageIndex: expectedTargetPageIndex,
       type: item.type as VisionFinalIssueType,

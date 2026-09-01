@@ -34,6 +34,22 @@ describe('vision page plan canonicalization', () => {
     expect(() => parseCachedVisionPagePlan({ ...plan, layout: 'single' }, 0)).toThrow('摘要不一致');
   });
 
+  it('deep-validates and clones cached plans instead of trusting nested objects', () => {
+    const plan = createVisionPagePlan({
+      analysis: analysis([{
+        type: 'figure', bbox: [100, 200, 300, 180], column: 'left', confidence: 0.9,
+      }]),
+      renderFingerprint: 'render-a',
+    });
+    const parsed = parseCachedVisionPagePlan(plan, 0);
+    expect(parsed).toEqual(plan);
+    expect(parsed).not.toBe(plan);
+    expect(parsed.regions[0]).not.toBe(plan.regions[0]);
+    expect(() => parseCachedVisionPagePlan({
+      ...plan, regions: [{ ...plan.regions[0], injected: true }],
+    }, 0)).toThrow('未知字段 injected');
+  });
+
   it('keeps equation numbers inside formula crops instead of treating them as captions', () => {
     const plan = createVisionPagePlan({
       analysis: analysis([{

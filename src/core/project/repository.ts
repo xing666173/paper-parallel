@@ -22,6 +22,12 @@ export interface ProjectRepository {
   findArtifact(key: string): Promise<ProjectArtifactRecord | undefined>;
   saveAlignmentManifest(manifest: AlignmentManifest): Promise<void>;
   loadAlignmentManifest(projectId: string): Promise<AlignmentManifest | undefined>;
+  commitValidatedOutputs(input: {
+    projectId: string;
+    expectedDocumentPlanDigest: string;
+    artifacts: readonly ProjectArtifactRecord[];
+    manifest: AlignmentManifest;
+  }): Promise<void>;
   clearProjectDerivedData(projectId: string): Promise<void>;
   /** 删除排版结果但保留英文、译文以及源版式/公式缓存。 */
   clearProjectLayoutOutputs(projectId: string): Promise<void>;
@@ -97,6 +103,47 @@ export function createProjectRepository(name = 'paper-parallel'): ProjectReposit
       const record = await db.artifacts.get(`${projectId}:alignment-manifest`);
       if (!record) return undefined;
       return JSON.parse(await record.blob.text()) as AlignmentManifest;
+    },
+
+    async commitValidatedOutputs(input) {
+      if (!input.projectId || !input.expectedDocumentPlanDigest) {
+        throw new Error('正式产物提交缺少项目或文档计划摘要');
+      }
+      const allowedKinds = new Set<ProjectArtifactRecord['kind']>([
+        'chinese-pdf', 'typst-source', 'typst-preview', 'quality-report', 'project-package',
+      ]);
+      if (!input.artifacts.length
+        || input.artifacts.some((artifact) => (
+          artifact.projectId !== input.projectId || !allowedKinds.has(artifact.kind)
+        ))) {
+        throw new Error('正式产物提交包含无效项目或产物类型');
+      }
+      const keys = input.artifacts.map((artifact) => artifact.key);
+      if (new Set(keys).size !== keys.length) throw new Error('正式产物提交包含重复键');
+      await db.transaction('rw', db.artifacts, async () => {
+        const acceptedPlan = await db.artifacts.get(`${input.projectId}:accepted-document-plan`);
+        if (acceptedPlan?.kind !== 'accepted-document-plan'
+          || acceptedPlan.dependencies?.planVersion !== input.expectedDocumentPlanDigest) {
+          throw new Error('页面计划已经变化，拒绝提交基于旧计划生成的正式产物');
+        }
+        const dependencies = { planVersion: input.expectedDocumentPlanDigest };
+        const records: ProjectArtifactRecord[] = input.artifacts.map((artifact) => ({
+          ...artifact,
+          dependencies: { ...artifact.dependencies, ...dependencies },
+        }));
+        records.push({
+          key: `${input.projectId}:alignment-manifest`,
+          projectId: input.projectId,
+          kind: 'alignment-manifest',
+          blob: new Blob([JSON.stringify(input.manifest, null, 2)], { type: 'application/json' }),
+          updatedAt: input.manifest.createdAt,
+          dependencies: {
+            sourceUnitIds: input.manifest.units.flatMap((unit) => unit.sourceUnitIds),
+            planVersion: input.expectedDocumentPlanDigest,
+          },
+        });
+        await db.artifacts.bulkPut(records);
+      });
     },
 
     async clearProjectDerivedData(projectId) {

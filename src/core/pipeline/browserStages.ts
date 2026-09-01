@@ -79,6 +79,7 @@ import {
   VISION_PAGE_PLAN_PROTOCOL_VERSION,
   VISION_RENDER_VERSION,
 } from '../vision/analyze';
+import { REQUIRED_VISION_MODEL_ID } from '../vision/model';
 import { authorPortraitAssetsFromBitmapRegions, reconcileVisionLayout } from '../vision/reconcile';
 import {
   findAssetFooterOverflows,
@@ -106,6 +107,7 @@ import type {
   SourceLayoutCorrectionAttempt,
   SourceLayoutQualityReport,
 } from '../quality/report';
+import { preserveSourceLayoutRunHistory } from '../quality/report';
 import { assertPreparedStructure } from './structureInvariants';
 import {
   MarkerInvariantError,
@@ -123,6 +125,7 @@ import {
   applyVisionCorrectionPatch,
   replayCachedVisionCorrection,
   requestVisionCorrection,
+  type VisionCorrectionLocalContext,
   VISION_CORRECTION_PROMPT_VERSION,
   VisionPatchError,
 } from '../vision/correction';
@@ -165,6 +168,7 @@ interface BrowserValue extends PipelineValue {
   visionAttempt?: VisionAttemptState;
   crossPageAssetGroups?: CrossPageAssetGroup[];
   sourceLayoutReport?: SourceLayoutQualityReport;
+  acceptedDocumentPlanDigest?: string;
 }
 
 export interface BrowserPipelineStageOptions {
@@ -250,6 +254,22 @@ function typstSourceColumn(
   return rect.x + rect.w / 2 < pageWidth / 2 ? 'left' : 'right';
 }
 
+function reusableSourceLayoutReport(value: unknown): SourceLayoutQualityReport | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const report = value as Partial<SourceLayoutQualityReport>;
+  return (report.schemaVersion === 1 || report.schemaVersion === 2)
+    && typeof report.pass === 'boolean'
+    && Array.isArray(report.correctionAttempts)
+    && Array.isArray(report.unresolvedIssues)
+    && Number.isFinite(report.initialAnalysisCalls)
+    && Number.isFinite(report.correctionCallsUsed)
+    && Number.isFinite(report.maxCorrectionCalls)
+    && Number.isFinite(report.promptTokens)
+    && Number.isFinite(report.completionTokens)
+    ? report as SourceLayoutQualityReport
+    : undefined;
+}
+
 async function blobDataUrl(blob: Blob): Promise<string> {
   const bytes = new Uint8Array(await blob.arrayBuffer());
   let binary = '';
@@ -318,6 +338,10 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
   const targetLayoutPolicy: TargetLayoutPolicy = settings.targetLayoutPolicy === 'single-column'
     ? 'single-column'
     : 'source-layout';
+  const visionModelId = settings.visionModelId ?? REQUIRED_VISION_MODEL_ID;
+  if (visionModelId !== REQUIRED_VISION_MODEL_ID) {
+    throw new Error(`任务视觉模型 ${visionModelId} 不受当前正式质量门支持`);
+  }
   const skipRemoteFinalReview = import.meta.env.MODE === 'test'
     && import.meta.env.VITE_PP_SKIP_REMOTE_FINAL_REVIEW === '1';
 
@@ -363,6 +387,32 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
       const doc = requireValue(current.doc, '解析文档缺失');
       const pdf = requireValue(current.sourcePdf, '源 PDF 缺失');
       if (!apiKey.trim()) throw new Error('Vision Exp 版式识别需要 DeepSeek API Key，请返回上传页重新验证');
+      const sourceLayoutRunStartedAt = Date.now();
+      let priorSourceLayoutReport: SourceLayoutQualityReport | undefined;
+      let priorSourceLayoutUpdatedAt = sourceLayoutRunStartedAt;
+      try {
+        const priorArtifact = await options.repository.findArtifact(`${options.projectId}:vision-diagnostic`);
+        if (priorArtifact) {
+          priorSourceLayoutUpdatedAt = priorArtifact.updatedAt;
+          priorSourceLayoutReport = reusableSourceLayoutReport(JSON.parse(await priorArtifact.blob.text()));
+        }
+      } catch {
+        // Diagnostics are never authoritative inputs. Corrupt history is
+        // ignored while the current run continues from validated page caches.
+      }
+      let priorRunHistory: ReturnType<typeof preserveSourceLayoutRunHistory> = [];
+      try {
+        priorRunHistory = preserveSourceLayoutRunHistory(
+          priorSourceLayoutReport,
+          priorSourceLayoutUpdatedAt,
+        );
+      } catch {
+        // Historical diagnostics never participate in formal correctness. A
+        // malformed nested attempt/history record is ignored just like a
+        // malformed top-level diagnostic, rather than blocking fresh analysis.
+        priorSourceLayoutReport = undefined;
+        priorRunHistory = [];
+      }
       const plansByPage = new Map<number, VisionPagePlan>();
       const cachedPlanPages = new Set<number>();
       let initialAnalysisCalls = 0;
@@ -449,7 +499,12 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
       const failedPageCount = new Set(correctionIssues.map((issue) => issue.pageIndex)).size;
       const maxCorrectionCalls = settings.maxVisionCorrectionCalls
         ?? Math.min(failedPageCount * 2, 12);
-      let correctionCallsUsed = 0;
+      const persistedCorrectionCalls = options.snapshot.visionAttempt
+        && options.snapshot.visionAttempt.correctionRound > 0
+        && options.snapshot.pauseReason !== 'vision-correction-budget-exhausted'
+        ? options.snapshot.visionAttempt.correctionCallsUsed
+        : 0;
+      let correctionCallsUsed = Math.min(maxCorrectionCalls, persistedCorrectionCalls);
       let correctionPromptTokens = 0;
       let correctionCompletionTokens = 0;
       let lastCorrectionRound = 0 as 0 | 1 | 2;
@@ -459,7 +514,16 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
         issues: readonly ReturnType<typeof reconciliationValidationIssues>[number][],
         crossPageAssetGroups: readonly CrossPageAssetGroup[] = [],
       ): SourceLayoutQualityReport => ({
-        schemaVersion: 1,
+        schemaVersion: 2,
+        runStartedAt: sourceLayoutRunStartedAt,
+        completedAt: Date.now(),
+        runHistory: priorRunHistory.map((run) => ({
+          ...run,
+          correctionAttempts: run.correctionAttempts.map((attempt) => ({
+            ...attempt, errorFingerprints: [...attempt.errorFingerprints],
+          })),
+          unresolvedIssues: run.unresolvedIssues.map((issue) => ({ ...issue })),
+        })),
         pass,
         pagePlans: [...plansByPage.values()]
           .sort((left, right) => left.pageIndex - right.pageIndex)
@@ -543,6 +607,15 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
         const pageIndices = [...new Set(issuesBeforeRound.map((issue) => issue.pageIndex))].sort((a, b) => a - b);
         for (const pageIndex of pageIndices) {
           const pageIssues = issuesBeforeRound.filter((issue) => issue.pageIndex === pageIndex);
+          const primaryIssue = pageIssues[0];
+          const primaryAllowedFields = new Set(primaryIssue?.allowedFields ?? []);
+          const repairAction = primaryAllowedFields.has('regions')
+            ? 'add-or-remove-region' as const
+            : primaryAllowedFields.has('captionBBox') || primaryAllowedFields.has('captionLink')
+              ? 'adjust-caption' as const
+              : primaryAllowedFields.has('orderCandidates')
+                ? 'adjust-reading-order' as const
+                : 'adjust-geometry' as const;
           if (correctionCallsUsed >= maxCorrectionCalls) {
             options.onAiEvent?.({
               type: 'vision-correction-stopped', at: Date.now(), page: pageIndex + 1,
@@ -568,9 +641,15 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
               locked: !failedRegionIds.has(region.id),
             })),
           });
+          const candidateRegionType = patchBase.regions.find((region) => region.id === primaryIssue?.regionId)?.type;
+          const correctionRegionType = candidateRegionType
+            && ['figure', 'table', 'display_formula', 'code'].includes(candidateRegionType)
+            ? candidateRegionType as 'figure' | 'table' | 'display_formula' | 'code'
+            : 'page' as const;
           plansByPage.set(pageIndex, patchBase);
           const page = await pdf.getPage(pageIndex + 1);
           let imageUrl: string | undefined;
+          let correctionLocalContext: VisionCorrectionLocalContext | undefined;
           let correctionRenderScale = round === 1 ? VISION_LAYOUT_RENDER_SCALE : 6;
           try {
             if (round === 1) {
@@ -619,6 +698,51 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
                 y: Math.max(0, top - context),
                 w: Math.min(sourcePage.width, right + context) - Math.max(0, left - context),
                 h: Math.min(sourcePage.height, bottom + context) - Math.max(0, top - context),
+              };
+              const normalizeRect = (rect: Rect): [number, number, number, number] => [
+                rect.x / sourcePage.width * 1000,
+                rect.y / sourcePage.height * 1000,
+                rect.w / sourcePage.width * 1000,
+                rect.h / sourcePage.height * 1000,
+              ];
+              const cropBottom = cropRect.y + cropRect.h;
+              const distanceFromCrop = (rect: Rect): number => {
+                const bottom = rect.y + rect.h;
+                if (bottom < cropRect.y) return cropRect.y - bottom;
+                if (rect.y > cropBottom) return rect.y - cropBottom;
+                return 0;
+              };
+              const adjacentTextAnchors = doc.blocks
+                .filter((block) => block.pageIndex === pageIndex && Boolean(block.text?.trim()))
+                .map((block) => ({ block, distance: distanceFromCrop(block.rect) }))
+                .filter((entry) => entry.distance <= Math.max(72, sourcePage.height * 0.12))
+                .sort((left, right) => left.distance - right.distance || left.block.order - right.block.order)
+                .slice(0, 8)
+                .map(({ block }) => ({
+                  blockId: block.id,
+                  relation: block.rect.y + block.rect.h <= cropRect.y
+                    ? 'before' as const
+                    : block.rect.y >= cropBottom
+                      ? 'after' as const
+                      : 'overlap' as const,
+                  bbox: normalizeRect(block.rect),
+                  text: (block.text ?? '').replace(/\p{Cc}+/gu, ' ')
+                    .replace(/\s+/g, ' ').trim().slice(0, 120),
+                }));
+              correctionLocalContext = {
+                cropBBox: normalizeRect(cropRect),
+                adjacentTextAnchors,
+                candidateRegions: pageIssues.flatMap((issue) => {
+                  const region = patchBase.regions.find((candidate) => candidate.id === issue.regionId);
+                  return region ? [{
+                    regionId: region.id,
+                    type: region.type,
+                    bbox: [...region.bbox] as [number, number, number, number],
+                    issueCodes: pageIssues
+                      .filter((candidate) => candidate.regionId === region.id)
+                      .map((candidate) => candidate.code),
+                  }] : [];
+                }),
               };
               let renderError: unknown;
               for (const scale of [6, 4, 2]) {
@@ -710,6 +834,7 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
                 issues: pageIssues,
                 round,
                 imageUrl,
+                localContext: correctionLocalContext,
                 baseUrl: options.baseUrl ?? 'https://api.deepseek.com',
                 apiKey,
                 signal,
@@ -720,6 +845,8 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
                     type: 'vision-correction-started', at: Date.now(), page: pageIndex + 1,
                     totalPages: pdf.numPages, round, correctionCallsUsed, maxCorrectionCalls,
                     errorCode: pageIssues[0]?.code ?? 'source-plan.unknown',
+                    regionType: correctionRegionType,
+                    repairAction,
                   });
                 },
                 validatePatch: (patch) => {
@@ -812,6 +939,8 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
             totalPages: pdf.numPages, round, correctionCallsUsed, maxCorrectionCalls,
             promptTokens: correction.usage.promptTokens,
             completionTokens: correction.usage.completionTokens,
+            regionType: correctionRegionType,
+            repairAction,
           });
         }
         analyses = [...plansByPage.values()]
@@ -927,15 +1056,16 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
         ...asset,
         crossPageAssetGroupId: crossPageGroupByMember.get(`${asset.pageIndex}:${asset.id}`),
       }));
+      const acceptedDocumentPlanDigest = digestAcceptedDocumentPlan(
+        [...plansByPage.values()], crossPage.groups,
+      );
       await options.repository.putArtifact({
         key: `${options.projectId}:accepted-document-plan`,
         projectId: options.projectId,
         kind: 'accepted-document-plan',
         blob: new Blob([JSON.stringify({
           schemaVersion: 1,
-          documentPlanDigest: digestAcceptedDocumentPlan(
-            [...plansByPage.values()], crossPage.groups,
-          ),
+          documentPlanDigest: acceptedDocumentPlanDigest,
           pagePlanDigests: [...plansByPage.values()]
             .sort((left, right) => left.pageIndex - right.pageIndex)
             .map((plan) => ({ pageIndex: plan.pageIndex, planDigest: plan.planDigest })),
@@ -944,6 +1074,7 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
         updatedAt: Date.now(),
         dependencies: {
           pageIndices: [...plansByPage.keys()].sort((left, right) => left - right),
+          planVersion: acceptedDocumentPlanDigest,
           cacheIdentityVersion: 'vision-cache-v1',
         },
       });
@@ -1085,6 +1216,7 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
         assets,
         crossPageAssetGroups: crossPage.groups,
         sourceLayoutReport,
+        acceptedDocumentPlanDigest,
         visionAttempt: {
           phase: 'structure-generation',
           totalPages: pdf.numPages,
@@ -1350,6 +1482,10 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
       let project = requireValue(current.typstProject, 'Typst 项目缺失');
       const sourcePdf = requireValue(current.sourcePdf, '源 PDF 缺失');
       const sourceLayoutReport = requireValue(current.sourceLayoutReport, '源版式质量报告缺失');
+      const acceptedDocumentPlanDigest = requireValue(
+        current.acceptedDocumentPlanDigest,
+        '已接受文档计划摘要缺失',
+      );
       const attemptReports: QualityAttemptReport[] = [];
       let repairPlan: LayoutRepairPlan | undefined;
       const report = (pass: boolean): QualityReport => {
@@ -1612,8 +1748,12 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
               visualError: '',
               artifacts,
               manifest,
-              putArtifact: (artifact) => options.repository.putArtifact(artifact),
-              saveAlignmentManifest: (value) => options.repository.saveAlignmentManifest(value),
+              commit: (validatedArtifacts, validatedManifest) => options.repository.commitValidatedOutputs({
+                projectId: options.projectId,
+                expectedDocumentPlanDigest: acceptedDocumentPlanDigest,
+                artifacts: validatedArtifacts,
+                manifest: validatedManifest,
+              }),
             });
             options.onAiEvent?.({ type: 'quality-persisted', at: Date.now() });
             const persisted = Boolean(

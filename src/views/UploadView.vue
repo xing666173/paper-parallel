@@ -15,6 +15,7 @@ import {
   CURRENT_TARGET_LAYOUT_POLICY,
 } from '../core/layout/profile';
 import { useTaskStore } from '../stores/task';
+import { REQUIRED_VISION_MODEL_ID } from '../core/vision/model';
 
 const KEY_STORAGE = 'paper-parallel.deepseek-key';
 const SESSION_KEY_STORAGE = 'paper-parallel.deepseek-key-session';
@@ -22,7 +23,9 @@ const router = useRouter();
 const repository = createProjectRepository();
 const taskStore = useTaskStore();
 const file = ref<File | null>(null);
-const models = ref<DeepSeekModel[]>(CURRENT_DEEPSEEK_MODELS.map((model) => ({ ...model })));
+const models = ref<DeepSeekModel[]>(CURRENT_DEEPSEEK_MODELS
+  .filter((candidate) => candidate.id !== REQUIRED_VISION_MODEL_ID)
+  .map((candidate) => ({ ...candidate })));
 const model = ref(models.value[0]!.id);
 const thinkingMode = ref<'enabled' | 'disabled'>('disabled');
 const storedKey = localStorage.getItem(KEY_STORAGE) ?? '';
@@ -58,8 +61,13 @@ async function testConnection(): Promise<void> {
       apiKey: apiKey.value.trim(),
     });
     if (discovered.length === 0) throw new Error('当前账户未返回受支持的模型');
-    models.value = discovered;
-    if (!discovered.some((item) => item.id === model.value)) model.value = discovered[0]!.id;
+    if (!discovered.some((item) => item.id === REQUIRED_VISION_MODEL_ID)) {
+      throw new Error('当前账户未返回正式质检必需的 DeepSeek V4 Flash Vision Exp 模型');
+    }
+    const translationModels = discovered.filter((item) => item.id !== REQUIRED_VISION_MODEL_ID);
+    if (!translationModels.length) throw new Error('当前账户未返回可用于正文翻译的普通 DeepSeek 模型');
+    models.value = translationModels;
+    if (!translationModels.some((item) => item.id === model.value)) model.value = translationModels[0]!.id;
     if (saveKey.value) localStorage.setItem(KEY_STORAGE, apiKey.value.trim());
     else localStorage.removeItem(KEY_STORAGE);
     connectionStatus.value = 'success';
@@ -104,6 +112,7 @@ async function startTask(): Promise<void> {
       ...createTaskSnapshot(projectId),
       settings: {
         modelId: model.value,
+        visionModelId: REQUIRED_VISION_MODEL_ID,
         thinkingMode: thinkingMode.value,
         sourceFileName: file.value.name,
         sourceFileHash: fileHash,

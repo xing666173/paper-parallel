@@ -27,7 +27,9 @@ Paper Parallel 是一个面向学术论文的浏览器端翻译、排版与双�
 ## DeepSeek 设置
 
 - 连接测试先调用 `/models` 获取账户实际可用模型。
-- 当前项目的 V4 回退列表为 `deepseek-v4-flash` 和 `deepseek-v4-pro`。
+- “正文翻译模型”由用户从账户可用模型中选择；它只负责自然语言翻译。
+- 源版式分析、受限纠错和最终逐页质检固定使用 `deepseek-v4-flash-vision-exp`，不会随正文模型选择而改变；账户缺少该模型时连接测试明确失败。
+- 当前项目的 V4 回退列表包含 `deepseek-v4-flash`、`deepseek-v4-pro` 和 Vision Exp。
 - 思考模式是独立开关，不通过更换模型 ID 实现。
 - 不支持旧的 `deepseek-chat` 或 `deepseek-reasoner` ID。
 - 自动测试使用注入的模拟响应，不使用真实 API Key，也不会产生真实调用费用。

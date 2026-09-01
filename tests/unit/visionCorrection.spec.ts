@@ -92,6 +92,68 @@ describe('vision correction patch', () => {
     })).toThrow('不支持补丁操作');
   });
 
+  it('rejects unknown envelope, operation and nested region fields', () => {
+    const base = {
+      schema_version: 1, patch_id: 'bad', page: 1, base_plan_version: 'p', round: 1,
+      operations: [],
+    };
+    expect(() => parseVisionCorrectionPatch({ ...base, hidden: true })).toThrow('不允许字段 hidden');
+    expect(() => parseVisionCorrectionPatch({
+      ...base, operations: [{ type: 'remove-region', region_id: 'r', reason: 'x', hidden: true }],
+    })).toThrow('不允许字段 hidden');
+    expect(() => parseVisionCorrectionPatch({
+      ...base, operations: [{
+        type: 'add-region', region: {
+          id: 'tmp', type: 'figure', bbox: [1, 1, 10, 10], column: 'left',
+          caption_position: 'none', confidence: 0.9, evidence: '', hidden: true,
+        },
+      }],
+    })).toThrow('不允许字段 hidden');
+  });
+
+  it('replaces provider ids for added regions with deterministic local ids', () => {
+    const plan = fixture();
+    const patch = parseVisionCorrectionPatch({
+      schema_version: 1, patch_id: 'add', page: 1,
+      base_plan_version: plan.planVersion, round: 1,
+      operations: [{
+        type: 'add-region', region: {
+          id: 'provider-new-asset', type: 'code', bbox: [100, 600, 300, 120],
+          column: 'left', caption_position: 'none', confidence: 0.9, evidence: 'visible code',
+        },
+      }],
+    });
+    const next = applyVisionCorrectionPatch(plan, patch, { issues: [{
+      stage: 'source-plan', code: 'source-plan.missing-region', severity: 'error',
+      pageIndex: 0, reason: 'missing', allowedFields: ['regions'], fingerprint: 'missing',
+    }] });
+    expect(next.regions.at(-1)?.id).toMatch(/^vp-p1-code-/);
+    expect(next.regions.at(-1)).toMatchObject({ modelTemporaryId: 'provider-new-asset' });
+  });
+
+  it('requires full-page coordinate context for round-two crops', () => {
+    const plan = fixture();
+    expect(() => buildVisionCorrectionPrompt({
+      plan, issues: [issue(plan.regions[0]!.id)], round: 2,
+    })).toThrow('缺少局部裁图坐标上下文');
+    const prompt = buildVisionCorrectionPrompt({
+      plan, issues: [issue(plan.regions[0]!.id)], round: 2,
+      localContext: {
+        cropBBox: [100, 200, 300, 400],
+        adjacentTextAnchors: [{
+          blockId: 'b1', relation: 'before', bbox: [100, 150, 300, 30], text: 'nearby source text',
+        }],
+        candidateRegions: [{
+          regionId: plan.regions[0]!.id, type: 'table', bbox: [100, 200, 350, 120],
+          issueCodes: ['source-plan.caption-overlap'],
+        }],
+      },
+    });
+    expect(prompt).toContain('[100,200,300,400]');
+    expect(prompt).toContain('nearby source text');
+    expect(prompt).toContain('full-page coordinates');
+  });
+
   it('normalizes the bounded provider aliases before applying the same strict atomic gate', () => {
     const plan = fixture();
     const regionId = plan.regions[0]!.id;

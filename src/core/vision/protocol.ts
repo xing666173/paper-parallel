@@ -61,6 +61,16 @@ function record(value: unknown, path: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+function assertAllowedKeys(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+  path: string,
+): void {
+  const allow = new Set(allowed);
+  const unknown = Object.keys(value).find((key) => !allow.has(key));
+  if (unknown) throw new VisionProtocolError(`Vision JSON ${path} 包含不允许字段 ${unknown}`);
+}
+
 function enumValue<T extends string>(value: unknown, allowed: readonly T[], path: string): T {
   if (typeof value !== 'string' || !allowed.includes(value as T)) {
     throw new VisionProtocolError(`Vision JSON ${path} 取值无效`);
@@ -74,6 +84,7 @@ export function parseNormalizedVisionBox(value: unknown, path: string): Normaliz
     values = value;
   } else if (value && typeof value === 'object') {
     const box = value as Record<string, unknown>;
+    assertAllowedKeys(box, ['x', 'y', 'width', 'height'], path);
     values = [box.x, box.y, box.width, box.height];
   } else {
     throw new VisionProtocolError(`Vision JSON ${path} 必须为四个有限数字`);
@@ -159,6 +170,9 @@ function normalizedColumn(value: unknown, bbox: NormalizedVisionBox): VisionColu
   if (value === 'left' || value === 'right' || value === 'full') return value;
   const normalized = typeof value === 'string' ? value.toLowerCase().replace(/[ _]/g, '-') : '';
   if (['both', 'span', 'full-width', 'center', 'centre', 'middle'].includes(normalized)) return 'full';
+  if (['column-1', 'col-1', 'first-column'].includes(normalized)) return 'left';
+  if (['column-2', 'col-2', 'second-column'].includes(normalized)) return 'right';
+  if (value !== undefined) throw new VisionProtocolError('Vision JSON region.column 取值无效');
   const [x, , width] = bbox;
   if (width >= 560 || (x < 450 && x + width > 550)) return 'full';
   return x + width / 2 < 500 ? 'left' : 'right';
@@ -200,16 +214,23 @@ function normalizedConfidence(value: unknown): number | undefined {
 
 export function parseVisionPageAnalysis(value: unknown, expectedPageIndex: number): VisionPageAnalysis {
   const root = record(parseJson(value), 'root');
+  assertAllowedKeys(root, ['page', 'layout', 'regions'], 'root');
   const page = root.page;
   if (!Number.isInteger(page) || page !== expectedPageIndex + 1) {
     throw new VisionProtocolError('Vision JSON page 与请求页面不一致');
   }
   const layout = enumValue(root.layout, ['single', 'double', 'mixed'] as const, 'layout');
   if (!Array.isArray(root.regions)) throw new VisionProtocolError('Vision JSON regions 必须为数组');
+  if (root.regions.length > 32) throw new VisionProtocolError('Vision JSON regions 超过单页 32 个上限');
 
   const regions: VisionRegion[] = [];
   root.regions.forEach((input, index) => {
       const item = record(input, `regions[${index}]`);
+      assertAllowedKeys(item, [
+        'id', 'type', 'bbox', 'column', 'caption_bbox', 'captionBBox',
+        'confidence', 'label', 'visibleLabel', 'caption_position', 'captionPosition',
+        'cross_page_hint', 'crossPageHint', 'evidence',
+      ], `regions[${index}]`);
       const parsedConfidence = normalizedConfidence(item.confidence);
       // Confidence is advisory metadata. Geometry and semantic-type gates below
       // remain strict, but an unusual provider wrapper (for example
@@ -220,10 +241,22 @@ export function parseVisionPageAnalysis(value: unknown, expectedPageIndex: numbe
         ? parsedConfidence
         : 0.5;
       const captionValue = item.caption_bbox ?? item.captionBBox;
+      const labelValue = item.label ?? item.visibleLabel;
+      const captionPosition = item.caption_position ?? item.captionPosition;
+      const crossPageHint = item.cross_page_hint ?? item.crossPageHint;
       const bbox = parseLayoutVisionBox(item.bbox, `regions[${index}].bbox`);
+      if (item.id !== undefined && (typeof item.id !== 'string' || !item.id.trim())) {
+        throw new VisionProtocolError(`Vision JSON regions[${index}].id 必须为非空字符串`);
+      }
+      if (labelValue !== undefined && typeof labelValue !== 'string') {
+        throw new VisionProtocolError(`Vision JSON regions[${index}].label 必须为字符串`);
+      }
+      if (item.evidence !== undefined && typeof item.evidence !== 'string') {
+        throw new VisionProtocolError(`Vision JSON regions[${index}].evidence 必须为字符串`);
+      }
       regions.push({
         type: enumValue(item.type, [
-          'figure', 'table', 'display_formula', 'code', 'caption', 'header', 'footer', 'body_text',
+          'figure', 'table', 'display_formula', 'code',
         ] as const, `regions[${index}].type`),
         bbox,
         column: normalizedColumn(item.column, bbox),
@@ -232,14 +265,17 @@ export function parseVisionPageAnalysis(value: unknown, expectedPageIndex: numbe
         }),
         confidence,
         ...(typeof item.id === 'string' && item.id.trim() ? { temporaryId: item.id.trim().slice(0, 100) } : {}),
-        ...(typeof item.label === 'string' && item.label.trim() ? { visibleLabel: item.label.trim().slice(0, 100) } : {}),
-        ...(item.caption_position === 'above' || item.caption_position === 'below'
-          || item.caption_position === 'none' || item.caption_position === 'unknown'
-          ? { captionPosition: item.caption_position }
-          : {}),
-        ...(item.cross_page_hint === undefined ? {} : {
+        ...(typeof labelValue === 'string' && labelValue.trim() ? { visibleLabel: labelValue.trim().slice(0, 100) } : {}),
+        ...(captionPosition === undefined ? {} : {
+          captionPosition: enumValue(
+            captionPosition,
+            ['above', 'below', 'none', 'unknown'] as const,
+            `regions[${index}].caption_position`,
+          ),
+        }),
+        ...(crossPageHint === undefined ? {} : {
           crossPageHint: enumValue(
-            item.cross_page_hint,
+            crossPageHint,
             ['none', 'starts', 'continues', 'ends', 'unknown'] as const,
             `regions[${index}].cross_page_hint`,
           ),

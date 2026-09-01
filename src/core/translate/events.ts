@@ -11,11 +11,15 @@ export type AiLogEvent =
   | {
       type: 'vision-correction-started'; at: number; page: number; totalPages: number;
       round: 1 | 2; correctionCallsUsed: number; maxCorrectionCalls: number; errorCode: string;
+      regionType: 'figure' | 'table' | 'display_formula' | 'code' | 'page';
+      repairAction: 'adjust-geometry' | 'adjust-caption' | 'adjust-reading-order' | 'add-or-remove-region';
     }
   | {
       type: 'vision-correction-completed'; at: number; page: number; totalPages: number;
       round: 1 | 2; correctionCallsUsed: number; maxCorrectionCalls: number;
       promptTokens: number; completionTokens: number;
+      regionType: 'figure' | 'table' | 'display_formula' | 'code' | 'page';
+      repairAction: 'adjust-geometry' | 'adjust-caption' | 'adjust-reading-order' | 'add-or-remove-region';
     }
   | {
       type: 'vision-correction-stopped'; at: number; page: number; totalPages: number;
