@@ -481,4 +481,21 @@ describe('generic academic translation protocol', () => {
       'source-mapping-invalid', 'target-segments-mismatch',
     ]);
   });
+
+  it('does not accept a valid-looking prefix from a response with extra blocks', () => {
+    const source = paragraphRequest();
+    const valid = {
+      blockId: 'p1', translation: '第一句。第二句。第三句。',
+      alignmentGroups: [{
+        sourceSentenceIds: ['p1-s-1', 'p1-s-2', 'p1-s-3'],
+        targetSegments: ['第一句。第二句。第三句。'],
+      }],
+      newTerms: [], warnings: [],
+    };
+    const result = validateBatchResponse([source], { blocks: [valid, { ...valid, blockId: 'unexpected' }] });
+
+    expect(result.ok).toBe(false);
+    expect(result.accepted).toEqual([]);
+    expect(result.issues.map((item) => item.code)).toContain('block-id-mismatch');
+  });
 });

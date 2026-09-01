@@ -48,11 +48,15 @@ import { authorPortraitAssetsFromBitmapRegions, reconcileVisionLayout } from '..
 import { serializeVisionPageAnalysis } from '../vision/protocol';
 import { inspectCompiledPdf, runPdfContentGate } from '../quality/pdfContentGate';
 import { persistValidatedOutputs } from '../quality/finalPersistence';
-import { runVisionFinalReview, type VisionFinalReport } from '../vision/finalReview';
+import {
+  isBlockingVisionFinalIssue,
+  runVisionFinalReview,
+  type VisionFinalReport,
+} from '../vision/finalReview';
 import {
   FORMULA_OCR_MODEL,
   FORMULA_OCR_PROMPT_VERSION,
-  parseFormulaOcrResult,
+  parseCachedFormulaOcrResult,
   recognizeFormulaCrop,
 } from '../vision/formulaOcr';
 import type { TargetLayoutPolicy } from '../typst/template';
@@ -233,28 +237,33 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
       const loading = getDocument({ data: new Uint8Array(await artifact.blob.arrayBuffer()) });
       signal.addEventListener('abort', () => { void loading.destroy(); }, { once: true });
       const pdf = await loading.promise;
-      const pages: ParsedPage[] = [];
-      const sourceBitmapRegions = new Map<number, Rect[]>();
-      for (let pageIndex = 0; pageIndex < pdf.numPages; pageIndex += 1) {
-        if (signal.aborted) throw new DOMException('已停止', 'AbortError');
-        const page = await pdf.getPage(pageIndex + 1);
-        const viewport = page.getViewport({ scale: 1 });
-        const content = await page.getTextContent();
-        const operatorList = await page.getOperatorList();
-        sourceBitmapRegions.set(pageIndex, extractBitmapRegions(operatorList, viewport.transform));
-        const items = content.items
-          .filter((item: any) => typeof item?.str === 'string')
-          .map((item: any) => normalizeTextItem(item, viewport));
-        const parsed = parsePageItems(items, viewport.width, viewport.height);
-        pages.push({
-          no: pageIndex + 1, w: viewport.width, h: viewport.height,
-          layoutMode: parsed.layoutMode,
-          blocks: parsed.blocks.map((block) => ({ ...block })),
-        });
+      try {
+        const pages: ParsedPage[] = [];
+        const sourceBitmapRegions = new Map<number, Rect[]>();
+        for (let pageIndex = 0; pageIndex < pdf.numPages; pageIndex += 1) {
+          if (signal.aborted) throw new DOMException('已停止', 'AbortError');
+          const page = await pdf.getPage(pageIndex + 1);
+          const viewport = page.getViewport({ scale: 1 });
+          const content = await page.getTextContent();
+          const operatorList = await page.getOperatorList();
+          sourceBitmapRegions.set(pageIndex, extractBitmapRegions(operatorList, viewport.transform));
+          const items = content.items
+            .filter((item: any) => typeof item?.str === 'string')
+            .map((item: any) => normalizeTextItem(item, viewport));
+          const parsed = parsePageItems(items, viewport.width, viewport.height);
+          pages.push({
+            no: pageIndex + 1, w: viewport.width, h: viewport.height,
+            layoutMode: parsed.layoutMode,
+            blocks: parsed.blocks.map((block) => ({ ...block })),
+          });
+        }
+        const doc = normalizeDocPages(buildDoc(pages, 'en'));
+        if (!doc.blocks.length) throw new Error('PDF 没有可用的文字层，暂不支持扫描件');
+        return { ...current, settings, sourcePdf: pdf, sourceBitmapRegions, doc };
+      } catch (error) {
+        await pdf.destroy();
+        throw error;
       }
-      const doc = normalizeDocPages(buildDoc(pages, 'en'));
-      if (!doc.blocks.length) throw new Error('PDF 没有可用的文字层，暂不支持扫描件');
-      return { ...current, settings, sourcePdf: pdf, sourceBitmapRegions, doc };
     },
 
     async analyzeLayout(input, signal) {
@@ -364,9 +373,11 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
               .map((number) => number.toFixed(3)).join(','),
           });
           const cached = await options.repository.findArtifact(cacheKey);
-          const recognized = cached
-            ? parseFormulaOcrResult(JSON.parse(await cached.blob.text()))
-            : await recognizeFormulaCrop({
+          const cachedResult = cached
+            ? parseCachedFormulaOcrResult(await cached.blob.text())
+            : undefined;
+          const recognized = cachedResult
+            ?? await recognizeFormulaCrop({
               blob: await cropPageRegionLossless(
                 await pdf.getPage(formula.pageIndex + 1),
                 formula.rect,
@@ -378,7 +389,7 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
               requiresLargeOperator: formula.requiresLargeOperator,
               signal,
             });
-          if (!cached) {
+          if (!cachedResult) {
             await options.repository.putArtifact({
               key: cacheKey,
               projectId: options.projectId,
@@ -650,8 +661,7 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
         }
         return qualityReport;
       };
-      try {
-        for (let attempt = 0 as 0 | 1 | 2; attempt <= 2; attempt = (attempt + 1) as 0 | 1 | 2) {
+      for (let attempt = 0 as 0 | 1 | 2; attempt <= 2; attempt = (attempt + 1) as 0 | 1 | 2) {
           if (signal.aborted) throw new DOMException('已停止', 'AbortError');
           const alignment = runAlignmentGate(manifest);
           const pdfCompiled = new TextDecoder().decode(compiled.pdf.slice(0, 5)).startsWith('%PDF-');
@@ -726,9 +736,7 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
             type: 'vision-review-completed', at: Date.now(), reviewedPages: visualReport.reviewedPages,
             issueCount: visualReport.issues.length,
           });
-          const severeVisualIssues = visualReport.issues.filter((issue) => (
-            issue.severity === 'severe' && issue.confidence >= 0.7
-          ));
+          const severeVisualIssues = visualReport.issues.filter(isBlockingVisionFinalIssue);
           attemptReports.push({
             attempt,
             pass: visualReport.pass,
@@ -842,11 +850,13 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
               .__PP_DIAGNOSTIC_TYPST_SOURCE__ = project.mainContent;
           }
           options.onAiEvent?.({ type: 'layout-repair-completed', at: Date.now(), attempt: nextAttempt });
-        }
-      } finally {
-        await (sourcePdf as typeof sourcePdf & { destroy?: () => Promise<unknown> }).destroy?.();
       }
       throw new Error('质量检查未完成');
+    },
+
+    async dispose(input) {
+      const current = value(input);
+      await (current.sourcePdf as { destroy?: () => Promise<unknown> } | undefined)?.destroy?.();
     },
   };
 }

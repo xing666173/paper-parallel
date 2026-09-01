@@ -47,13 +47,20 @@ onMounted(async () => {
     if (!english?.blob) throw new Error('英文原文 PDF 不存在');
     if (!chinese?.blob) throw new Error('中文排版 PDF 不存在');
     if (!alignment) throw new Error('对齐清单不存在');
+    if (loadedTask && loadedTask.status !== 'completed') {
+      throw new Error('当前任务尚未通过全部质量门，请返回处理页继续检查。');
+    }
+    const loadedQualityReport = reportArtifact
+      ? JSON.parse(await reportArtifact.blob.text()) as QualityReport
+      : undefined;
+    if (loadedQualityReport && !loadedQualityReport.pass) {
+      throw new Error('当前中文 PDF 的逐页质检未通过，不能进入对照阅读。');
+    }
     englishPdf.value = english.blob;
     chinesePdf.value = chinese.blob;
     manifest.value = alignment;
     task.value = loadedTask;
-    qualityReport.value = reportArtifact
-      ? JSON.parse(await reportArtifact.blob.text()) as QualityReport
-      : undefined;
+    qualityReport.value = loadedQualityReport;
     if (route.query.auto === '1') {
       autoNotice.value = true;
       const query = { ...route.query };

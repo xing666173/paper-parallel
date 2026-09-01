@@ -39,6 +39,8 @@ export interface DetectedAssetRegion {
 
 export interface AssetExtractionDependencies {
   crop(region: DetectedAssetRegion): Promise<Blob>;
+  /** Limits full-page raster canvases kept alive at the same time. */
+  concurrency?: number;
 }
 
 export function isTranslatableAssetKind(_kind: ImmutableAssetKind): false {
@@ -76,14 +78,32 @@ export async function extractImmutableAssets(
   regions: readonly DetectedAssetRegion[],
   dependencies: AssetExtractionDependencies,
 ): Promise<ImmutableAsset[]> {
-  return Promise.all(regions.map(async (region) => {
-    const blob = region.rawImage
-      ? new Blob([region.rawImage.bytes], { type: region.rawImage.mimeType })
-      : await dependencies.crop(region);
-    const mimeType = region.rawImage?.mimeType ?? 'image/png';
-    if (blob.type && blob.type !== 'image/png' && blob.type !== 'image/jpeg') {
-      throw new Error(`Unsupported immutable asset type: ${blob.type}`);
+  const concurrency = dependencies.concurrency ?? 2;
+  if (!Number.isInteger(concurrency) || concurrency < 1) {
+    throw new Error('Asset extraction concurrency must be a positive integer');
+  }
+  const assets: ImmutableAsset[] = Array.from({ length: regions.length });
+  let nextIndex = 0;
+  const worker = async (): Promise<void> => {
+    while (nextIndex < regions.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      const region = regions[index]!;
+      const blob = region.rawImage
+        ? new Blob([region.rawImage.bytes], { type: region.rawImage.mimeType })
+        : await dependencies.crop(region);
+      const mimeType = region.rawImage?.mimeType ?? 'image/png';
+      if (blob.type && blob.type !== 'image/png' && blob.type !== 'image/jpeg') {
+        throw new Error(`Unsupported immutable asset type: ${blob.type}`);
+      }
+      assets[index] = await createAsset({ ...region, blob, mimeType });
     }
-    return createAsset({ ...region, blob, mimeType });
-  }));
+  };
+  const settled = await Promise.allSettled(Array.from(
+    { length: Math.min(concurrency, regions.length) },
+    () => worker(),
+  ));
+  const rejected = settled.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+  if (rejected) throw rejected.reason;
+  return assets;
 }

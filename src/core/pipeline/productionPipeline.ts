@@ -23,6 +23,8 @@ export interface ProductionPipelineStages {
   compile(value: PipelineValue, signal: AbortSignal): Promise<PipelineValue>;
   align(value: PipelineValue, signal: AbortSignal): Promise<PipelineValue>;
   validate(value: PipelineValue, signal: AbortSignal): Promise<CompletionSummary>;
+  /** Releases PDF.js documents and other per-run resources on every terminal path. */
+  dispose?(value: PipelineValue): Promise<void>;
 }
 
 export interface ProductionPipelineOptions {
@@ -80,9 +82,9 @@ export async function runProductionPipeline(
     throwIfAborted(options.signal);
     return next;
   };
+  let value: PipelineValue = { projectId: snapshot.projectId, settings: snapshot.settings };
 
   try {
-    let value: PipelineValue = { projectId: snapshot.projectId, settings: snapshot.settings };
     value = await run('parsing', options.stages.parse, value);
     value = await run('analyzing-layout', options.stages.analyzeLayout, value);
     value = await run('building-glossary', options.stages.buildGlossary, value);
@@ -158,5 +160,11 @@ export async function runProductionPipeline(
     };
     await persist();
     throw error;
+  } finally {
+    try {
+      await options.stages.dispose?.(value);
+    } catch {
+      // Cleanup must not replace the actual pipeline result or failure.
+    }
   }
 }

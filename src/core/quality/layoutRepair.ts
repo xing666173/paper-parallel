@@ -1,6 +1,6 @@
 import type { AlignmentManifest } from '../align/manifest';
 import type { TypstSemanticUnit, LayoutRepairPlan } from '../typst/project';
-import type { VisionFinalIssue } from '../vision/finalReview';
+import { isBlockingVisionFinalIssue, type VisionFinalIssue } from '../vision/finalReview';
 
 export interface PdfPageSize {
   width: number;
@@ -82,7 +82,7 @@ export function buildLayoutRepairPlan(input: BuildLayoutRepairPlanInput): Layout
     if (!list.includes(value)) list.push(value);
   };
   for (const issue of input.issues) {
-    if (issue.severity !== 'severe' || issue.confidence < 0.8 || NON_REPAIRABLE.has(issue.type)) continue;
+    if (!isBlockingVisionFinalIssue(issue) || NON_REPAIRABLE.has(issue.type)) continue;
     if (issue.type === 'layout_drift'
       && /(?:scattered text|stray (?:text|punctuation)|author.*body|mixed\s+(?:with|into)\s+(?:the\s+)?body|作者单位.*正文混排|正文混排|散落文本|孤立标点)/i.test(issue.evidence)) continue;
     const fingerprint = issueFingerprint(issue);

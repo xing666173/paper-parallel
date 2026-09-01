@@ -374,10 +374,13 @@ export function validateBatchResponse(
   const expectedBlockIds = sourceBlocks.map((block) => block.blockId);
   const actualBlockIds = response.blocks.map((block) => block.blockId);
 
-  if (
+  const envelopeMatches = !(
     expectedBlockIds.length !== actualBlockIds.length
     || expectedBlockIds.some((id, index) => actualBlockIds[index] !== id)
-  ) {
+  );
+  const safePartialPrefix = actualBlockIds.length <= expectedBlockIds.length
+    && actualBlockIds.every((id, index) => expectedBlockIds[index] === id);
+  if (!envelopeMatches) {
     addIssue(issues, '*', 'block-id-mismatch', 'Response block IDs or order do not match the request.');
   }
 
@@ -445,7 +448,10 @@ export function validateBatchResponse(
       );
     }
 
-    if (issues.length === issueStart) accepted.push(translated);
+    // A truncated response may safely commit its independently validated
+    // leading blocks and retry only the missing suffix. Extra, duplicated, or
+    // reordered blocks are not a safe prefix and must commit nothing.
+    if (safePartialPrefix && issues.length === issueStart) accepted.push(translated);
   }
 
   return { ok: issues.length === 0, accepted, issues };

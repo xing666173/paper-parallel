@@ -142,10 +142,14 @@ describe('processing dashboard', () => {
       alignmentBuilt: true, persisted: true,
     };
 
-    const { router } = await mountView();
+    const { wrapper, router } = await mountView();
     await flushPromises();
 
     expect(router.currentRoute.value.name).toBe('process');
+    expect(wrapper.get('[data-action="open-reader"]').text()).toBe('进入对照阅读');
+    await wrapper.get('[data-action="open-reader"]').trigger('click');
+    await flushPromises();
+    expect(router.currentRoute.value.name).toBe('reader');
   });
 
   it('enters the reader when the current processing run produces a passing summary', async () => {

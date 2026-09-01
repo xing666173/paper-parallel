@@ -70,6 +70,17 @@ describe('completed dual-PDF reader route', () => {
     expect(router.currentRoute.value.name).toBe('process');
     sessionStorage.removeItem('paper-parallel.deepseek-key-session');
   });
+
+  it('refuses stale reader artifacts when the task has not completed its quality gates', async () => {
+    const failedTask: TaskSnapshot = {
+      ...createTaskSnapshot('p1', 1_000),
+      stage: 'validating', status: 'failed', error: 'quality failed', updatedAt: 2_000,
+    };
+    const { wrapper } = await mountReader(readerRepository(failedTask));
+
+    expect(wrapper.text()).toContain('当前任务尚未通过全部质量门');
+    expect(wrapper.find('.reader-view').exists()).toBe(false);
+  });
 });
 
 async function mountReader(repository: ProjectRepository, auto = false) {

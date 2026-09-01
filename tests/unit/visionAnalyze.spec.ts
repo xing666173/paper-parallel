@@ -46,6 +46,47 @@ describe('vision: pre-layout analysis', () => {
     expect(complete).not.toHaveBeenCalled();
   });
 
+  it('treats an invalid cached page as a miss and replaces it with a validated result', async () => {
+    const complete = vi.fn(async () => ({
+      content: '{"page":1,"layout":"double","regions":[]}',
+      usage: { promptTokens: 1, completionTokens: 1 },
+    }));
+    const saveCached = vi.fn();
+    const page = { getViewport: () => ({ width: 1, height: 1 }), render: () => ({ promise: Promise.resolve() }) };
+
+    const result = await analyzePdfLayoutWithVision({
+      pdf: { numPages: 1, getPage: async () => page },
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test', fileHash: 'sha256:bad-cache',
+      loadCached: async () => ({ page: 99, layout: 'obsolete', regions: [] }),
+      saveCached,
+      complete,
+      renderPage: async () => 'data:image/png;base64,PAGE',
+    });
+
+    expect(result).toEqual([{ pageIndex: 0, layout: 'double', regions: [] }]);
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(saveCached).toHaveBeenCalledWith(expect.any(String), 0, result[0]);
+  });
+
+  it('recovers when the cache reader itself encounters corrupt serialized data', async () => {
+    const complete = vi.fn(async () => ({
+      content: '{"page":1,"layout":"single","regions":[]}',
+      usage: { promptTokens: 1, completionTokens: 1 },
+    }));
+    const page = { getViewport: () => ({ width: 1, height: 1 }), render: () => ({ promise: Promise.resolve() }) };
+
+    const result = await analyzePdfLayoutWithVision({
+      pdf: { numPages: 1, getPage: async () => page },
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test', fileHash: 'sha256:corrupt-json-cache',
+      loadCached: async () => { throw new SyntaxError('invalid cached JSON'); },
+      complete,
+      renderPage: async () => 'data:image/png;base64,PAGE',
+    });
+
+    expect(result[0]?.layout).toBe('single');
+    expect(complete).toHaveBeenCalledTimes(1);
+  });
+
   it('analyzes at most two pages concurrently, reports starts, and returns page order', async () => {
     const page = { getViewport: () => ({ width: 1, height: 1 }), render: () => ({ promise: Promise.resolve() }) };
     const resolvers: Array<() => void> = [];

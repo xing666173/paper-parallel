@@ -177,6 +177,15 @@ onBeforeRouteLeave(() => {
         @stop="store.safeStop()"
         @resume="resumeTask"
       />
+      <div v-if="task.status === 'completed'" class="layout-action-row">
+        <span>全部质量门已通过</span>
+        <button
+          class="button primary"
+          data-action="open-reader"
+          type="button"
+          @click="router.push({ name: 'reader', params: { projectId } })"
+        >进入对照阅读</button>
+      </div>
       <p v-if="task.status === 'failed'" class="quality-error" role="alert">
         <strong>当前阶段未通过：</strong>{{ task.error }}
       </p>

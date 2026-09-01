@@ -6,6 +6,8 @@ import { createMemoryHistory, createRouter } from 'vue-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createProjectRepository } from '../../src/core/project/repository';
 import UploadView from '../../src/views/UploadView.vue';
+import { useTaskStore } from '../../src/stores/task';
+import { createTaskSnapshot } from '../../src/core/task/stateMachine';
 
 function createMemoryStorage(): Storage {
   const values = new Map<string, string>();
@@ -73,10 +75,22 @@ describe('upload workflow', () => {
     });
     vi.stubGlobal('fetch', fetchSpy as unknown as typeof fetch);
 
+    const expectedProjectId = 'pp-3c87d37f1dbea6909f917ce437c390fb8e655a774387d9e69301c0b2283d5b63';
+    const pinia = createPinia();
+    const taskStore = useTaskStore(pinia);
+    taskStore.current = {
+      ...createTaskSnapshot(expectedProjectId, 1), stage: 'completed', status: 'completed', updatedAt: 2,
+    };
+    taskStore.aiLog = [{ at: 1, type: 'quality-persisted', message: '旧任务日志' }];
+    taskStore.completionSummary = {
+      requiredBlocks: 1, validatedBlocks: 1, failedBlocks: 0,
+      protectedContentPass: true, pdfCompiled: true, assetsPass: true,
+      alignmentBuilt: true, persisted: true,
+    };
     const router = createTestRouter();
     await router.push('/');
     await router.isReady();
-    const wrapper = mount(UploadView, { global: { plugins: [createPinia(), router] } });
+    const wrapper = mount(UploadView, { global: { plugins: [pinia, router] } });
     const start = wrapper.get<HTMLButtonElement>('[data-action="start"]');
     expect(start.element.disabled).toBe(true);
 
@@ -92,6 +106,17 @@ describe('upload workflow', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(start.element.disabled).toBe(false);
 
+    const seededRepository = createProjectRepository();
+    await seededRepository.saveTask(taskStore.current!);
+    await seededRepository.putArtifact({
+      key: `${expectedProjectId}:chinese-pdf`, projectId: expectedProjectId,
+      kind: 'chinese-pdf', blob: new Blob(['stale']), updatedAt: 1,
+    });
+    await seededRepository.putTranslation({
+      key: 'reusable-translation', projectId: expectedProjectId, blockId: 'p1',
+      translation: '缓存译文', alignmentGroups: [], validatedAt: 1,
+    });
+
     await wrapper.get('form').trigger('submit');
     await waitForCondition(() => {
       const currentAlert = wrapper.find('[role="alert"]');
@@ -104,7 +129,7 @@ describe('upload workflow', () => {
     expect(alert.exists() ? alert.text() : '').toBe('');
     expect(router.currentRoute.value.name).toBe('process');
     const projectId = String(router.currentRoute.value.params.projectId);
-    expect(projectId).toBe('pp-3c87d37f1dbea6909f917ce437c390fb8e655a774387d9e69301c0b2283d5b63');
+    expect(projectId).toBe(expectedProjectId);
     const artifact = await createProjectRepository().findArtifact(`${projectId}:english-pdf`);
     expect(artifact).toMatchObject({
       key: `${projectId}:english-pdf`, projectId, kind: 'english-pdf',
@@ -117,5 +142,10 @@ describe('upload workflow', () => {
     });
     expect(JSON.stringify(task)).not.toContain('sk-browser-test');
     expect(sessionStorage.getItem('paper-parallel.deepseek-key-session')).toBe('sk-browser-test');
+    expect(await createProjectRepository().findArtifact(`${projectId}:chinese-pdf`)).toBeUndefined();
+    expect(await createProjectRepository().findTranslation('reusable-translation')).toBeDefined();
+    expect(taskStore.current).toMatchObject({ projectId, stage: 'idle', status: 'idle' });
+    expect(taskStore.completionSummary).toBeNull();
+    expect(taskStore.aiLog).toEqual([]);
   });
 });

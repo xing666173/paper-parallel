@@ -8,7 +8,14 @@ import { createTaskSnapshot } from '../../src/core/task/stateMachine';
 describe('secret-free recoverable project package', () => {
   it('includes recoverable artifacts and excludes secrets and log internals', async () => {
     const repository = createProjectRepository('project-package-test');
-    await repository.saveTask(createTaskSnapshot('p1', 1));
+    await repository.saveTask({
+      ...createTaskSnapshot('p1', 1),
+      settings: {
+        sourceFileName: 'source-paper.pdf', sourceFileHash: 'task-sha256',
+        modelId: 'deepseek-v4-flash', thinkingMode: 'disabled',
+        targetLayoutPolicy: 'single-column', layoutProfileVersion: 'zh-single-column-v1',
+      },
+    });
     for (const [kind, content, type] of [
       ['english-pdf', '%PDF-en', 'application/pdf'],
       ['chinese-pdf', '%PDF-zh', 'application/pdf'],
@@ -50,9 +57,17 @@ describe('secret-free recoverable project package', () => {
     expect(texts.join('\n')).not.toContain('reasoning_content');
     expect(JSON.parse(await zip.file('project.json')!.async('string'))).toMatchObject({
       schemaVersion: 2, modelId: 'deepseek-v4-flash', pageCounts: { en: 8, zh: 11 },
-      targetLayoutPolicy: 'source-layout', layoutProfileVersion: 'legacy-source-layout',
+      targetLayoutPolicy: 'single-column', layoutProfileVersion: 'zh-single-column-v1',
     });
     expect(await zip.file('quality-report.json')!.async('string')).toContain('"pass":true');
+
+    const defaultBlob = await buildProjectPackage('p1', repository);
+    const defaultZip = await JSZip.loadAsync(await defaultBlob.arrayBuffer());
+    expect(JSON.parse(await defaultZip.file('project.json')!.async('string'))).toMatchObject({
+      name: 'source-paper.pdf', sourceFileHash: 'task-sha256',
+      modelId: 'deepseek-v4-flash', thinkingMode: 'disabled',
+      targetLayoutPolicy: 'single-column', layoutProfileVersion: 'zh-single-column-v1',
+    });
   });
 
   it('rejects sensitive fields or key-looking values before generating the ZIP', async () => {

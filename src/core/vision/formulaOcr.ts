@@ -42,6 +42,14 @@ export function parseFormulaOcrResult(input: unknown): FormulaOcrResult {
   return { latex, confidence };
 }
 
+export function parseCachedFormulaOcrResult(input: string): FormulaOcrResult | undefined {
+  try {
+    return parseFormulaOcrResult(JSON.parse(input));
+  } catch {
+    return undefined;
+  }
+}
+
 async function blobDataUrl(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();

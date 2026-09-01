@@ -642,7 +642,7 @@ describe('vision: final PDF review', () => {
     })]);
   });
 
-  it('continues after one timed-out page when the rest of the document is reviewed', async () => {
+  it('fails closed when even one page misses the required page-by-page review', async () => {
     const page = { getViewport: () => ({ width: 1, height: 1 }), render: () => ({ promise: Promise.resolve() }) };
     let calls = 0;
     const report = await runVisionFinalReview({
@@ -663,9 +663,9 @@ describe('vision: final PDF review', () => {
       },
     });
 
-    expect(report).toMatchObject({ pass: true, reviewedPages: 2 });
+    expect(report).toMatchObject({ pass: false, reviewedPages: 2 });
     expect(report.issues).toEqual([expect.objectContaining({
-      type: 'review_incomplete', severity: 'warning', targetPageIndex: 0,
+      type: 'review_incomplete', severity: 'severe', targetPageIndex: 0,
     })]);
   });
 });

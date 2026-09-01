@@ -153,6 +153,27 @@ describe('recoverable production pipeline orchestration', () => {
     expect(persisted?.error).toContain('[redacted]');
     expect(persisted?.error).not.toContain('sk-super-secret-value');
   });
+
+  it('releases per-run resources after both success and failure', async () => {
+    const successRepository = createProjectRepository('production-pipeline-dispose-success-test');
+    const successStages = stageDoubles([]);
+    successStages.dispose = vi.fn(async () => undefined);
+    await runProductionPipeline({
+      snapshot: { ...createTaskSnapshot('dispose-success', 1), settings: settings() },
+      repository: successRepository, signal: new AbortController().signal, stages: successStages,
+    });
+    expect(successStages.dispose).toHaveBeenCalledOnce();
+
+    const failureRepository = createProjectRepository('production-pipeline-dispose-failure-test');
+    const failureStages = stageDoubles([]);
+    failureStages.translate = vi.fn(async () => { throw new Error('translation failed'); });
+    failureStages.dispose = vi.fn(async () => undefined);
+    await expect(runProductionPipeline({
+      snapshot: { ...createTaskSnapshot('dispose-failure', 1), settings: settings() },
+      repository: failureRepository, signal: new AbortController().signal, stages: failureStages,
+    })).rejects.toThrow('translation failed');
+    expect(failureStages.dispose).toHaveBeenCalledOnce();
+  });
 });
 
 function settings() {

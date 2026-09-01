@@ -72,19 +72,19 @@ export async function buildProjectPackage(
   const project = {
     schemaVersion: 2,
     projectId,
-    name: context.project?.name ?? projectId,
+    name: context.project?.name ?? task?.settings?.sourceFileName ?? projectId,
     createdAt: task?.createdAt ?? null,
     updatedAt: task?.updatedAt ?? Math.max(english.updatedAt, chinese.updatedAt),
     promptVersion: SYSTEM_PROMPT_VERSION,
-    modelId: context.project?.modelId ?? null,
-    thinkingMode: context.project?.thinkingMode ?? null,
+    modelId: context.project?.modelId ?? task?.settings?.modelId ?? null,
+    thinkingMode: context.project?.thinkingMode ?? task?.settings?.thinkingMode ?? null,
     targetLayoutPolicy: context.project?.targetLayoutPolicy
       ?? task?.settings?.targetLayoutPolicy
       ?? 'source-layout',
     layoutProfileVersion: context.project?.layoutProfileVersion
       ?? task?.settings?.layoutProfileVersion
       ?? 'legacy-source-layout',
-    sourceFileHash: context.project?.sourceFileHash ?? null,
+    sourceFileHash: context.project?.sourceFileHash ?? task?.settings?.sourceFileHash ?? null,
     pageCounts: context.project?.pageCounts ?? null,
     artifactChecksums: checksums,
   };

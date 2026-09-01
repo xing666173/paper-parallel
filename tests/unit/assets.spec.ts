@@ -41,4 +41,25 @@ describe('immutable paper assets', () => {
     expect(Array.from(new Uint8Array(await assets[0]!.blob.arrayBuffer()))).toEqual([1, 2]);
     expect(Array.from(new Uint8Array(await assets[1]!.blob.arrayBuffer()))).toEqual([9, 8, 7]);
   });
+
+  it('bounds concurrent full-page crops while preserving source order', async () => {
+    let active = 0;
+    let maximumActive = 0;
+    const crop = vi.fn(async (region: { id: string }) => {
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      await new Promise((resolve) => setTimeout(resolve, region.id === 'asset-1' ? 15 : 1));
+      active -= 1;
+      return new Blob([region.id], { type: 'image/png' });
+    });
+    const regions = Array.from({ length: 5 }, (_, index) => ({
+      id: `asset-${index}`, kind: 'figure' as const, pageIndex: 0,
+      rect: { x: 1, y: index + 1, w: 3, h: 4 }, widthMode: 'column' as const,
+    }));
+
+    const assets = await extractImmutableAssets(regions, { crop, concurrency: 2 });
+
+    expect(maximumActive).toBe(2);
+    expect(assets.map((asset) => asset.id)).toEqual(regions.map((region) => region.id));
+  });
 });

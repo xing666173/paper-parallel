@@ -111,12 +111,23 @@ export async function analyzePdfLayoutWithVision(options: AnalyzePdfLayoutOption
       promptVersion: VISION_LAYOUT_PROMPT_VERSION,
       renderVersion: VISION_RENDER_VERSION,
     });
-    const cached = await options.loadCached?.(cacheKey, pageIndex);
+    let cached: unknown | undefined;
+    try {
+      cached = await options.loadCached?.(cacheKey, pageIndex);
+    } catch {
+      cached = undefined;
+    }
     if (cached !== undefined) {
-      const analysis = parseVisionPageAnalysis(cached, pageIndex);
-      results[pageIndex] = analysis;
-      options.onPage?.({ pageIndex, totalPages: options.pdf.numPages, cached: true });
-      return;
+      try {
+        const analysis = parseVisionPageAnalysis(cached, pageIndex);
+        results[pageIndex] = analysis;
+        options.onPage?.({ pageIndex, totalPages: options.pdf.numPages, cached: true });
+        return;
+      } catch {
+        // A partial write, an older schema, or manual storage corruption must
+        // behave like a cache miss. The validated fresh result below replaces
+        // the bad record through saveCached.
+      }
     }
 
     options.onPageStart?.({ pageIndex, totalPages: options.pdf.numPages });

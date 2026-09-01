@@ -112,7 +112,7 @@ function calibratedSeverity(
   return severity;
 }
 
-function isBlockingIssue(issue: VisionFinalIssue): boolean {
+export function isBlockingVisionFinalIssue(issue: VisionFinalIssue): boolean {
   if (issue.severity !== 'severe') return false;
   if (issue.confidence >= 0.8) return true;
   if (issue.confidence >= 0.7
@@ -179,7 +179,7 @@ export function parseVisionFinalPageReport(value: unknown, expectedTargetPageInd
   });
   return {
     targetPageIndex: expectedTargetPageIndex,
-    pass: !issues.some(isBlockingIssue),
+    pass: !issues.some(isBlockingVisionFinalIssue),
     issues,
   };
 }
@@ -466,7 +466,7 @@ export async function runVisionFinalReview(options: RunVisionFinalReviewOptions)
       }
     }
     if (!pageReport) throw new Error('Vision 成品质检 JSON 无法解析');
-    const severeCandidates = pageReport.issues.filter(isBlockingIssue);
+    const severeCandidates = pageReport.issues.filter(isBlockingVisionFinalIssue);
     if (severeCandidates.length) {
       const adjacentTargetContent: any[] = [];
       const adjacentTargetPageIndices = severeCandidates.some(isAuthorPortraitMissing)
@@ -616,18 +616,17 @@ export async function runVisionFinalReview(options: RunVisionFinalReviewOptions)
   }
   let issues = pageIssues.flat();
   const incompletePages = issues.filter((issue) => issue.type === 'review_incomplete');
-  const allowedIncompletePages = Math.max(1, Math.floor(options.targetPdf.numPages * 0.05));
-  if (incompletePages.length === options.targetPdf.numPages
-    || incompletePages.length > allowedIncompletePages) {
-    const incompleteSet = new Set(incompletePages);
-    issues = issues.map((issue) => incompleteSet.has(issue) ? { ...issue, severity: 'severe' } : issue);
-  }
+  // “逐页终审”必须覆盖每一页。即使其余页面全部通过，也不能把一次
+  // 超时当作可接受的抽样缺口，否则正式成品可能包含一页从未被检查的
+  // 裁切、重叠或资产损坏。
+  const incompleteSet = new Set(incompletePages);
+  issues = issues.map((issue) => incompleteSet.has(issue) ? { ...issue, severity: 'severe' } : issue);
 
   if (runSignal.aborted) {
     throw new DOMException('已停止', 'AbortError');
   }
   return {
-    pass: !issues.some(isBlockingIssue),
+    pass: !issues.some(isBlockingVisionFinalIssue),
     issues,
     reviewedPages: options.targetPdf.numPages - incompletePages.length,
   };

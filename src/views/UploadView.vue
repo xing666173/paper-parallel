@@ -14,11 +14,13 @@ import {
   CURRENT_LAYOUT_PROFILE,
   CURRENT_TARGET_LAYOUT_POLICY,
 } from '../core/layout/profile';
+import { useTaskStore } from '../stores/task';
 
 const KEY_STORAGE = 'paper-parallel.deepseek-key';
 const SESSION_KEY_STORAGE = 'paper-parallel.deepseek-key-session';
 const router = useRouter();
 const repository = createProjectRepository();
+const taskStore = useTaskStore();
 const file = ref<File | null>(null);
 const models = ref<DeepSeekModel[]>(CURRENT_DEEPSEEK_MODELS.map((model) => ({ ...model })));
 const model = ref(models.value[0]!.id);
@@ -82,6 +84,14 @@ async function startTask(): Promise<void> {
   try {
     const fileHash = await sha256(file.value);
     const projectId = `pp-${fileHash}`;
+    const existingTask = await repository.loadTask(projectId);
+    if (existingTask?.status === 'running' || existingTask?.status === 'stopping') {
+      throw new Error('同一篇论文已有任务正在运行，请先在处理页安全停止后再重新开始。');
+    }
+    // projectId intentionally follows the source hash so translation and
+    // source-analysis caches remain reusable. A new run must nevertheless
+    // remove every old final-layout artifact before it advertises an idle task.
+    await repository.clearProjectLayoutOutputs(projectId);
     await repository.putArtifact({
       key: `${projectId}:english-pdf`,
       projectId,
@@ -90,7 +100,7 @@ async function startTask(): Promise<void> {
       updatedAt: Date.now(),
     });
     sessionStorage.setItem(SESSION_KEY_STORAGE, apiKey.value.trim());
-    await repository.saveTask({
+    const snapshot = {
       ...createTaskSnapshot(projectId),
       settings: {
         modelId: model.value,
@@ -100,8 +110,14 @@ async function startTask(): Promise<void> {
         targetLayoutPolicy: CURRENT_TARGET_LAYOUT_POLICY,
         layoutProfileVersion: CURRENT_LAYOUT_PROFILE,
       },
-    });
+    };
+    await repository.saveTask(snapshot);
     await repository.clearAiLog(projectId);
+    taskStore.current = snapshot;
+    taskStore.completionSummary = null;
+    taskStore.aiLog = [];
+    taskStore.throughputSamples = [];
+    taskStore.lastResponseAt = null;
     await router.push({ name: 'process', params: { projectId } });
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : String(error);

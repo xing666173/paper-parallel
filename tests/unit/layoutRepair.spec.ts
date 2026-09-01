@@ -51,4 +51,16 @@ describe('deterministic layout repair planning', () => {
       manifest, units: [headingUnit], pageSizes,
     })).toBeUndefined();
   });
+
+  it('repairs every issue that the final-review gate considers blocking', () => {
+    const plan = buildLayoutRepairPlan({
+      attempt: 1,
+      issues: [issue({ confidence: 0.72, evidence: 'Orphan heading at page bottom' })],
+      manifest, units: [headingUnit], pageSizes,
+    });
+
+    expect(plan?.actions).toContainEqual({
+      type: 'page-break', unitId: 'heading', detail: '标题与首段整体移到下一页',
+    });
+  });
 });

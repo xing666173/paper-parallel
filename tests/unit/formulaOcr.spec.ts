@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseFormulaOcrResult } from '../../src/core/vision/formulaOcr';
+import { parseCachedFormulaOcrResult, parseFormulaOcrResult } from '../../src/core/vision/formulaOcr';
 
 describe('formula OCR protocol', () => {
   it('normalizes a fenced exact LaTeX result', () => {
@@ -14,5 +14,12 @@ describe('formula OCR protocol', () => {
     expect(() => parseFormulaOcrResult({
       latex: 'Q = P', confidence: 'certain',
     })).toThrow(/置信度/);
+  });
+
+  it('turns a corrupt or obsolete cache record into a cache miss', () => {
+    expect(parseCachedFormulaOcrResult('{broken')).toBeUndefined();
+    expect(parseCachedFormulaOcrResult('{"latex":"x","confidence":0.9}')).toBeUndefined();
+    expect(parseCachedFormulaOcrResult('{"latex":"x+y","confidence":0.9}'))
+      .toEqual({ latex: 'x+y', confidence: 0.9 });
   });
 });
