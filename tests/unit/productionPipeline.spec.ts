@@ -6,6 +6,8 @@ import {
 } from '../../src/core/pipeline/productionPipeline';
 import { createProjectRepository } from '../../src/core/project/repository';
 import { createTaskSnapshot } from '../../src/core/task/stateMachine';
+import { RecoverablePipelineError } from '../../src/core/task/recoverable';
+import { MarkerInvariantError } from '../../src/core/pipeline/markerInvariants';
 
 describe('recoverable production pipeline orchestration', () => {
   it('persists every real stage and completes only after all quality gates pass', async () => {
@@ -152,6 +154,75 @@ describe('recoverable production pipeline orchestration', () => {
     const persisted = await repository.loadTask('p6');
     expect(persisted?.error).toContain('[redacted]');
     expect(persisted?.error).not.toContain('sk-super-secret-value');
+  });
+
+  it('persists exhausted remote work as a resumable pause instead of a failed task', async () => {
+    const repository = createProjectRepository('production-pipeline-recoverable-pause-test');
+    const stages = stageDoubles([]);
+    stages.analyzeLayout = vi.fn(async () => {
+      throw new RecoverablePipelineError(
+        'vision-correction-budget-exhausted',
+        'page 2 needs another user-authorized analysis',
+        {
+          phase: 'correction-local-crop', pageIndex: 1, totalPages: 8,
+          correctionRound: 2, remainingPageRounds: 0, validatedPages: 7,
+          failedPages: [1], cachedPages: 6, correctionCallsUsed: 2,
+          maxCorrectionCalls: 2, promptTokens: 100, completionTokens: 20,
+          errorCode: 'source-plan.correction-rounds-exhausted',
+        },
+      );
+    });
+
+    await expect(runProductionPipeline({
+      snapshot: { ...createTaskSnapshot('pause', 1), settings: settings() },
+      repository, signal: new AbortController().signal, stages,
+    })).rejects.toMatchObject({ name: 'RecoverablePipelineError' });
+    expect(await repository.loadTask('pause')).toMatchObject({
+      stage: 'analyzing-layout', status: 'paused',
+      pauseReason: 'vision-correction-budget-exhausted',
+      settings: { maxVisionCorrectionCalls: 2 },
+      visionAttempt: { failedPages: [1], correctionCallsUsed: 2, maxCorrectionCalls: 2 },
+    });
+  });
+
+  it('does not carry a stale pause reason into a resumed successful run', async () => {
+    const repository = createProjectRepository('production-pipeline-resume-clears-pause-test');
+    const stages = stageDoubles([]);
+    const result = await runProductionPipeline({
+      snapshot: {
+        ...createTaskSnapshot('resume-clears-pause', 1),
+        status: 'paused',
+        pauseReason: 'network-retries-exhausted',
+        error: 'old transient error',
+        settings: settings(),
+      },
+      repository,
+      signal: new AbortController().signal,
+      stages,
+    });
+
+    expect(result.snapshot).toMatchObject({ status: 'completed', stage: 'completed' });
+    expect(result.snapshot.pauseReason).toBeUndefined();
+    expect((await repository.loadTask('resume-clears-pause'))?.pauseReason).toBeUndefined();
+  });
+
+  it('persists structured local invariant diagnostics without routing them to Vision', async () => {
+    const repository = createProjectRepository('production-pipeline-structure-diagnostic-test');
+    const stages = stageDoubles([]);
+    stages.compose = vi.fn(async () => {
+      throw new MarkerInvariantError([{
+        stage: 'pre-typst', code: 'local-structural.duplicate-target-marker',
+        entityId: 'duplicate', firstSource: 'required', conflictSource: 'required',
+        message: 'duplicate marker', fingerprint: 'pre-typst|duplicate',
+      }]);
+    });
+    await expect(runProductionPipeline({
+      snapshot: { ...createTaskSnapshot('structure', 1), settings: settings() },
+      repository, signal: new AbortController().signal, stages,
+    })).rejects.toMatchObject({ name: 'MarkerInvariantError' });
+    const artifact = await repository.findArtifact('structure:structure-diagnostic');
+    expect(artifact?.kind).toBe('structure-diagnostic');
+    expect(await artifact?.blob.text()).toContain('local-structural.duplicate-target-marker');
   });
 
   it('releases per-run resources after both success and failure', async () => {

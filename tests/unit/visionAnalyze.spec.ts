@@ -46,6 +46,37 @@ describe('vision: pre-layout analysis', () => {
     expect(complete).not.toHaveBeenCalled();
   });
 
+  it('resumes a protocol-valid initial plan saved before document reconciliation', async () => {
+    const complete = vi.fn();
+    const renderPage = vi.fn();
+    let saved: unknown;
+    await analyzePdfLayoutWithVision({
+      pdf: { numPages: 1, getPage: async () => ({
+        getViewport: () => ({ width: 1, height: 1 }),
+        render: () => ({ promise: Promise.resolve() }),
+      }) },
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test', fileHash: 'sha256:resume-plan',
+      complete: async () => ({
+        content: '{"page":1,"layout":"double","regions":[]}',
+        usage: { promptTokens: 1, completionTokens: 1 },
+      }),
+      renderPage: async () => 'data:image/png;base64,PAGE',
+      saveRecovered: async (_key, _pageIndex, plan) => { saved = plan; },
+    });
+
+    const resumed = await analyzePdfLayoutWithVision({
+      pdf: { numPages: 1, getPage: vi.fn() },
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test', fileHash: 'sha256:resume-plan',
+      complete,
+      renderPage,
+      loadRecovered: async () => saved,
+    });
+
+    expect(resumed[0]?.layout).toBe('double');
+    expect(complete).not.toHaveBeenCalled();
+    expect(renderPage).not.toHaveBeenCalled();
+  });
+
   it('treats an invalid cached page as a miss and replaces it with a validated result', async () => {
     const complete = vi.fn(async () => ({
       content: '{"page":1,"layout":"double","regions":[]}',
@@ -153,12 +184,35 @@ describe('vision: pre-layout analysis', () => {
     expect(saved).toEqual(result);
   });
 
-  it('falls back one repeatedly invalid page to local geometry without caching the placeholder', async () => {
+  it('does not repeat the API request when local raw-cache persistence fails', async () => {
+    const complete = vi.fn(async () => ({
+      content: '{"page":1,"layout":"single","regions":[]}',
+      usage: { promptTokens: 1, completionTokens: 1 },
+    }));
+    const run = analyzePdfLayoutWithVision({
+      pdf: {
+        numPages: 1,
+        getPage: async () => ({
+          getViewport: () => ({ width: 1, height: 1 }),
+          render: () => ({ promise: Promise.resolve() }),
+        }),
+      },
+      baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test', fileHash: 'sha256:cache-write-failure',
+      renderPage: async () => 'data:image/png;base64,PAGE',
+      complete,
+      saveRaw: async () => { throw new Error('IndexedDB quota'); },
+    });
+
+    await expect(run).rejects.toMatchObject({ name: 'CachePersistenceError' });
+    expect(complete).toHaveBeenCalledOnce();
+  });
+
+  it('pauses after repeated invalid responses without caching or creating a placeholder plan', async () => {
     const phases: string[] = [];
     const onPage = vi.fn();
     const saveCached = vi.fn();
 
-    const result = await analyzePdfLayoutWithVision({
+    const run = analyzePdfLayoutWithVision({
       pdf: {
         numPages: 1,
         getPage: async () => ({
@@ -174,10 +228,13 @@ describe('vision: pre-layout analysis', () => {
       onPagePhase: ({ phase }) => phases.push(phase),
     });
 
-    expect(result).toEqual([{ pageIndex: 0, layout: 'mixed', regions: [] }]);
-    expect(phases).toEqual(['analysis-retrying', 'analysis-fallback']);
+    await expect(run).rejects.toMatchObject({
+      name: 'RecoverablePipelineError',
+      pauseReason: 'vision-protocol-retries-exhausted',
+    });
+    expect(phases).toEqual(['analysis-retrying', 'analysis-paused']);
     expect(saveCached).not.toHaveBeenCalled();
-    expect(onPage).toHaveBeenCalledWith({ pageIndex: 0, totalPages: 1, cached: false });
+    expect(onPage).not.toHaveBeenCalled();
   });
 
   it('serializes PDF rasterization while Vision requests remain concurrent', async () => {
@@ -232,6 +289,8 @@ describe('vision: pre-layout analysis', () => {
     };
     const scales: number[] = [];
     const phases: string[] = [];
+    const recovered = vi.fn();
+    const plans: any[] = [];
     const result = await analyzePdfLayoutWithVision({
       pdf: { numPages: 1, getPage: async () => page },
       baseUrl: 'https://api.deepseek.com', apiKey: 'sk-test', fileHash: 'sha256:render-retry',
@@ -243,6 +302,8 @@ describe('vision: pre-layout analysis', () => {
         return 'data:image/png;base64,FALLBACK';
       },
       onPagePhase: ({ phase }) => phases.push(phase),
+      saveRecovered: recovered,
+      onPlan: ({ plan }) => plans.push(plan),
       complete: async () => ({
         content: '{"page":1,"layout":"double","regions":[]}',
         usage: { promptTokens: 1, completionTokens: 1 },
@@ -252,6 +313,8 @@ describe('vision: pre-layout analysis', () => {
     expect(result[0]?.layout).toBe('double');
     expect(scales).toEqual([VISION_LAYOUT_RENDER_SCALE, VISION_LAYOUT_FALLBACK_RENDER_SCALE]);
     expect(phases).toEqual(['render-retrying']);
+    expect(recovered.mock.calls[0]?.[0]).toContain(`:${VISION_LAYOUT_FALLBACK_RENDER_SCALE}:`);
+    expect(plans[0]?.renderScale).toBe(VISION_LAYOUT_FALLBACK_RENDER_SCALE);
     expect(cleanup).toHaveBeenCalledTimes(2);
   });
 

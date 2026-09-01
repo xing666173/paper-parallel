@@ -8,6 +8,7 @@ import type { AiLogEvent } from '../core/translate/events';
 import type { TaskSnapshot } from '../types/models';
 import { safeErrorMessage } from '../core/security/errors';
 import type { ProjectAiLogEntry } from '../core/project/db';
+import { RecoverablePipelineError } from '../core/task/recoverable';
 
 export interface TaskStoreDependencies {
   repository: ProjectRepository;
@@ -26,9 +27,15 @@ function projectAiMessage(event: AiLogEvent): string {
         ? `Vision Exp 版式识别：第 ${event.page}/${event.totalPages} 页首次渲染超时，已释放资源并降低分辨率重试`
         : event.phase === 'analysis-retrying'
           ? `Vision Exp 版式识别：第 ${event.page}/${event.totalPages} 页响应无效，正在自动重试`
-          : `Vision Exp 版式识别：第 ${event.page}/${event.totalPages} 页连续响应无效，已降级到 PDF 文字层与本地几何识别`;
+          : `Vision Exp 版式识别：第 ${event.page}/${event.totalPages} 页连续响应无效，任务已暂停并保留已验证页面`;
     case 'vision-layout-page':
       return `Vision Exp 版式识别：第 ${event.page}/${event.totalPages} 页${event.cached ? '（缓存命中）' : '已完成'}`;
+    case 'vision-correction-started':
+      return `Exp 第 ${event.round}/2 轮版式纠错：第 ${event.page}/${event.totalPages} 页，错误 ${event.errorCode}，任务调用 ${event.correctionCallsUsed}/${event.maxCorrectionCalls}`;
+    case 'vision-correction-completed':
+      return `Exp 第 ${event.round}/2 轮版式纠错：第 ${event.page}/${event.totalPages} 页补丁已返回，任务调用 ${event.correctionCallsUsed}/${event.maxCorrectionCalls}`;
+    case 'vision-correction-stopped':
+      return `Exp 版式纠错已停止：第 ${event.page}/${event.totalPages} 页，原因 ${event.reason}，任务调用 ${event.correctionCallsUsed}/${event.maxCorrectionCalls}`;
     case 'vision-layout-fallback':
       return `Vision Exp 第 ${event.page} 页区域 ${event.region} 未通过本地几何门（${event.reason}），已改用 PDF 文字层回退识别`;
     case 'vision-review-page-started':
@@ -112,6 +119,23 @@ export function createTaskStore(dependencies: TaskStoreDependencies, id = 'task'
     let activeRunToken: symbol | null = null;
     let aiLogProjectId: string | null = null;
     let aiLogPersistence = Promise.resolve();
+    let liveTaskPersistence = Promise.resolve();
+
+    function queueLiveTaskPersistence(snapshot: TaskSnapshot): void {
+      const value = {
+        ...snapshot,
+        progress: { ...snapshot.progress },
+        ...(snapshot.visionAttempt ? {
+          visionAttempt: {
+            ...snapshot.visionAttempt,
+            failedPages: [...snapshot.visionAttempt.failedPages],
+          },
+        } : {}),
+      };
+      liveTaskPersistence = liveTaskPersistence
+        .then(() => dependencies.repository.saveTask(value))
+        .catch(() => undefined);
+    }
 
     function queueAiLogPersistence(): void {
       const projectId = current.value?.projectId;
@@ -147,6 +171,15 @@ export function createTaskStore(dependencies: TaskStoreDependencies, id = 'task'
         } : {}),
         ...('reviewedPages' in event ? { reviewedPages: event.reviewedPages } : {}),
         ...('attempt' in event ? { attempt: event.attempt } : {}),
+        ...('round' in event ? { round: event.round } : {}),
+        ...('correctionCallsUsed' in event ? {
+          correctionCallsUsed: event.correctionCallsUsed,
+          maxCorrectionCalls: event.maxCorrectionCalls,
+        } : {}),
+        ...('promptTokens' in event ? { promptTokens: event.promptTokens } : {}),
+        ...('completionTokens' in event ? { completionTokens: event.completionTokens } : {}),
+        ...('networkAttempts' in event ? { networkAttempts: event.networkAttempts } : {}),
+        ...('errorCode' in event ? { errorCode: event.errorCode } : {}),
         message: projectAiMessage(event),
       };
       if (event.type === 'batch-progress') {
@@ -169,6 +202,9 @@ export function createTaskStore(dependencies: TaskStoreDependencies, id = 'task'
         || event.type === 'vision-layout-page-phase'
         || event.type === 'vision-layout-page'
         || event.type === 'vision-layout-fallback'
+        || event.type === 'vision-correction-started'
+        || event.type === 'vision-correction-completed'
+        || event.type === 'vision-correction-stopped'
         || event.type === 'vision-review-page-started'
         || event.type === 'vision-review-page-phase'
         || event.type === 'vision-review-page-invalid'
@@ -188,6 +224,75 @@ export function createTaskStore(dependencies: TaskStoreDependencies, id = 'task'
           if (throughputSamples.value.length > 8) throughputSamples.value.splice(0, throughputSamples.value.length - 8);
         }
       }
+      if (current.value && (
+        event.type === 'vision-layout-page-started'
+        || event.type === 'vision-layout-page'
+        || event.type === 'vision-correction-started'
+        || event.type === 'vision-correction-completed'
+        || event.type === 'vision-correction-stopped'
+      )) {
+        const previous = current.value.visionAttempt;
+        if (event.type === 'vision-layout-page-started' || event.type === 'vision-layout-page') {
+          const completedPage = event.type === 'vision-layout-page';
+          current.value = {
+            ...current.value,
+            visionAttempt: {
+              phase: completedPage ? 'local-validation' : 'initial-analysis',
+              pageIndex: event.page - 1,
+              totalPages: event.totalPages,
+              correctionRound: previous?.correctionRound ?? 0,
+              remainingPageRounds: previous?.remainingPageRounds ?? 2,
+              validatedPages: completedPage
+                ? Math.min(event.totalPages, (previous?.validatedPages ?? 0) + 1)
+                : previous?.validatedPages ?? 0,
+              failedPages: [...(previous?.failedPages ?? [])],
+              cachedPages: (previous?.cachedPages ?? 0) + (completedPage && event.cached ? 1 : 0),
+              correctionCallsUsed: previous?.correctionCallsUsed ?? 0,
+              maxCorrectionCalls: previous?.maxCorrectionCalls ?? current.value.settings?.maxVisionCorrectionCalls ?? 0,
+              promptTokens: (previous?.promptTokens ?? 0)
+                + (completedPage ? event.promptTokens ?? 0 : 0),
+              completionTokens: (previous?.completionTokens ?? 0)
+                + (completedPage ? event.completionTokens ?? 0 : 0),
+            },
+            updatedAt: event.at,
+          };
+        } else {
+          const failedPages = new Set(previous?.failedPages ?? []);
+          failedPages.add(event.page - 1);
+          current.value = {
+            ...current.value,
+            visionAttempt: {
+              phase: event.round === 1 ? 'correction-full-page' : 'correction-local-crop',
+              pageIndex: event.page - 1,
+              totalPages: event.totalPages,
+              correctionRound: event.round,
+              remainingPageRounds: Math.max(0, 2 - event.round),
+              validatedPages: previous?.validatedPages ?? Math.max(0, event.totalPages - failedPages.size),
+              failedPages: [...failedPages].sort((left, right) => left - right),
+              cachedPages: previous?.cachedPages ?? 0,
+              correctionCallsUsed: event.correctionCallsUsed,
+              maxCorrectionCalls: event.maxCorrectionCalls,
+              promptTokens: (previous?.promptTokens ?? 0)
+                + (event.type === 'vision-correction-completed' ? event.promptTokens : 0),
+              completionTokens: (previous?.completionTokens ?? 0)
+                + (event.type === 'vision-correction-completed' ? event.completionTokens : 0),
+              ...(event.type === 'vision-correction-started' ? {
+                errorCode: event.errorCode,
+                errorMessage: projectAiMessage(event),
+              } : previous?.errorCode ? {
+                errorCode: previous.errorCode,
+                errorMessage: previous.errorMessage,
+              } : {}),
+              ...(event.type === 'vision-correction-stopped' ? {
+                errorCode: `source-plan.${event.reason}`,
+                errorMessage: projectAiMessage(event),
+              } : {}),
+            },
+            updatedAt: event.at,
+          };
+        }
+        queueLiveTaskPersistence(current.value);
+      }
     }
 
     function launch(runner: TaskRunner): Promise<void> {
@@ -200,6 +305,15 @@ export function createTaskStore(dependencies: TaskStoreDependencies, id = 'task'
           await runner(controller.signal);
         } catch (error) {
           if (controller.signal.aborted || isAbortError(error)) return;
+          if (error instanceof RecoverablePipelineError) {
+            if (current.value?.status !== 'paused' && current.value) {
+              current.value = reduceTaskEvent(current.value, {
+                type: 'PAUSED', reason: error.pauseReason, error: error.message, at: Date.now(),
+              });
+              await dependencies.repository.saveTask(current.value);
+            }
+            return;
+          }
           if (current.value) {
             current.value = reduceTaskEvent(current.value, {
               type: 'FAILED', error: error instanceof Error ? error.message : String(error), at: Date.now(),
@@ -230,6 +344,7 @@ export function createTaskStore(dependencies: TaskStoreDependencies, id = 'task'
 
     async function safeStop(at = Date.now()): Promise<void> {
       if (!current.value || current.value.status !== 'running') return;
+      await liveTaskPersistence;
       current.value = reduceTaskEvent(current.value, { type: 'STOP_REQUESTED', at });
       await dependencies.repository.saveTask(current.value);
       abortController.value?.abort();
@@ -241,6 +356,7 @@ export function createTaskStore(dependencies: TaskStoreDependencies, id = 'task'
 
     async function resume(runner: TaskRunner, at = Date.now()): Promise<void> {
       if (!current.value) throw new Error('No task is available to resume');
+      await liveTaskPersistence;
       current.value = reduceTaskEvent(current.value, { type: 'RESUME', at });
       await dependencies.repository.saveTask(current.value);
       await launch(runner);

@@ -6,6 +6,11 @@ import {
   type ProjectArtifactRecord,
   type TranslationCacheRecord,
 } from './db';
+import {
+  computeInvalidationPlan,
+  type DependencyChange,
+  type InvalidationResult,
+} from './invalidationGraph';
 
 export interface ProjectRepository {
   saveTask(task: TaskSnapshot): Promise<void>;
@@ -20,6 +25,7 @@ export interface ProjectRepository {
   clearProjectDerivedData(projectId: string): Promise<void>;
   /** 删除排版结果但保留英文、译文以及源版式/公式缓存。 */
   clearProjectLayoutOutputs(projectId: string): Promise<void>;
+  invalidateProjectDependencies(change: DependencyChange): Promise<InvalidationResult>;
   listProjectTranslations(projectId: string): Promise<TranslationCacheRecord[]>;
   listProjectArtifacts(projectId: string): Promise<ProjectArtifactRecord[]>;
   saveAiLog(projectId: string, entries: ProjectAiLogEntry[]): Promise<void>;
@@ -41,6 +47,11 @@ export function createProjectRepository(name = 'paper-parallel'): ProjectReposit
         startedAt: task.startedAt,
         updatedAt: task.updatedAt,
         error: task.error,
+        pauseReason: task.pauseReason,
+        visionAttempt: task.visionAttempt ? {
+          ...task.visionAttempt,
+          failedPages: [...task.visionAttempt.failedPages],
+        } : undefined,
         settings: task.settings ? { ...task.settings } : undefined,
       });
     },
@@ -76,6 +87,9 @@ export function createProjectRepository(name = 'paper-parallel'): ProjectReposit
         kind: 'alignment-manifest',
         blob: new Blob([JSON.stringify(manifest, null, 2)], { type: 'application/json' }),
         updatedAt: manifest.createdAt,
+        dependencies: {
+          sourceUnitIds: manifest.units.flatMap((unit) => unit.sourceUnitIds),
+        },
       });
     },
 
@@ -109,6 +123,7 @@ export function createProjectRepository(name = 'paper-parallel'): ProjectReposit
       const outputKinds = new Set([
         'chinese-pdf', 'typst-source', 'typst-preview',
         'alignment-manifest', 'quality-report', 'project-package',
+        'structure-diagnostic',
       ]);
       await db.transaction('rw', db.artifacts, async () => {
         const artifacts = await db.artifacts.where('projectId').equals(projectId).toArray();
@@ -117,6 +132,21 @@ export function createProjectRepository(name = 'paper-parallel'): ProjectReposit
           .map((artifact) => artifact.key);
         if (outputKeys.length) await db.artifacts.bulkDelete(outputKeys);
       });
+    },
+
+    async invalidateProjectDependencies(change) {
+      if (!change.projectId) throw new Error('Dependency invalidation requires a project id');
+      let result: InvalidationResult = { artifactKeys: [], translationKeys: [] };
+      await db.transaction('rw', db.translations, db.artifacts, async () => {
+        const [artifacts, translations] = await Promise.all([
+          db.artifacts.where('projectId').equals(change.projectId).toArray(),
+          db.translations.where('projectId').equals(change.projectId).toArray(),
+        ]);
+        result = computeInvalidationPlan(change, artifacts, translations);
+        if (result.artifactKeys.length) await db.artifacts.bulkDelete(result.artifactKeys);
+        if (result.translationKeys.length) await db.translations.bulkDelete(result.translationKeys);
+      });
+      return result;
     },
 
     async saveAiLog(projectId, entries) {

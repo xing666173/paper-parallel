@@ -125,6 +125,7 @@ function readerRepository(task?: TaskSnapshot): ProjectRepository {
     })),
     clearProjectDerivedData: vi.fn(),
     clearProjectLayoutOutputs: vi.fn(),
+    invalidateProjectDependencies: vi.fn(async () => ({ artifactKeys: [], translationKeys: [] })),
     listProjectTranslations: vi.fn(async () => []),
     listProjectArtifacts: vi.fn(async () => [...artifacts.values()]),
     saveAiLog: vi.fn(async () => undefined),

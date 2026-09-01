@@ -129,16 +129,13 @@ describe('vision: page analysis protocol', () => {
     ]);
   });
 
-  it('keeps valid page regions when one independent Vision region is malformed', () => {
-    const analysis = parseVisionPageAnalysis({
+  it('rejects the whole page when any independent Vision region is malformed', () => {
+    expect(() => parseVisionPageAnalysis({
       page: 1, layout: 'double', regions: [
         { type: 'body_text', bbox: [50, 80, 400, 800], column: 'left', confidence: 0.9 },
         { type: 'figure', bbox: [0, 1, 1201, 20], column: 'full', confidence: 0.9 },
       ],
-    }, 0);
-
-    expect(analysis.regions).toHaveLength(1);
-    expect(analysis.regions[0]?.type).toBe('body_text');
+    }, 0)).toThrow('regions[1].bbox');
   });
 
   it.each([
@@ -164,13 +161,13 @@ describe('vision: page analysis protocol', () => {
     const normalized = parseVisionPageAnalysis({
       page: 1, layout: 'single', regions: [{
         type: 'table', bbox: [100, 200, 800, 300], column: 'full',
-        caption_bbox: [100, 160, 800, 30], confidence: 0.9,
+        caption_bbox: [100, 160, 800, 30], cross_page_hint: 'starts', confidence: 0.9,
       }],
     }, 0);
     expect(serializeVisionPageAnalysis(normalized)).toEqual({
       page: 1, layout: 'single', regions: [{
         type: 'table', bbox: [100, 200, 800, 300], column: 'full',
-        caption_bbox: [100, 160, 800, 30], confidence: 0.9,
+        caption_bbox: [100, 160, 800, 30], cross_page_hint: 'starts', confidence: 0.9,
       }],
     });
   });

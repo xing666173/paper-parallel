@@ -59,6 +59,12 @@ export interface VisionLayoutCacheIdentity {
   modelId: string;
   promptVersion: string;
   renderVersion: string;
+  renderScale?: number;
+  protocolVersion?: string;
+  parserVersion?: string;
+  verifierVersion?: string;
+  recoveryVersion?: string;
+  canonicalizationVersion?: string;
 }
 
 export function buildVisionLayoutCacheKey(value: VisionLayoutCacheIdentity): string {
@@ -70,6 +76,52 @@ export function buildVisionLayoutCacheKey(value: VisionLayoutCacheIdentity): str
     value.promptVersion,
     value.renderVersion,
   ].map(encodeCacheComponent).join(':');
+}
+
+export interface VisionPlanCacheIdentity extends VisionLayoutCacheIdentity {
+  round: 0 | 1 | 2;
+  basePlanDigest?: string;
+  validationErrorDigest?: string;
+}
+
+function visionPlanCacheParts(prefix: string, value: VisionPlanCacheIdentity): string[] {
+  return [
+    prefix,
+    value.fileHash,
+    String(value.pageIndex),
+    value.modelId,
+    value.promptVersion,
+    value.renderVersion,
+    String(value.renderScale ?? 2),
+    value.protocolVersion ?? 'vision-page-plan-v1',
+    value.parserVersion ?? 'pdfjs-parser-v1',
+    value.verifierVersion ?? 'vision-plan-verifier-v1',
+    value.recoveryVersion ?? 'vision-plan-recovery-v4',
+    value.canonicalizationVersion ?? 'vision-plan-c14n-v2',
+    String(value.round),
+    value.basePlanDigest ?? 'none',
+    value.validationErrorDigest ?? 'none',
+  ];
+}
+
+function buildVisionPlanCacheKey(prefix: string, value: VisionPlanCacheIdentity): string {
+  return visionPlanCacheParts(prefix, value).map(encodeCacheComponent).join(':');
+}
+
+export function buildRawVisionResponseCacheKey(value: VisionPlanCacheIdentity): string {
+  return buildVisionPlanCacheKey('raw-vision-response', value);
+}
+
+export function buildVisionCorrectionPatchCacheKey(value: VisionPlanCacheIdentity): string {
+  return buildVisionPlanCacheKey('vision-correction-patch', value);
+}
+
+export function buildRecoveredPagePlanCacheKey(value: VisionPlanCacheIdentity): string {
+  return buildVisionPlanCacheKey('recovered-page-plan', value);
+}
+
+export function buildAcceptedPagePlanCacheKey(value: VisionPlanCacheIdentity): string {
+  return buildVisionPlanCacheKey('accepted-page-plan', value);
 }
 
 export interface FormulaOcrCacheIdentity {

@@ -48,6 +48,10 @@ const currentStageFraction = computed(() => {
     return Math.min(1, props.task.progress.completed / props.task.progress.total);
   }
   if (props.task.stage === 'analyzing-layout') {
+    const attempt = props.task.visionAttempt;
+    if (attempt?.totalPages) {
+      return Math.min(0.99, Math.max(0, attempt.validatedPages / attempt.totalPages));
+    }
     const entry = latestEntry(['vision-layout-page', 'vision-layout-page-phase', 'vision-layout-page-started']);
     if (!entry?.page || !entry.totalPages) return 0;
     const completed = entry.type === 'vision-layout-page' ? entry.page : entry.page - 1;
@@ -81,6 +85,16 @@ const progressDetail = computed(() => {
   if (props.task.stage === 'translating') {
     return `翻译文本块 ${props.task.progress.completed} / ${props.task.progress.total}`;
   }
+  if (props.task.stage === 'analyzing-layout') {
+    const latest = latestEntry([
+      'vision-correction-started', 'vision-correction-completed', 'vision-correction-stopped',
+      'vision-layout-page', 'vision-layout-page-phase', 'vision-layout-page-started',
+    ]);
+    if (latest?.type.startsWith('vision-correction-') && latest.round && latest.page && latest.totalPages) {
+      return `Exp 版式纠错 ${latest.round} / 2 · 第 ${latest.page} / ${latest.totalPages} 页 · 调用 ${latest.correctionCallsUsed ?? 0} / ${latest.maxCorrectionCalls ?? 0}`;
+    }
+    if (latest?.page && latest.totalPages) return `Exp 初次识别第 ${latest.page} / ${latest.totalPages} 页`;
+  }
   if (props.task.stage === 'validating') {
     const repair = latestEntry(['layout-repair-started', 'layout-repair-action', 'layout-repair-completed']);
     if (repair?.attempt) return `排版自动修复 ${repair.attempt} / 2`;
@@ -98,11 +112,19 @@ const progressDetail = computed(() => {
 });
 
 const statusLabel = computed(() => ({
-  idle: '等待启动', running: '运行中', stopping: '正在安全停止', stopped: '已安全停止',
+  idle: '等待启动', running: '运行中', pausing: '正在暂停', paused: '等待恢复',
+  stopping: '正在安全停止', stopped: '已安全停止',
   failed: '需要处理', completed: '处理完成',
 }[props.task.status]));
+const resumeLabel = computed(() => {
+  if (props.task.status === 'failed') return '继续未完成任务';
+  if (props.task.status !== 'paused') return '继续处理';
+  return props.task.pauseReason === 'vision-correction-budget-exhausted'
+    ? '重新分析失败页面'
+    : '重试网络或渲染';
+});
 
-const terminal = computed(() => ['failed', 'completed', 'stopped'].includes(props.task.status));
+const terminal = computed(() => ['failed', 'completed', 'stopped', 'paused'].includes(props.task.status));
 const stageOrder = [
   'idle', 'parsing', 'analyzing-layout', 'building-glossary', 'translating',
   'composing', 'compiling', 'aligning', 'validating', 'completed',
@@ -123,7 +145,7 @@ const elapsed = computed(() => formatDuration(
 ));
 const remaining = computed(() => {
   if (props.task.status === 'failed') return '无法估算';
-  if (props.task.status === 'stopped') return '已暂停';
+  if (props.task.status === 'stopped' || props.task.status === 'paused') return '已暂停';
   if (props.task.status === 'completed') return '0 秒';
   return formatDuration(props.estimatedRemainingMs);
 });
@@ -157,16 +179,20 @@ const lastResponse = computed(() => (
       <div><dt>译文已通过</dt><dd>{{ task.progress.completed }}</dd></div>
       <div><dt>重试</dt><dd>{{ task.progress.retries }}</dd></div>
       <div><dt>失败</dt><dd>{{ task.progress.failed }}</dd></div>
+      <div v-if="task.visionAttempt"><dt>版式纠错调用</dt><dd>{{ task.visionAttempt.correctionCallsUsed }} / {{ task.visionAttempt.maxCorrectionCalls }}</dd></div>
+      <div v-if="task.visionAttempt"><dt>源视觉 token</dt><dd>{{ task.visionAttempt.promptTokens + task.visionAttempt.completionTokens }}</dd></div>
+      <div v-if="task.visionAttempt?.correctionRound"><dt>本页剩余轮次</dt><dd>{{ task.visionAttempt.remainingPageRounds }}</dd></div>
+      <div v-if="task.visionAttempt?.errorCode"><dt>当前版式问题</dt><dd>{{ task.visionAttempt.errorCode }}</dd></div>
     </dl>
     <button
       v-if="task.status === 'running' || task.status === 'stopping'"
       class="button danger" type="button" :disabled="task.status === 'stopping'" @click="$emit('stop')"
     >{{ task.status === 'stopping' ? '正在停止…' : '安全停止' }}</button>
     <button
-      v-else-if="task.status === 'stopped' || task.status === 'failed'"
+      v-else-if="task.status === 'stopped' || task.status === 'paused' || task.status === 'failed'"
       class="button primary" type="button" @click="$emit('resume')"
-    >{{ task.status === 'failed' ? '继续未完成任务' : '继续处理' }}</button>
-    <p v-if="task.status === 'running' || task.status === 'stopping' || task.status === 'stopped'" class="stop-note">
+    >{{ resumeLabel }}</button>
+    <p v-if="task.status === 'running' || task.status === 'stopping' || task.status === 'stopped' || task.status === 'paused'" class="stop-note">
       停止会取消正在进行的请求，已经校验并写入的翻译缓存会保留。
     </p>
   </section>

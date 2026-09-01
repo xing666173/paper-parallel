@@ -1,7 +1,7 @@
 import type { Doc, Rect } from '../../types/models';
 import type { DetectedAssetRegion } from '../assets/extract';
 import { validateImmutableRegion, type ImmutableGeometryIssue } from '../assets/geometryGate';
-import { isFigureCaptionText, isTableCaptionText } from '../parser/blocks';
+import { isAlgorithmCaptionText, isFigureCaptionText, isTableCaptionText } from '../parser/blocks';
 import type { VisionPageAnalysis, VisionRegion, NormalizedVisionBox } from './protocol';
 
 export type VisionReconciliationReason =
@@ -13,6 +13,7 @@ export type VisionReconciliationReason =
 export interface UnresolvedVisionRegion {
   pageIndex: number;
   regionIndex: number;
+  regionId?: string;
   type: VisionRegion['type'];
   reason: VisionReconciliationReason;
 }
@@ -38,12 +39,48 @@ function intersectionArea(left: Rect, right: Rect): number {
     * Math.max(0, Math.min(left.y + left.h, right.y + right.h) - Math.max(left.y, right.y));
 }
 
+function withExactRasterFigureBounds(
+  rect: Rect,
+  type: VisionRegion['type'],
+  pageIndex: number,
+  bitmapRegionsByPage: ReadonlyMap<number, readonly Rect[]>,
+): Rect {
+  if (type !== 'figure') return rect;
+  const rectArea = Math.max(1, rect.w * rect.h);
+  const candidates = (bitmapRegionsByPage.get(pageIndex) ?? []).flatMap((candidate) => {
+    const candidateArea = Math.max(1, candidate.w * candidate.h);
+    const overlap = intersectionArea(rect, candidate);
+    const overlapOfSmaller = overlap / Math.min(rectArea, candidateArea);
+    const areaRatio = candidateArea / rectArea;
+    const widthRatio = candidate.w / Math.max(1, rect.w);
+    // A PDF bitmap XObject can contain several adjacent plots. It is exact for
+    // the underlying object but not for the individual figure described by the
+    // Vision region. Do not let such a materially wider object absorb its
+    // neighbour; a tight Vision box is safer in that case.
+    if (overlapOfSmaller < 0.55 || areaRatio < 0.25 || areaRatio > 3.5 || widthRatio > 1.5) return [];
+    const unionArea = rectArea + candidateArea - overlap;
+    return [{ candidate, score: overlap / Math.max(1, unionArea) }];
+  }).sort((left, right) => right.score - left.score);
+  const exact = candidates[0]?.candidate;
+  return exact ? { ...exact } : rect;
+}
+
+function captionIdentity(text: string | undefined): string | undefined {
+  const match = (text ?? '').match(
+    /(?:^|\n)\s*(fig(?:ure)?|table|algorithm)\s*[.]?\s*(\d+(?:[.-]\d+)*|[IVXLCDM]+)\b/i,
+  );
+  if (!match) return undefined;
+  const kind = /^fig/i.test(match[1]!) ? 'figure' : match[1]!.toLocaleLowerCase();
+  return `${kind}:${match[2]!.toLocaleLowerCase()}`;
+}
+
 function captionFor(
   doc: Doc,
   pageIndex: number,
   captionRect: Rect | undefined,
   assetType: VisionRegion['type'],
   assetRect: Rect,
+  visibleLabel?: string,
 ): Doc['blocks'][number] | undefined {
   const candidates: Doc['blocks'][number][] = doc.blocks.flatMap<Doc['blocks'][number]>((block) => {
     if (block.pageIndex !== pageIndex) return [];
@@ -52,11 +89,14 @@ function captionFor(
       ? isTableCaptionText(text)
       : assetType === 'figure'
         ? isFigureCaptionText(text)
+        : assetType === 'code'
+          ? isAlgorithmCaptionText(text)
         : block.type === 'caption';
     if (!matches) return [];
     if ((assetType !== 'figure' && assetType !== 'table') || !block.characterRects?.length) {
       return [block];
     }
+    const matchedCaptionLines: Doc['blocks'] = [];
     let offset = 0;
     for (const line of text.split(/\r?\n/)) {
       const start = offset;
@@ -76,9 +116,14 @@ function captionFor(
       const top = Math.min(...characters.map((character) => character.rect.y));
       const right = Math.max(...characters.map((character) => character.rect.x + character.rect.w));
       const bottom = Math.max(...characters.map((character) => character.rect.y + character.rect.h));
-      return [{ ...block, type: 'caption' as const, text: line, rect: { x: left, y: top, w: right - left, h: bottom - top } }];
+      matchedCaptionLines.push({
+        ...block,
+        type: 'caption' as const,
+        text: line,
+        rect: { x: left, y: top, w: right - left, h: bottom - top },
+      });
     }
-    return [block];
+    return matchedCaptionLines.length ? matchedCaptionLines : [block];
   });
   if (captionRect) {
     const overlapping = candidates
@@ -108,7 +153,13 @@ function captionFor(
     if (nearby) return nearby;
   }
 
-  if (assetType !== 'figure' && assetType !== 'table') return undefined;
+  const expectedIdentity = captionIdentity(visibleLabel);
+  if (expectedIdentity) {
+    const exact = candidates.filter((block) => captionIdentity(block.text) === expectedIdentity);
+    if (exact.length === 1) return exact[0];
+  }
+
+  if (assetType !== 'figure' && assetType !== 'table' && assetType !== 'code') return undefined;
   return candidates
     .map((block) => {
       const horizontalOverlap = Math.max(0, Math.min(
@@ -142,7 +193,7 @@ function withoutCaption(
     return { ...rect, h: trimmedBottom - rect.y };
   }
   const above = applicable.filter((candidate) => candidate.y + candidate.h / 2 <= assetCenter);
-  if (type === 'table' && above.length) {
+  if ((type === 'table' || type === 'code') && above.length) {
     const trimmedTop = Math.min(bottom, Math.max(...above.map((candidate) => candidate.y + candidate.h)) + 2);
     return { ...rect, y: trimmedTop, h: bottom - trimmedTop };
   }
@@ -528,9 +579,23 @@ function deduplicateRegions(regions: readonly DetectedAssetRegion[]): DetectedAs
       if (candidate.pageIndex !== region.pageIndex || candidate.kind !== region.kind) return false;
       const overlap = intersectionArea(candidate.rect, region.rect);
       const containment = overlap / Math.max(1, Math.min(regionArea(candidate), regionArea(region)));
+      const centerDx = Math.abs(
+        candidate.rect.x + candidate.rect.w / 2 - (region.rect.x + region.rect.w / 2),
+      );
+      const centerDy = Math.abs(
+        candidate.rect.y + candidate.rect.h / 2 - (region.rect.y + region.rect.h / 2),
+      );
+      const sameVisualAnchor = centerDx <= Math.min(candidate.rect.w, region.rect.w) * 0.2
+        && centerDy <= Math.min(candidate.rect.h, region.rect.h) * 0.25;
       return containment >= 0.8 || (
         Boolean(candidate.captionUnitId)
         && candidate.captionUnitId === region.captionUnitId
+        // PDF.js can merge several side-by-side captions into one physical
+        // block. Those independent assets temporarily share a caption ID and
+        // may have coarse boxes that overlap, but their centres remain far
+        // apart. Only use caption identity as duplicate evidence when both
+        // detections point at the same visual anchor.
+        && sameVisualAnchor
         && overlap / Math.max(1, Math.max(regionArea(candidate), regionArea(region))) >= 0.45
       );
     });
@@ -558,15 +623,22 @@ const ASSET_KIND = {
 } as const;
 
 function implausibleFormulaClusterIndices(analysis: VisionPageAnalysis): Set<number> {
-  const candidates = analysis.regions
+  const obviousThinPageRows = analysis.regions
     .map((region, index) => ({ region, index }))
     .filter(({ region }) => (
       region.type === 'display_formula'
       && region.bbox[2] >= 650
       && region.bbox[3] <= 24
+    ));
+  const candidates = analysis.regions
+    .map((region, index) => ({ region, index }))
+    .filter(({ region }) => (
+      region.type === 'display_formula'
+      && region.bbox[2] >= 320
+      && region.bbox[3] <= 40
     ))
     .sort((left, right) => left.region.bbox[1] - right.region.bbox[1]);
-  const rejected = new Set<number>(candidates.map(({ index }) => index));
+  const rejected = new Set<number>(obviousThinPageRows.map(({ index }) => index));
   let cluster: typeof candidates = [];
   const flush = () => {
     if (cluster.length >= 6) cluster.forEach(({ index }) => rejected.add(index));
@@ -582,7 +654,7 @@ function implausibleFormulaClusterIndices(analysis: VisionPageAnalysis): Set<num
     const [previousX, previousY, previousWidth, previousHeight] = previous.region.bbox;
     const sameThinRowShape = Math.abs(x - previousX) <= 20
       && Math.abs(width - previousWidth) <= 30
-      && Math.abs(height - previousHeight) <= 8;
+      && Math.abs(height - previousHeight) <= 10;
     const verticalStep = y - previousY;
     if (sameThinRowShape && verticalStep > 0 && verticalStep <= Math.max(34, height * 2.2)) {
       cluster.push(candidate);
@@ -706,6 +778,7 @@ export function reconcileVisionLayout(
   doc: Doc,
   analyses: readonly VisionPageAnalysis[],
   minimumConfidence = 0.8,
+  bitmapRegionsByPage: ReadonlyMap<number, readonly Rect[]> = new Map(),
 ): VisionReconciliationResult {
   const byPage = new Map<number, VisionPageAnalysis>();
   for (const analysis of analyses) {
@@ -728,6 +801,7 @@ export function reconcileVisionLayout(
         unresolved.push({
           pageIndex: page.pageIndex,
           regionIndex,
+          regionId: vision.localId,
           type: vision.type,
           reason: 'implausible-formula-cluster',
         });
@@ -738,11 +812,13 @@ export function reconcileVisionLayout(
       rect = withSingleColumnFormulaWidth(doc, page.pageIndex, rect, analysis, vision);
       rect = withoutAdjacentFormulaProse(doc, page.pageIndex, rect, sourceVisionRect, vision.type);
       const captionRect = vision.captionBBox ? sourceRect(vision.captionBBox, page) : undefined;
-      const caption = captionFor(doc, page.pageIndex, captionRect, vision.type, rect);
+      const caption = captionFor(
+        doc, page.pageIndex, captionRect, vision.type, rect, vision.visibleLabel,
+      );
       const tableGeometryCorroborated = vision.type === 'table'
         && tableContentCorroboratesRegion(doc, page.pageIndex, rect, vision.confidence);
       if (captionRect && !caption && !tableGeometryCorroborated) {
-        unresolved.push({ pageIndex: page.pageIndex, regionIndex, type: vision.type, reason: 'caption-unmatched' });
+        unresolved.push({ pageIndex: page.pageIndex, regionIndex, regionId: vision.localId, type: vision.type, reason: 'caption-unmatched' });
         return;
       }
       const captionCorroboratesRegion = Boolean(
@@ -757,16 +833,19 @@ export function reconcileVisionLayout(
         && !captionCorroboratesRegion
         && !tableGeometryCorroborated
         && !formulaGeometryCorroborated) {
-        unresolved.push({ pageIndex: page.pageIndex, regionIndex, type: vision.type, reason: 'low-confidence' });
+        unresolved.push({ pageIndex: page.pageIndex, regionIndex, regionId: vision.localId, type: vision.type, reason: 'low-confidence' });
         return;
       }
       if (vision.type === 'display_formula' && implausibleFormulaInk(doc, page.pageIndex, rect)) {
-        unresolved.push({ pageIndex: page.pageIndex, regionIndex, type: vision.type, reason: 'body-prose-density' });
+        unresolved.push({ pageIndex: page.pageIndex, regionIndex, regionId: vision.localId, type: vision.type, reason: 'body-prose-density' });
         return;
       }
       const captionBoundaries = vision.type === 'table' && caption
         ? [caption.rect]
         : [caption?.rect, captionRect];
+      rect = withExactRasterFigureBounds(
+        rect, vision.type, page.pageIndex, bitmapRegionsByPage,
+      );
       rect = withAdjacentVisualLabelExtent(doc, page.pageIndex, rect, vision.type);
       rect = withoutCaption(rect, captionBoundaries, vision.type);
       rect = withAdjacentCaptionClearance(rect, caption?.rect, vision.type);
@@ -780,22 +859,37 @@ export function reconcileVisionLayout(
       rect = withoutTrailingProse(doc, page.pageIndex, rect, vision.type);
       rect = withPrecedingTextClearance(doc, page.pageIndex, rect, vision.type);
       if (vision.type === 'figure' || vision.type === 'table') {
-        const foreignCaption = doc.blocks.find((block) => (
+        const findForeignCaption = () => doc.blocks.find((block) => (
           block.pageIndex === page.pageIndex
           && block.id !== caption?.id
           && (vision.type === 'figure' ? isFigureCaptionText(block.text ?? '') : isTableCaptionText(block.text ?? ''))
           && intersectionArea(rect, block.rect) / Math.max(1, block.rect.w * block.rect.h) >= 0.2
         ));
+        let foreignCaption = findForeignCaption();
+        if (foreignCaption && intersectionArea(sourceVisionRect, foreignCaption.rect) === 0) {
+          const sourceBottom = sourceVisionRect.y + sourceVisionRect.h;
+          const foreignBottom = foreignCaption.rect.y + foreignCaption.rect.h;
+          const rectBottom = rect.y + rect.h;
+          if (foreignBottom <= sourceVisionRect.y + 2) {
+            const top = foreignBottom + 2;
+            if (top < rectBottom - 12) rect = { ...rect, y: top, h: rectBottom - top };
+          } else if (foreignCaption.rect.y >= sourceBottom - 2) {
+            const bottom = foreignCaption.rect.y - 2;
+            if (bottom > rect.y + 12) rect = { ...rect, h: bottom - rect.y };
+          }
+          foreignCaption = findForeignCaption();
+        }
         if (foreignCaption) {
           // The Vision box is attached to the wrong numbered caption. Reject
           // it so the deterministic caption-gap recovery can rebuild both
           // neighbouring figures independently instead of duplicating one.
-          unresolved.push({ pageIndex: page.pageIndex, regionIndex, type: vision.type, reason: 'caption-overlap' });
+          unresolved.push({ pageIndex: page.pageIndex, regionIndex, regionId: vision.localId, type: vision.type, reason: 'caption-overlap' });
           return;
         }
       }
       const asset: DetectedAssetRegion = {
-        id: `vision-p${page.pageIndex + 1}-${vision.type.replace('display_', '')}-${regionIndex + 1}`,
+        id: vision.localId
+          ?? `vision-p${page.pageIndex + 1}-${vision.type.replace('display_', '')}-${regionIndex + 1}`,
         kind: ASSET_KIND[vision.type as keyof typeof ASSET_KIND],
         pageIndex: page.pageIndex,
         rect,
@@ -813,7 +907,10 @@ export function reconcileVisionLayout(
         ? geometry.issues.filter((issue) => issue !== 'body-prose-density')
         : geometry.issues;
       if (blockingGeometryIssues.length) {
-        unresolved.push({ pageIndex: page.pageIndex, regionIndex, type: vision.type, reason: blockingGeometryIssues[0]! });
+        unresolved.push({
+          pageIndex: page.pageIndex, regionIndex, regionId: vision.localId,
+          type: vision.type, reason: blockingGeometryIssues[0]!,
+        });
         return;
       }
       assetRegions.push(asset);

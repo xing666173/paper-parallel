@@ -83,6 +83,44 @@ describe('vision: deterministic layout reconciliation', () => {
     expect(code.rect.y + code.rect.h).toBeLessThanOrEqual(figure.rect.y);
   });
 
+  it('trims an algorithm title from the top of its immutable code crop', () => {
+    const doc = fixtureDoc();
+    doc.blocks = [{
+      id: 'algorithm-caption', docId: 'en', type: 'caption', pageIndex: 0,
+      rect: { x: 67, y: 94, w: 478, h: 14 }, order: 0,
+      text: 'Algorithm 1 The Pippenger Algorithm', splitAllowed: false, widthMode: 'span',
+    }];
+    const result = reconcileVisionLayout(doc, [{
+      pageIndex: 0, layout: 'single', regions: [{
+        type: 'code', bbox: [110, 110, 780, 500], column: 'full',
+        captionBBox: [110, 118, 780, 18], captionPosition: 'above', confidence: 0.99,
+      }],
+    }]);
+
+    expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions).toHaveLength(1);
+    expect(result.assetRegions[0]).toMatchObject({ kind: 'code', captionUnitId: 'algorithm-caption' });
+    expect(result.assetRegions[0]!.rect.y).toBeGreaterThanOrEqual(110);
+  });
+
+  it('links an algorithm title even when an older parsed document labeled it as prose', () => {
+    const doc = fixtureDoc();
+    doc.blocks = [{
+      id: 'algorithm-caption', docId: 'en', type: 'paragraph', pageIndex: 0,
+      rect: { x: 67, y: 94, w: 478, h: 14 }, order: 0,
+      text: 'Algorithm 4 pBucketPointsReduction', splitAllowed: true, widthMode: 'span',
+    }];
+    const result = reconcileVisionLayout(doc, [{
+      pageIndex: 0, layout: 'single', regions: [{
+        type: 'code', bbox: [110, 110, 780, 500], column: 'full',
+        captionBBox: [110, 118, 780, 18], captionPosition: 'above', confidence: 0.99,
+      }],
+    }]);
+
+    expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions[0]?.captionUnitId).toBe('algorithm-caption');
+  });
+
   it('matches a nearby approximate caption box and trims a figure crop that includes the real caption', () => {
     const result = reconcileVisionLayout(fixtureDoc(), [{
       pageIndex: 0, layout: 'double', regions: [{
@@ -392,6 +430,217 @@ describe('vision: deterministic layout reconciliation', () => {
     expect(result.assetRegions[0]?.captionUnitId).toBe('caption-1');
   });
 
+  it('uses a unique visible figure number to recover a materially displaced caption box', () => {
+    const doc = fixtureDoc();
+    doc.blocks.push({
+      id: 'caption-6', docId: 'en', type: 'caption', pageIndex: 0,
+      rect: { x: 330, y: 350, w: 220, h: 20 }, order: 2,
+      text: 'Figure 6: Main Trace Unit', splitAllowed: false, widthMode: 'column',
+    });
+    const result = reconcileVisionLayout(doc, [{
+      pageIndex: 0, layout: 'mixed', regions: [{
+        type: 'figure', bbox: [520, 470, 460, 280], column: 'right',
+        captionBBox: [600, 755, 300, 15], visibleLabel: 'Figure 6',
+        captionPosition: 'below', confidence: 0.95,
+      }],
+    }]);
+
+    expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions[0]?.captionUnitId).toBe('caption-6');
+  });
+
+  it('snaps a partially detected captioned figure to its exact raster XObject bounds', () => {
+    const doc = fixtureDoc();
+    doc.blocks = [{
+      id: 'caption-6', docId: 'en', type: 'caption', pageIndex: 0,
+      rect: { x: 386, y: 441, w: 104, h: 9 }, order: 1,
+      text: 'Figure 6: Main Trace Unit', splitAllowed: false, widthMode: 'column',
+    }];
+    const result = reconcileVisionLayout(doc, [{
+      pageIndex: 0, layout: 'double', regions: [{
+        type: 'figure', bbox: [520, 390, 430, 161], column: 'right',
+        captionBBox: [630, 555, 170, 15], visibleLabel: 'Figure 6',
+        captionPosition: 'below', confidence: 0.99,
+      }],
+    }], 0.8, new Map([[0, [
+      { x: 53.8, y: 83.7, w: 504.4, h: 146 },
+      { x: 318, y: 254.1, w: 240.2, h: 175.5 },
+    ]] ]));
+
+    expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions[0]?.rect).toEqual({
+      x: 318, y: 254.1, w: 240.2, h: 175.5,
+    });
+  });
+
+  it('matches every figure title extracted into one multi-caption PDF block', () => {
+    const doc = fixtureDoc();
+    const lines = [
+      { text: 'Figure 9: Parallelism Analysis', x: 50 },
+      { text: 'Figure 10: MTU and PTU Speedup', x: 230 },
+      { text: 'Figure 11: Ablation Study', x: 430 },
+    ];
+    let sourceIndex = 0;
+    doc.blocks = [{
+      id: 'merged-captions', docId: 'en', type: 'caption', pageIndex: 0,
+      rect: { x: 50, y: 195, w: 500, h: 12 }, order: 0,
+      text: lines.map((line) => line.text).join('\n'), splitAllowed: false, widthMode: 'span',
+      characterRects: lines.flatMap((line) => {
+        const characters = [...line.text].map((ch, index) => ({
+          ch,
+          sourceIndex: sourceIndex + index,
+          pageIndex: 0,
+          rect: { x: line.x + index * 4, y: 195, w: 3.8, h: 10 },
+        }));
+        sourceIndex += line.text.length + 1;
+        return characters;
+      }),
+    }];
+    const result = reconcileVisionLayout(doc, [{
+      pageIndex: 0, layout: 'mixed', regions: [{
+        type: 'figure', bbox: [360, 100, 250, 140], column: 'right',
+        captionBBox: [370, 250, 250, 20], visibleLabel: 'Figure 10',
+        captionPosition: 'below', confidence: 0.95,
+      }],
+    }]);
+
+    expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions[0]?.captionUnitId).toBe('merged-captions');
+  });
+
+  it('keeps adjacent figures distinct when their captions share one PDF block', () => {
+    const doc = fixtureDoc();
+    const lines = [
+      { text: 'Figure 9: Parallelism Analysis', x: 50 },
+      { text: 'Figure 10: MTU and PTU Speedup', x: 230 },
+    ];
+    let sourceIndex = 0;
+    doc.blocks = [{
+      id: 'merged-captions', docId: 'en', type: 'caption', pageIndex: 0,
+      rect: { x: 50, y: 195, w: 500, h: 12 }, order: 0,
+      text: lines.map((line) => line.text).join('\n'), splitAllowed: false, widthMode: 'span',
+      characterRects: lines.flatMap((line) => {
+        const characters = [...line.text].map((ch, index) => ({
+          ch,
+          sourceIndex: sourceIndex + index,
+          pageIndex: 0,
+          rect: { x: line.x + index * 4, y: 195, w: 3.8, h: 10 },
+        }));
+        sourceIndex += line.text.length + 1;
+        return characters;
+      }),
+    }];
+
+    const result = reconcileVisionLayout(doc, [{
+      pageIndex: 0, layout: 'mixed', regions: [
+        {
+          type: 'figure', bbox: [50, 100, 260, 150], column: 'left',
+          captionBBox: [80, 245, 260, 20], visibleLabel: 'Figure 9',
+          captionPosition: 'below', confidence: 0.95,
+        },
+        {
+          type: 'figure', bbox: [320, 100, 260, 150], column: 'left',
+          captionBBox: [320, 245, 260, 20], visibleLabel: 'Figure 10',
+          captionPosition: 'below', confidence: 0.95,
+        },
+      ],
+    }], 0.8, new Map([[0, [
+      // One source XObject spans into the next plot and must not replace the
+      // tight Figure 9 Vision box; Figure 10 has its own exact bitmap.
+      { x: 51.8, y: 81.69, w: 264.13, h: 104.37 },
+      { x: 198.91, y: 77.2, w: 182.53, h: 113.52 },
+    ]]]));
+
+    expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions).toHaveLength(2);
+    expect(result.assetRegions.map((asset) => asset.captionUnitId))
+      .toEqual(['merged-captions', 'merged-captions']);
+    expect(result.assetRegions[0]!.rect.x + result.assetRegions[0]!.rect.w)
+      .toBeLessThan(198.91);
+  });
+
+  it('retracts label-driven expansion that only grazes the preceding figure caption', () => {
+    const doc = fixtureDoc();
+    doc.blocks = [
+      {
+        id: 'caption-7', docId: 'en', type: 'caption', pageIndex: 0,
+        rect: { x: 105, y: 264, w: 190, h: 12 }, order: 0,
+        text: 'Figure 7: Previous diagram', splitAllowed: false, widthMode: 'column',
+      },
+      {
+        id: 'figure-8-labels', docId: 'en', type: 'equation', pageIndex: 0,
+        rect: { x: 60, y: 274, w: 220, h: 30 }, order: 1,
+        text: 'Input\nStage 1\nStage 2\nOutput', splitAllowed: false, widthMode: 'column',
+      },
+      {
+        id: 'caption-8', docId: 'en', type: 'caption', pageIndex: 0,
+        rect: { x: 98, y: 382, w: 205, h: 12 }, order: 2,
+        text: 'Figure 8: Batch Modular Inverse Unit', splitAllowed: false, widthMode: 'column',
+      },
+    ];
+    const result = reconcileVisionLayout(doc, [{
+      pageIndex: 0, layout: 'mixed', regions: [{
+        type: 'figure', bbox: [80, 350, 400, 130], column: 'left',
+        captionBBox: [130, 485, 290, 20], visibleLabel: 'Figure 8',
+        captionPosition: 'below', confidence: 0.95,
+      }],
+    }]);
+
+    expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions[0]?.captionUnitId).toBe('caption-8');
+    expect(result.assetRegions[0]!.rect.y).toBeGreaterThanOrEqual(278);
+  });
+
+  it('still rejects a source figure box that originally covers a foreign caption', () => {
+    const doc = fixtureDoc();
+    doc.blocks = [
+      {
+        id: 'caption-7', docId: 'en', type: 'caption', pageIndex: 0,
+        rect: { x: 105, y: 264, w: 190, h: 12 }, order: 0,
+        text: 'Figure 7: Previous diagram', splitAllowed: false, widthMode: 'column',
+      },
+      {
+        id: 'caption-8', docId: 'en', type: 'caption', pageIndex: 0,
+        rect: { x: 98, y: 382, w: 205, h: 12 }, order: 1,
+        text: 'Figure 8: Batch Modular Inverse Unit', splitAllowed: false, widthMode: 'column',
+      },
+    ];
+    const result = reconcileVisionLayout(doc, [{
+      pageIndex: 0, layout: 'mixed', regions: [{
+        type: 'figure', bbox: [80, 330, 400, 150], column: 'left',
+        captionBBox: [130, 485, 290, 20], visibleLabel: 'Figure 8',
+        captionPosition: 'below', confidence: 0.95,
+      }],
+    }]);
+
+    expect(result.unresolved).toEqual([expect.objectContaining({ reason: 'caption-overlap' })]);
+  });
+
+  it('does not use a visible number when the PDF text layer contains duplicate caption identities', () => {
+    const doc = fixtureDoc();
+    doc.blocks.push(
+      {
+        id: 'caption-6a', docId: 'en', type: 'caption', pageIndex: 0,
+        rect: { x: 330, y: 200, w: 220, h: 20 }, order: 2,
+        text: 'Figure 6: First panel', splitAllowed: false, widthMode: 'column',
+      },
+      {
+        id: 'caption-6b', docId: 'en', type: 'caption', pageIndex: 0,
+        rect: { x: 330, y: 350, w: 220, h: 20 }, order: 3,
+        text: 'Figure 6: Duplicate panel', splitAllowed: false, widthMode: 'column',
+      },
+    );
+    const result = reconcileVisionLayout(doc, [{
+      pageIndex: 0, layout: 'mixed', regions: [{
+        type: 'figure', bbox: [520, 470, 460, 280], column: 'right',
+        captionBBox: [600, 755, 300, 15], visibleLabel: 'Figure 6',
+        captionPosition: 'below', confidence: 0.95,
+      }],
+    }]);
+
+    expect(result.unresolved).toEqual([expect.objectContaining({ reason: 'caption-unmatched' })]);
+  });
+
   it('matches an IEEE Fig. caption embedded after diagram labels', () => {
     const doc = fixtureDoc();
     doc.blocks = doc.blocks.filter((block) => block.id !== 'body-1');
@@ -581,6 +830,23 @@ describe('vision: deterministic layout reconciliation', () => {
 
     expect(result.assetRegions).toEqual([]);
     expect(result.unresolved).toHaveLength(8);
+    expect(result.unresolved.every((item) => item.reason === 'implausible-formula-cluster')).toBe(true);
+  });
+
+  it('rejects a repeated stack of thin column-width formula boxes hallucinated from text lines', () => {
+    const result = reconcileVisionLayout(fixtureDoc(), [{
+      pageIndex: 0,
+      layout: 'double',
+      regions: Array.from({ length: 12 }, (_, index) => ({
+        type: 'display_formula' as const,
+        bbox: [102, 190 + index * 18, 430, 32] as [number, number, number, number],
+        column: 'left' as const,
+        confidence: 0.95,
+      })),
+    }]);
+
+    expect(result.assetRegions).toEqual([]);
+    expect(result.unresolved).toHaveLength(12);
     expect(result.unresolved.every((item) => item.reason === 'implausible-formula-cluster')).toBe(true);
   });
 

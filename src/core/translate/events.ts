@@ -2,9 +2,26 @@ export type AiLogEvent =
   | { type: 'vision-layout-page-started'; at: number; page: number; totalPages: number }
   | {
       type: 'vision-layout-page-phase'; at: number; page: number; totalPages: number;
-      phase: 'render-retrying' | 'analysis-retrying' | 'analysis-fallback';
+      phase: 'render-retrying' | 'analysis-retrying' | 'analysis-paused';
     }
-  | { type: 'vision-layout-page'; at: number; page: number; totalPages: number; cached: boolean }
+  | {
+      type: 'vision-layout-page'; at: number; page: number; totalPages: number; cached: boolean;
+      networkAttempts?: number; promptTokens?: number; completionTokens?: number;
+    }
+  | {
+      type: 'vision-correction-started'; at: number; page: number; totalPages: number;
+      round: 1 | 2; correctionCallsUsed: number; maxCorrectionCalls: number; errorCode: string;
+    }
+  | {
+      type: 'vision-correction-completed'; at: number; page: number; totalPages: number;
+      round: 1 | 2; correctionCallsUsed: number; maxCorrectionCalls: number;
+      promptTokens: number; completionTokens: number;
+    }
+  | {
+      type: 'vision-correction-stopped'; at: number; page: number; totalPages: number;
+      round: 1 | 2; reason: 'budget-exhausted' | 'repeated-error' | 'no-improvement';
+      correctionCallsUsed: number; maxCorrectionCalls: number;
+    }
   | {
       type: 'vision-layout-fallback'; at: number; page: number; region: number;
       reason: 'low-confidence' | 'caption-unmatched' | 'page-edge-touch'

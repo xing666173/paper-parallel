@@ -13,6 +13,7 @@ export interface ImmutableAsset {
   sha256: string;
   widthMode: WidthMode;
   captionUnitId?: string;
+  crossPageAssetGroupId?: string;
 }
 
 export interface AssetManifest {

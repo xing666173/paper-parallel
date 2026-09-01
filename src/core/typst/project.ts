@@ -1,6 +1,7 @@
 import type { ImmutableAsset } from '../assets/types';
 import { verifyAssetHash } from '../assets/hash';
 import type { LayoutRegion, SemanticUnitKind } from '../../types/models';
+import type { CrossPageAssetGroup } from '../vision/crossPageRelations';
 import { escapeTypstString, escapeTypstText } from './escape';
 import {
   buildAcademicTemplate,
@@ -23,6 +24,7 @@ export interface TypstSemanticUnit {
   headingNumber?: string;
   targetSegments?: TypstTargetSegment[];
   assetId?: string;
+  crossPageAssetGroupId?: string;
   sourceColumn?: 'left' | 'right' | 'span';
 }
 
@@ -34,6 +36,7 @@ export interface TypstProjectInput {
   /** Keep the source regions, or reflow every translated text region as one readable column. */
   targetLayoutPolicy?: TargetLayoutPolicy;
   repairPlan?: LayoutRepairPlan;
+  crossPageAssetGroups?: readonly CrossPageAssetGroup[];
 }
 
 export interface LayoutRepairAction {
@@ -405,7 +408,19 @@ export async function buildTypstProject(input: TypstProjectInput): Promise<Typst
     version: 1,
     markerIds,
     regionIds: input.regions.map((region) => region.id),
-    assets: input.assets.map((asset) => ({ id: asset.id, sha256: asset.sha256 })),
+    assets: input.assets.map((asset) => ({
+      id: asset.id,
+      sha256: asset.sha256,
+      crossPageAssetGroupId: asset.crossPageAssetGroupId,
+    })),
+    crossPageAssetGroups: (input.crossPageAssetGroups ?? []).map((group) => ({
+      id: group.id,
+      kind: group.kind,
+      members: group.members,
+      captionPageIndex: group.captionPageIndex,
+      captionAnchor: group.captionAnchor,
+      provenance: group.provenance,
+    })),
   })));
   return {
     mainContent,

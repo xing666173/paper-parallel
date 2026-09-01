@@ -147,6 +147,12 @@ async function downloadPackage() {
         {{ qualityReport.pass ? '逐页质检通过' : '逐页质检未通过' }} ·
         {{ qualityReport.attempts.at(-1)?.reviewedPages ?? 0 }} 页 ·
         {{ Math.max(0, qualityReport.attempts.length - 1) }} 轮自动修复
+        <template v-if="qualityReport.sourceLayout">
+          · 源版式 {{ qualityReport.sourceLayout.pagePlans.length }} 页通过
+          · {{ qualityReport.sourceLayout.initialAnalysisCalls ?? 0 }} 次源页识别
+          · {{ qualityReport.sourceLayout.correctionCallsUsed }} 次视觉纠错
+          · {{ qualityReport.sourceLayout.crossPageAssetGroups.length }} 个跨页资产组
+        </template>
       </p>
       <ReaderView
         :english-pdf="englishPdf" :chinese-pdf="chinesePdf" :manifest="manifest"

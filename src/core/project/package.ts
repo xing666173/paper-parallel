@@ -61,6 +61,7 @@ export async function buildProjectPackage(
   const chinese = byKind.get('chinese-pdf');
   const typst = byKind.get('typst-source');
   const qualityReport = byKind.get('quality-report');
+  const acceptedDocumentPlan = byKind.get('accepted-document-plan');
   if (!english || !chinese) throw new Error('项目包缺少英文或中文 PDF');
 
   const checksums: Record<string, string> = {
@@ -69,8 +70,9 @@ export async function buildProjectPackage(
   };
   if (typst) checksums['translation.typ'] = await hashBlob(typst.blob);
   if (qualityReport) checksums['quality-report.json'] = await hashBlob(qualityReport.blob);
+  if (acceptedDocumentPlan) checksums['layout-plan.json'] = await hashBlob(acceptedDocumentPlan.blob);
   const project = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     projectId,
     name: context.project?.name ?? task?.settings?.sourceFileName ?? projectId,
     createdAt: task?.createdAt ?? null,
@@ -87,6 +89,7 @@ export async function buildProjectPackage(
     sourceFileHash: context.project?.sourceFileHash ?? task?.settings?.sourceFileHash ?? null,
     pageCounts: context.project?.pageCounts ?? null,
     artifactChecksums: checksums,
+    visionPlanSchemaVersion: acceptedDocumentPlan ? 1 : null,
   };
   const translation = translations.map(({ key: _key, projectId: _projectId, ...record }) => record);
   const sourceUnits = context.sourceUnits ?? alignment?.units.flatMap((unit) => unit.sourceUnitIds) ?? [];
@@ -103,6 +106,7 @@ export async function buildProjectPackage(
     'translation.json': json(translation),
     'translation.typ': typst ? await typst.blob.text() : '',
   };
+  if (acceptedDocumentPlan) textFiles['layout-plan.json'] = await acceptedDocumentPlan.blob.text();
   Object.values(textFiles).forEach((text) => assertSecretFree(text));
 
   const zip = new JSZip();

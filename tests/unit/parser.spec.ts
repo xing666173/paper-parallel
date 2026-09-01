@@ -208,6 +208,19 @@ describe('parser: lines -> blocks', () => {
     expect(isTableCaptionText(merged)).toBe(true);
   });
 
+  it('recognizes lowercase function names in algorithm titles without accepting prose references', () => {
+    const line = (text: string, y: number) => ({
+      y, x1: 50, x2: 560, h: 10, text, items: [], col: 'full' as const,
+    });
+    const blocks = groupLinesToBlocks([
+      line('Algorithm 4 pBucketPointsReduction', 100),
+      line('Algorithm 4 shows the reduction procedure used below.', 130),
+    ], 612, 792);
+
+    expect(blocks.find((block) => block.text.includes('pBucket'))?.type).toBe('caption');
+    expect(blocks.find((block) => block.text.includes('shows the'))?.type).toBe('paragraph');
+  });
+
   it('recognizes an IEEE Fig. caption whose description starts with The', () => {
     expect(isFigureCaptionText('Fig. 10. The overall architecture of PipeZK.')).toBe(true);
     expect(isFigureCaptionText('Figure 10. The architecture is discussed below.')).toBe(false);

@@ -1,6 +1,13 @@
 import type { AiLogEvent } from '../translate/events';
 import type { ProjectRepository } from '../project/repository';
-import type { AlignmentUnit, TaskSnapshot, Doc, Rect, SemanticUnit } from '../../types/models';
+import type {
+  AlignmentUnit,
+  TaskSnapshot,
+  Doc,
+  Rect,
+  SemanticUnit,
+  VisionAttemptState,
+} from '../../types/models';
 import type { ProductionPipelineStages, PipelineValue } from './productionPipeline';
 import { getDocument } from '../pdf/runtime';
 import { extractBitmapRegions } from '../pdf/bitmapRegions';
@@ -24,10 +31,27 @@ import {
   restoreProtectedTokensFromTranslation,
 } from '../translate/protected';
 import { buildSingleBlockRepairPlan } from '../translate/repair';
-import { chatCompletion } from '../translate/client';
-import { buildBatchPrompt, buildSystemPrompt, SYSTEM_PROMPT_VERSION } from '../translate/prompts';
+import {
+  chatCompletion,
+  isNonRetryableDeepSeekAccountError,
+  isRetryableDeepSeekTransportError,
+} from '../translate/client';
+import {
+  buildBatchPrompt,
+  buildSystemPrompt,
+  buildTranslationRecoveryInstruction,
+  SYSTEM_PROMPT_VERSION,
+} from '../translate/prompts';
 import type { TranslationBlockRequest, TranslationBlockResponse, TranslationRequest } from '../translate/protocol';
-import { buildFormulaOcrCacheKey, buildTranslationCacheKey } from '../project/cacheKey';
+import {
+  buildAcceptedPagePlanCacheKey,
+  buildFormulaOcrCacheKey,
+  buildRawVisionResponseCacheKey,
+  buildRecoveredPagePlanCacheKey,
+  buildTranslationCacheKey,
+  buildVisionCorrectionPatchCacheKey,
+  type VisionPlanCacheIdentity,
+} from '../project/cacheKey';
 import { buildSemanticGroups, buildBlockAndAssetAlignmentUnits } from '../align/semanticUnits';
 import {
   buildTypstProject,
@@ -43,14 +67,29 @@ import { resolveSourceGeometry } from '../align/sourceGeometry';
 import { buildAlignmentManifest, type AlignmentManifest } from '../align/manifest';
 import { runAlignmentGate } from '../quality/alignmentGate';
 import type { ImmutableAsset } from '../assets/types';
-import { analyzePdfLayoutWithVision } from '../vision/analyze';
+import {
+  analyzePdfLayoutWithVision,
+  VISION_LAYOUT_MODEL,
+  VISION_LAYOUT_FALLBACK_RENDER_SCALE,
+  VISION_LAYOUT_LAST_RESORT_RENDER_SCALE,
+  VISION_LAYOUT_PARSER_VERSION,
+  VISION_LAYOUT_RECOVERY_VERSION,
+  VISION_LAYOUT_RENDER_SCALE,
+  VISION_LAYOUT_VERIFIER_VERSION,
+  VISION_PAGE_PLAN_PROTOCOL_VERSION,
+  VISION_RENDER_VERSION,
+} from '../vision/analyze';
 import { authorPortraitAssetsFromBitmapRegions, reconcileVisionLayout } from '../vision/reconcile';
-import { serializeVisionPageAnalysis } from '../vision/protocol';
-import { inspectCompiledPdf, runPdfContentGate } from '../quality/pdfContentGate';
+import {
+  findAssetFooterOverflows,
+  inspectCompiledPdf,
+  runPdfContentGate,
+} from '../quality/pdfContentGate';
 import { persistValidatedOutputs } from '../quality/finalPersistence';
 import {
   isBlockingVisionFinalIssue,
   runVisionFinalReview,
+  type VisionFinalIssue,
   type VisionFinalReport,
 } from '../vision/finalReview';
 import {
@@ -61,7 +100,47 @@ import {
 } from '../vision/formulaOcr';
 import type { TargetLayoutPolicy } from '../typst/template';
 import { buildLayoutRepairPlan, type PdfPageSize } from '../quality/layoutRepair';
-import type { QualityAttemptReport, QualityReport } from '../quality/report';
+import type {
+  QualityAttemptReport,
+  QualityReport,
+  SourceLayoutCorrectionAttempt,
+  SourceLayoutQualityReport,
+} from '../quality/report';
+import { assertPreparedStructure } from './structureInvariants';
+import {
+  MarkerInvariantError,
+  validateGlobalMarkers,
+  validateTranslationBlockMarkers,
+} from './markerInvariants';
+import {
+  planToVisionAnalysis,
+  VISION_PLAN_CANONICALIZATION_VERSION,
+  withRecomputedPlanVersion,
+  type VisionPagePlan,
+} from '../vision/pagePlan';
+import { VISION_LAYOUT_PROMPT_VERSION } from '../vision/prompts';
+import {
+  applyVisionCorrectionPatch,
+  replayCachedVisionCorrection,
+  requestVisionCorrection,
+  VISION_CORRECTION_PROMPT_VERSION,
+  VisionPatchError,
+} from '../vision/correction';
+import {
+  isVisionCorrectableReason,
+  reconciliationValidationIssues,
+  recoverLocallyRejectedRegions,
+} from '../vision/recoveryPolicy';
+import { PdfPageRenderTimeoutError, renderPdfPageAsPng } from '../vision/render';
+import { RecoverablePipelineError } from '../task/recoverable';
+import { CachePersistenceError } from '../project/cacheErrors';
+import { safeErrorMessage } from '../security/errors';
+import {
+  inferCrossPageAssetCandidates,
+  digestAcceptedDocumentPlan,
+  validateCrossPageAssetCandidates,
+  type CrossPageAssetGroup,
+} from '../vision/crossPageRelations';
 
 const SESSION_KEY_STORAGE = 'paper-parallel.deepseek-key-session';
 const LOCAL_KEY_STORAGE = 'paper-parallel.deepseek-key';
@@ -83,6 +162,9 @@ interface BrowserValue extends PipelineValue {
   manifest?: AlignmentManifest;
   requiredBlocks?: number;
   validatedBlocks?: number;
+  visionAttempt?: VisionAttemptState;
+  crossPageAssetGroups?: CrossPageAssetGroup[];
+  sourceLayoutReport?: SourceLayoutQualityReport;
 }
 
 export interface BrowserPipelineStageOptions {
@@ -166,6 +248,16 @@ function typstSourceColumn(
   if (!rect || !Number.isFinite(pageWidth) || pageWidth <= 0) return 'span';
   if (rect.w >= pageWidth * 0.55) return 'span';
   return rect.x + rect.w / 2 < pageWidth / 2 ? 'left' : 'right';
+}
+
+async function blobDataUrl(blob: Blob): Promise<string> {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return `data:${blob.type || 'image/png'};base64,${btoa(binary)}`;
 }
 
 async function buildAlignmentForCompiled(
@@ -271,7 +363,12 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
       const doc = requireValue(current.doc, '解析文档缺失');
       const pdf = requireValue(current.sourcePdf, '源 PDF 缺失');
       if (!apiKey.trim()) throw new Error('Vision Exp 版式识别需要 DeepSeek API Key，请返回上传页重新验证');
-      const analyses = await analyzePdfLayoutWithVision({
+      const plansByPage = new Map<number, VisionPagePlan>();
+      const cachedPlanPages = new Set<number>();
+      let initialAnalysisCalls = 0;
+      let initialPromptTokens = 0;
+      let initialCompletionTokens = 0;
+      let analyses = await analyzePdfLayoutWithVision({
         pdf,
         baseUrl: options.baseUrl ?? 'https://api.deepseek.com',
         apiKey,
@@ -281,13 +378,37 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
           const artifact = await options.repository.findArtifact(key);
           return artifact ? JSON.parse(await artifact.blob.text()) : undefined;
         },
-        saveCached: async (key, _pageIndex, analysis) => options.repository.putArtifact({
+        loadAccepted: async (key) => {
+          const artifact = await options.repository.findArtifact(key);
+          return artifact ? JSON.parse(await artifact.blob.text()) : undefined;
+        },
+        loadRecovered: async (key) => {
+          const artifact = await options.repository.findArtifact(key);
+          return artifact ? JSON.parse(await artifact.blob.text()) : undefined;
+        },
+        saveRaw: async (key, pageIndex, response) => options.repository.putArtifact({
           key,
           projectId: options.projectId,
-          kind: 'vision-layout',
-          blob: new Blob([JSON.stringify(serializeVisionPageAnalysis(analysis))], { type: 'application/json' }),
+          kind: 'raw-vision-response',
+          blob: new Blob([JSON.stringify(response)], { type: 'application/json' }),
           updatedAt: Date.now(),
+          dependencies: { pageIndices: [pageIndex], cacheIdentityVersion: 'vision-cache-v1' },
         }),
+        saveRecovered: async (key, pageIndex, plan) => options.repository.putArtifact({
+          key,
+          projectId: options.projectId,
+          kind: 'recovered-page-plan',
+          blob: new Blob([JSON.stringify(plan)], { type: 'application/json' }),
+          updatedAt: Date.now(),
+          dependencies: {
+            pageIndices: [pageIndex], planVersion: plan.planVersion,
+            cacheIdentityVersion: 'vision-cache-v1',
+          },
+        }),
+        onPlan: ({ pageIndex, plan, cached }) => {
+          plansByPage.set(pageIndex, plan);
+          if (cached) cachedPlanPages.add(pageIndex);
+        },
         onPageStart: (event) => options.onAiEvent?.({
           type: 'vision-layout-page-started', at: Date.now(), page: event.pageIndex + 1,
           totalPages: event.totalPages,
@@ -296,12 +417,537 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
           type: 'vision-layout-page-phase', at: Date.now(), page: event.pageIndex + 1,
           totalPages: event.totalPages, phase: event.phase,
         }),
-        onPage: (event) => options.onAiEvent?.({
-          type: 'vision-layout-page', at: Date.now(), page: event.pageIndex + 1,
-          totalPages: event.totalPages, cached: event.cached,
-        }),
+        onPage: (event) => {
+          initialAnalysisCalls += event.networkAttempts;
+          initialPromptTokens += event.promptTokens;
+          initialCompletionTokens += event.completionTokens;
+          options.onAiEvent?.({
+            type: 'vision-layout-page', at: Date.now(), page: event.pageIndex + 1,
+            totalPages: event.totalPages, cached: event.cached,
+            networkAttempts: event.networkAttempts,
+            promptTokens: event.promptTokens,
+            completionTokens: event.completionTokens,
+          });
+        },
       });
-      const reconciled = reconcileVisionLayout(doc, analyses);
+      const sourceBitmapRegions = current.sourceBitmapRegions ?? new Map<number, Rect[]>();
+      let reconciled = reconcileVisionLayout(doc, analyses, 0.8, sourceBitmapRegions);
+      for (const [pageIndex, plan] of plansByPage) {
+        plansByPage.set(pageIndex, recoverLocallyRejectedRegions(plan, reconciled));
+      }
+      analyses = [...plansByPage.values()]
+        .sort((left, right) => left.pageIndex - right.pageIndex)
+        .map(planToVisionAnalysis);
+      reconciled = reconcileVisionLayout(doc, analyses, 0.8, sourceBitmapRegions);
+
+      let correctionIssues = reconciliationValidationIssues(plansByPage, reconciled)
+        .filter((issue) => reconciled.unresolved.some((item) => (
+          item.pageIndex === issue.pageIndex
+          && item.regionId === issue.regionId
+          && isVisionCorrectableReason(item.reason)
+        )));
+      const failedPageCount = new Set(correctionIssues.map((issue) => issue.pageIndex)).size;
+      const maxCorrectionCalls = settings.maxVisionCorrectionCalls
+        ?? Math.min(failedPageCount * 2, 12);
+      let correctionCallsUsed = 0;
+      let correctionPromptTokens = 0;
+      let correctionCompletionTokens = 0;
+      let lastCorrectionRound = 0 as 0 | 1 | 2;
+      const sourceCorrectionAttempts: SourceLayoutCorrectionAttempt[] = [];
+      const buildSourceLayoutReport = (
+        pass: boolean,
+        issues: readonly ReturnType<typeof reconciliationValidationIssues>[number][],
+        crossPageAssetGroups: readonly CrossPageAssetGroup[] = [],
+      ): SourceLayoutQualityReport => ({
+        schemaVersion: 1,
+        pass,
+        pagePlans: [...plansByPage.values()]
+          .sort((left, right) => left.pageIndex - right.pageIndex)
+          .map((plan) => ({
+            pageIndex: plan.pageIndex,
+            planVersion: plan.planVersion,
+            planDigest: plan.planDigest,
+            origin: plan.origin,
+            recoveryActions: plan.recoveryActions.map((action) => ({ ...action })),
+          })),
+        correctionAttempts: sourceCorrectionAttempts.map((attempt) => ({
+          ...attempt, errorFingerprints: [...attempt.errorFingerprints],
+        })),
+        initialAnalysisCalls,
+        initialPromptTokens,
+        initialCompletionTokens,
+        correctionCallsUsed,
+        maxCorrectionCalls,
+        promptTokens: initialPromptTokens + correctionPromptTokens,
+        completionTokens: initialCompletionTokens + correctionCompletionTokens,
+        unresolvedIssues: issues.map((issue) => ({
+          pageIndex: issue.pageIndex,
+          regionId: issue.regionId,
+          code: issue.code,
+          reason: issue.reason,
+          fingerprint: issue.fingerprint,
+        })),
+        crossPageAssetGroups: crossPageAssetGroups.map((group) => ({
+          ...group,
+          members: group.members.map((member) => ({ ...member })),
+          weakEvidence: [...group.weakEvidence],
+          provenance: [...group.provenance],
+        })),
+      });
+      const persistSourceLayoutReport = async (
+        pass: boolean,
+        issues: readonly ReturnType<typeof reconciliationValidationIssues>[number][],
+        crossPageAssetGroups: readonly CrossPageAssetGroup[] = [],
+      ): Promise<SourceLayoutQualityReport> => {
+        const report = buildSourceLayoutReport(pass, issues, crossPageAssetGroups);
+        await options.repository.putArtifact({
+          key: `${options.projectId}:vision-diagnostic`,
+          projectId: options.projectId,
+          kind: 'vision-diagnostic',
+          blob: new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' }),
+          updatedAt: Date.now(),
+          dependencies: {
+            pageIndices: [...plansByPage.keys()].sort((left, right) => left - right),
+            cacheIdentityVersion: 'vision-cache-v1',
+          },
+        });
+        return report;
+      };
+      const pausedVisionAttempt = (
+        pageIndex: number,
+        round: 1 | 2,
+        errorCode: string,
+        errorMessage: string,
+      ): VisionAttemptState => {
+        const failedPages = [...new Set(correctionIssues.map((issue) => issue.pageIndex))].sort((a, b) => a - b);
+        return {
+          phase: round === 1 ? 'correction-full-page' : 'correction-local-crop',
+          pageIndex,
+          totalPages: pdf.numPages,
+          correctionRound: round,
+          remainingPageRounds: Math.max(0, 2 - round),
+          validatedPages: Math.max(0, pdf.numPages - failedPages.length),
+          failedPages,
+          cachedPages: cachedPlanPages.size,
+          correctionCallsUsed,
+          maxCorrectionCalls,
+          promptTokens: initialPromptTokens + correctionPromptTokens,
+          completionTokens: initialCompletionTokens + correctionCompletionTokens,
+          errorCode,
+          errorMessage,
+        };
+      };
+      for (let round = 1 as 1 | 2; correctionIssues.length && round <= 2; round = (round + 1) as 1 | 2) {
+        lastCorrectionRound = round;
+        const issuesBeforeRound = correctionIssues;
+        const pageIndices = [...new Set(issuesBeforeRound.map((issue) => issue.pageIndex))].sort((a, b) => a - b);
+        for (const pageIndex of pageIndices) {
+          const pageIssues = issuesBeforeRound.filter((issue) => issue.pageIndex === pageIndex);
+          if (correctionCallsUsed >= maxCorrectionCalls) {
+            options.onAiEvent?.({
+              type: 'vision-correction-stopped', at: Date.now(), page: pageIndex + 1,
+              totalPages: pdf.numPages, round, reason: 'budget-exhausted',
+              correctionCallsUsed, maxCorrectionCalls,
+            });
+            await persistSourceLayoutReport(false, correctionIssues);
+            throw new RecoverablePipelineError(
+              'vision-correction-budget-exhausted',
+              `Exp 版式纠错达到任务调用上限 ${maxCorrectionCalls}，任务已暂停`,
+              pausedVisionAttempt(
+                pageIndex, round, 'source-plan.correction-budget-exhausted',
+                '任务级视觉纠错调用预算已耗尽',
+              ),
+            );
+          }
+          const failedRegionIds = new Set(pageIssues.flatMap((issue) => issue.regionId ? [issue.regionId] : []));
+          const currentPlan = requireValue(plansByPage.get(pageIndex), `缺少第 ${pageIndex + 1} 页视觉计划`);
+          const patchBase = withRecomputedPlanVersion({
+            ...currentPlan,
+            regions: currentPlan.regions.map((region) => ({
+              ...region,
+              locked: !failedRegionIds.has(region.id),
+            })),
+          });
+          plansByPage.set(pageIndex, patchBase);
+          const page = await pdf.getPage(pageIndex + 1);
+          let imageUrl: string | undefined;
+          let correctionRenderScale = round === 1 ? VISION_LAYOUT_RENDER_SCALE : 6;
+          try {
+            if (round === 1) {
+              let renderError: unknown;
+              for (const scale of [
+                VISION_LAYOUT_RENDER_SCALE,
+                VISION_LAYOUT_FALLBACK_RENDER_SCALE,
+                VISION_LAYOUT_LAST_RESORT_RENDER_SCALE,
+              ]) {
+                try {
+                  imageUrl = await renderPdfPageAsPng(page, { scale, signal, timeoutMs: 30_000 });
+                  correctionRenderScale = scale;
+                  renderError = undefined;
+                  break;
+                } catch (error) {
+                  if (!(error instanceof PdfPageRenderTimeoutError) || signal.aborted) throw error;
+                  renderError = error;
+                  options.onAiEvent?.({
+                    type: 'vision-layout-page-phase', at: Date.now(), page: pageIndex + 1,
+                    totalPages: pdf.numPages, phase: 'render-retrying',
+                  });
+                }
+              }
+              if (!imageUrl) throw renderError ?? new Error('纠错整页渲染失败');
+            } else {
+              const sourcePage = doc.pages[pageIndex]!;
+              const left = Math.min(...pageIssues.map((issue) => (
+                (plansByPage.get(pageIndex)?.regions.find((region) => region.id === issue.regionId)?.bbox[0] ?? 0)
+                  / 1000 * sourcePage.width
+              )));
+              const top = Math.min(...pageIssues.map((issue) => (
+                (plansByPage.get(pageIndex)?.regions.find((region) => region.id === issue.regionId)?.bbox[1] ?? 0)
+                  / 1000 * sourcePage.height
+              )));
+              const right = Math.max(...pageIssues.map((issue) => {
+                const box = plansByPage.get(pageIndex)?.regions.find((region) => region.id === issue.regionId)?.bbox;
+                return ((box?.[0] ?? 0) + (box?.[2] ?? 1000)) / 1000 * sourcePage.width;
+              }));
+              const bottom = Math.max(...pageIssues.map((issue) => {
+                const box = plansByPage.get(pageIndex)?.regions.find((region) => region.id === issue.regionId)?.bbox;
+                return ((box?.[1] ?? 0) + (box?.[3] ?? 1000)) / 1000 * sourcePage.height;
+              }));
+              const context = 24;
+              const cropRect = {
+                x: Math.max(0, left - context),
+                y: Math.max(0, top - context),
+                w: Math.min(sourcePage.width, right + context) - Math.max(0, left - context),
+                h: Math.min(sourcePage.height, bottom + context) - Math.max(0, top - context),
+              };
+              let renderError: unknown;
+              for (const scale of [6, 4, 2]) {
+                try {
+                  imageUrl = await blobDataUrl(await cropPageRegionLossless(page, cropRect, scale));
+                  correctionRenderScale = scale;
+                  renderError = undefined;
+                  break;
+                } catch (error) {
+                  if (signal.aborted || (error instanceof Error && error.name === 'AbortError')) throw error;
+                  renderError = error;
+                  options.onAiEvent?.({
+                    type: 'vision-layout-page-phase', at: Date.now(), page: pageIndex + 1,
+                    totalPages: pdf.numPages, phase: 'render-retrying',
+                  });
+                }
+              }
+              if (!imageUrl) throw renderError ?? new Error('纠错局部裁图失败');
+            }
+          } catch (error) {
+            if (signal.aborted || (error instanceof Error && error.name === 'AbortError')) throw error;
+            await persistSourceLayoutReport(false, correctionIssues);
+            throw new RecoverablePipelineError(
+              'render-retries-exhausted',
+              `第 ${pageIndex + 1} 页视觉纠错图像连续渲染失败，任务已暂停`,
+              pausedVisionAttempt(
+                pageIndex, round, 'transient.render-retries-exhausted', '视觉纠错图像连续渲染失败',
+              ),
+            );
+          } finally {
+            try { page.cleanup?.(); } catch { /* best-effort release */ }
+          }
+          if (!imageUrl) throw new Error('视觉纠错图像缺失');
+          const validationErrorDigest = pageIssues.map((issue) => issue.fingerprint).sort().join(',');
+          const correctionIdentity: VisionPlanCacheIdentity = {
+            fileHash: settings.sourceFileHash,
+            pageIndex,
+            modelId: VISION_LAYOUT_MODEL,
+            promptVersion: VISION_CORRECTION_PROMPT_VERSION,
+            renderVersion: VISION_RENDER_VERSION,
+            renderScale: correctionRenderScale,
+            protocolVersion: VISION_PAGE_PLAN_PROTOCOL_VERSION,
+            parserVersion: VISION_LAYOUT_PARSER_VERSION,
+            verifierVersion: VISION_LAYOUT_VERIFIER_VERSION,
+            recoveryVersion: VISION_LAYOUT_RECOVERY_VERSION,
+            canonicalizationVersion: VISION_PLAN_CANONICALIZATION_VERSION,
+            round,
+            basePlanDigest: patchBase.planDigest,
+            validationErrorDigest,
+          };
+          let correction: Awaited<ReturnType<typeof requestVisionCorrection>> | undefined;
+          let correctedPlan: VisionPagePlan | undefined;
+          const callsBeforeRequest = correctionCallsUsed;
+          const promptTokensBeforeRequest = correctionPromptTokens;
+          const completionTokensBeforeRequest = correctionCompletionTokens;
+          const patchCacheKey = buildVisionCorrectionPatchCacheKey(correctionIdentity);
+          const recoveredCacheKey = buildRecoveredPagePlanCacheKey(correctionIdentity);
+          try {
+            const [patchArtifact, recoveredArtifact] = await Promise.all([
+              options.repository.findArtifact(patchCacheKey),
+              options.repository.findArtifact(recoveredCacheKey),
+            ]);
+            if (patchArtifact && recoveredArtifact) {
+              const cached = replayCachedVisionCorrection({
+                patchValue: JSON.parse(await patchArtifact.blob.text()),
+                planValue: JSON.parse(await recoveredArtifact.blob.text()),
+                patchBase,
+                issues: pageIssues,
+                round,
+              });
+              correction = {
+                patch: cached.patch,
+                usage: { promptTokens: 0, completionTokens: 0 },
+                networkAttempts: 0,
+              };
+              correctedPlan = cached.plan;
+            }
+          } catch {
+            // A correction is resumable only when its patch can be replayed
+            // through the current atomic gate and exactly reproduces the
+            // cached plan. Partial, stale, or corrupt pairs are cache misses.
+            correction = undefined;
+            correctedPlan = undefined;
+          }
+          if (!correction) {
+            try {
+              correction = await requestVisionCorrection({
+                plan: patchBase,
+                issues: pageIssues,
+                round,
+                imageUrl,
+                baseUrl: options.baseUrl ?? 'https://api.deepseek.com',
+                apiKey,
+                signal,
+                maxAttempts: Math.min(2, maxCorrectionCalls - correctionCallsUsed) as 1 | 2,
+                onAttemptStart: () => {
+                  correctionCallsUsed += 1;
+                  options.onAiEvent?.({
+                    type: 'vision-correction-started', at: Date.now(), page: pageIndex + 1,
+                    totalPages: pdf.numPages, round, correctionCallsUsed, maxCorrectionCalls,
+                    errorCode: pageIssues[0]?.code ?? 'source-plan.unknown',
+                  });
+                },
+                validatePatch: (patch) => {
+                  correctedPlan = applyVisionCorrectionPatch(patchBase, patch, { issues: pageIssues });
+                },
+                onAttemptResponse: ({ usage }) => {
+                  correctionPromptTokens += usage.promptTokens;
+                  correctionCompletionTokens += usage.completionTokens;
+                },
+                onRawResponse: async (response) => options.repository.putArtifact({
+                  key: `${buildRawVisionResponseCacheKey(correctionIdentity)}:attempt-${response.attempt}`,
+                  projectId: options.projectId,
+                  kind: 'raw-vision-response',
+                  blob: new Blob([JSON.stringify({
+                    schemaVersion: 1, pageIndex, round, receivedAt: Date.now(), ...response,
+                  })], { type: 'application/json' }),
+                  updatedAt: Date.now(),
+                  dependencies: { pageIndices: [pageIndex], cacheIdentityVersion: 'vision-cache-v1' },
+                }),
+              });
+            } catch (error) {
+              if (error instanceof CachePersistenceError) throw error;
+              const requestError = safeErrorMessage(error, 240);
+              sourceCorrectionAttempts.push({
+                pageIndex,
+                round,
+                basePlanVersion: patchBase.planVersion,
+                errorFingerprints: pageIssues.map((issue) => issue.fingerprint),
+                outcome: 'request-failed',
+                networkAttempts: correctionCallsUsed - callsBeforeRequest,
+                promptTokens: correctionPromptTokens - promptTokensBeforeRequest,
+                completionTokens: correctionCompletionTokens - completionTokensBeforeRequest,
+                errorCode: error instanceof Error ? error.name : 'UnknownError',
+                errorMessage: requestError,
+              });
+              await persistSourceLayoutReport(false, correctionIssues);
+              throw new RecoverablePipelineError(
+                error instanceof VisionPatchError
+                  ? 'vision-protocol-retries-exhausted'
+                  : 'network-retries-exhausted',
+                `第 ${pageIndex + 1} 页视觉纠错请求失败：${requestError}。任务已暂停`,
+                pausedVisionAttempt(
+                  pageIndex,
+                  round,
+                  error instanceof VisionPatchError
+                    ? 'transient.vision-protocol-retries-exhausted'
+                    : 'transient.network-retries-exhausted',
+                  requestError,
+                ),
+              );
+            }
+            await options.repository.putArtifact({
+              key: patchCacheKey,
+              projectId: options.projectId,
+              kind: 'vision-correction-patch',
+              blob: new Blob([JSON.stringify(correction.patch)], { type: 'application/json' }),
+              updatedAt: Date.now(),
+              dependencies: {
+                pageIndices: [pageIndex], planVersion: patchBase.planVersion,
+                cacheIdentityVersion: 'vision-cache-v1',
+              },
+            });
+          }
+          if (!correctedPlan) throw new Error('视觉补丁通过请求门后未产生已验证页面计划');
+          sourceCorrectionAttempts.push({
+            pageIndex,
+            round,
+            basePlanVersion: patchBase.planVersion,
+            patchId: correction.patch.patchId,
+            errorFingerprints: pageIssues.map((issue) => issue.fingerprint),
+            outcome: 'patched',
+            networkAttempts: correction.networkAttempts,
+            promptTokens: correction.usage.promptTokens,
+            completionTokens: correction.usage.completionTokens,
+          });
+          plansByPage.set(pageIndex, correctedPlan);
+          await options.repository.putArtifact({
+            key: buildRecoveredPagePlanCacheKey(correctionIdentity),
+            projectId: options.projectId,
+            kind: 'recovered-page-plan',
+            blob: new Blob([JSON.stringify(correctedPlan)], { type: 'application/json' }),
+            updatedAt: Date.now(),
+            dependencies: {
+              pageIndices: [pageIndex], planVersion: correctedPlan.planVersion,
+              cacheIdentityVersion: 'vision-cache-v1',
+            },
+          });
+          options.onAiEvent?.({
+            type: 'vision-correction-completed', at: Date.now(), page: pageIndex + 1,
+            totalPages: pdf.numPages, round, correctionCallsUsed, maxCorrectionCalls,
+            promptTokens: correction.usage.promptTokens,
+            completionTokens: correction.usage.completionTokens,
+          });
+        }
+        analyses = [...plansByPage.values()]
+          .sort((left, right) => left.pageIndex - right.pageIndex)
+          .map(planToVisionAnalysis);
+        reconciled = reconcileVisionLayout(doc, analyses, 0.8, sourceBitmapRegions);
+        for (const [pageIndex, plan] of plansByPage) {
+          plansByPage.set(pageIndex, recoverLocallyRejectedRegions(plan, reconciled));
+        }
+        analyses = [...plansByPage.values()]
+          .sort((left, right) => left.pageIndex - right.pageIndex)
+          .map(planToVisionAnalysis);
+        reconciled = reconcileVisionLayout(doc, analyses, 0.8, sourceBitmapRegions);
+        correctionIssues = reconciliationValidationIssues(plansByPage, reconciled)
+          .filter((issue) => reconciled.unresolved.some((item) => (
+            item.pageIndex === issue.pageIndex
+            && item.regionId === issue.regionId
+            && isVisionCorrectableReason(item.reason)
+          )));
+        for (const pageIndex of pageIndices) {
+          const before = issuesBeforeRound.filter((issue) => issue.pageIndex === pageIndex);
+          const after = correctionIssues.filter((issue) => issue.pageIndex === pageIndex);
+          const attempt = [...sourceCorrectionAttempts].reverse().find((item) => (
+            item.pageIndex === pageIndex && item.round === round
+          ));
+          if (attempt) {
+            attempt.outcome = after.length ? 'rejected' : 'accepted';
+            attempt.errorFingerprints = after.map((issue) => issue.fingerprint);
+          }
+          if (!after.length) continue;
+          const beforeFingerprint = before.map((issue) => issue.fingerprint).sort().join('|');
+          const afterFingerprint = after.map((issue) => issue.fingerprint).sort().join('|');
+          const reason = beforeFingerprint === afterFingerprint ? 'repeated-error' : 'no-improvement';
+          if (after.length >= before.length) {
+            options.onAiEvent?.({
+              type: 'vision-correction-stopped', at: Date.now(), page: pageIndex + 1,
+              totalPages: pdf.numPages, round, reason,
+              correctionCallsUsed, maxCorrectionCalls,
+            });
+            await persistSourceLayoutReport(false, correctionIssues);
+            throw new RecoverablePipelineError(
+              'vision-correction-budget-exhausted',
+              `第 ${pageIndex + 1} 页视觉纠错没有减少结构错误，任务已暂停`,
+              pausedVisionAttempt(
+                pageIndex, round, 'source-plan.no-improvement', '视觉纠错没有减少结构错误',
+              ),
+            );
+          }
+        }
+      }
+      if (correctionIssues.length) {
+        await persistSourceLayoutReport(false, correctionIssues);
+        throw new RecoverablePipelineError(
+          'vision-correction-budget-exhausted',
+          `两轮视觉纠错后仍有 ${correctionIssues.length} 个结构错误，任务已暂停`,
+          pausedVisionAttempt(
+            correctionIssues[0]?.pageIndex ?? 0,
+            2,
+            'source-plan.correction-rounds-exhausted',
+            '两轮视觉纠错后仍有结构错误',
+          ),
+        );
+      }
+      if (reconciled.unresolved.length) {
+        const unresolvedIssues = reconciliationValidationIssues(plansByPage, reconciled);
+        await persistSourceLayoutReport(false, unresolvedIssues);
+        throw new Error(`页面计划包含无法安全恢复的区域：${reconciled.unresolved.map((item) => item.reason).join('、')}`);
+      }
+
+      await Promise.all([...plansByPage.values()].map((plan) => {
+        const acceptedPlan = withRecomputedPlanVersion({
+          ...plan,
+          regions: plan.regions.map((region) => ({ ...region, locked: true })),
+        });
+        plansByPage.set(plan.pageIndex, acceptedPlan);
+        const key = buildAcceptedPagePlanCacheKey({
+          fileHash: settings.sourceFileHash,
+          pageIndex: plan.pageIndex,
+          modelId: VISION_LAYOUT_MODEL,
+          promptVersion: VISION_LAYOUT_PROMPT_VERSION,
+          renderVersion: VISION_RENDER_VERSION,
+          renderScale: plan.renderScale,
+          protocolVersion: VISION_PAGE_PLAN_PROTOCOL_VERSION,
+          parserVersion: VISION_LAYOUT_PARSER_VERSION,
+          verifierVersion: VISION_LAYOUT_VERIFIER_VERSION,
+          recoveryVersion: VISION_LAYOUT_RECOVERY_VERSION,
+          canonicalizationVersion: VISION_PLAN_CANONICALIZATION_VERSION,
+          round: 0,
+        });
+        return options.repository.putArtifact({
+          key,
+          projectId: options.projectId,
+          kind: 'accepted-page-plan',
+          blob: new Blob([JSON.stringify(acceptedPlan)], { type: 'application/json' }),
+          updatedAt: Date.now(),
+          dependencies: {
+            pageIndices: [plan.pageIndex], planVersion: acceptedPlan.planVersion,
+            cacheIdentityVersion: 'vision-cache-v1',
+          },
+        });
+      }));
+      const crossPage = validateCrossPageAssetCandidates(
+        [...plansByPage.values()],
+        inferCrossPageAssetCandidates([...plansByPage.values()]),
+      );
+      if (crossPage.issues.length) {
+        throw new Error(`跨页资产关系门未通过：${crossPage.issues.map((item) => item.message).join('；')}`);
+      }
+      const crossPageGroupByMember = new Map(crossPage.groups.flatMap((group) => (
+        group.members.map((member) => [`${member.pageIndex}:${member.regionId}`, group.id] as const)
+      )));
+      reconciled.assetRegions = reconciled.assetRegions.map((asset) => ({
+        ...asset,
+        crossPageAssetGroupId: crossPageGroupByMember.get(`${asset.pageIndex}:${asset.id}`),
+      }));
+      await options.repository.putArtifact({
+        key: `${options.projectId}:accepted-document-plan`,
+        projectId: options.projectId,
+        kind: 'accepted-document-plan',
+        blob: new Blob([JSON.stringify({
+          schemaVersion: 1,
+          documentPlanDigest: digestAcceptedDocumentPlan(
+            [...plansByPage.values()], crossPage.groups,
+          ),
+          pagePlanDigests: [...plansByPage.values()]
+            .sort((left, right) => left.pageIndex - right.pageIndex)
+            .map((plan) => ({ pageIndex: plan.pageIndex, planDigest: plan.planDigest })),
+          crossPageAssetGroups: crossPage.groups,
+        })], { type: 'application/json' }),
+        updatedAt: Date.now(),
+        dependencies: {
+          pageIndices: [...plansByPage.keys()].sort((left, right) => left - right),
+          cacheIdentityVersion: 'vision-cache-v1',
+        },
+      });
+      const sourceLayoutReport = await persistSourceLayoutReport(true, [], crossPage.groups);
       const exactPortraitAssets = authorPortraitAssetsFromBitmapRegions(
         doc,
         current.sourceBitmapRegions ?? new Map<number, Rect[]>(),
@@ -342,6 +988,12 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
       const prepared = prepareImmutableStructure(doc, {
         verifiedAssetRegions: reconciled.assetRegions,
         pageLayouts: new Map(analyses.map((analysis) => [analysis.pageIndex, analysis.layout])),
+      });
+      assertPreparedStructure({
+        stage: 'pre-translation',
+        regions: prepared.regions,
+        units: prepared.units,
+        assets: prepared.assetRegions,
       });
       if (import.meta.env.MODE === 'test') {
         const diagnosticGlobal = globalThis as typeof globalThis & { __PP_DIAGNOSTIC_LAYOUT__?: unknown };
@@ -396,6 +1048,11 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
               kind: 'formula-ocr',
               blob: new Blob([JSON.stringify(recognized)], { type: 'application/json' }),
               updatedAt: Date.now(),
+              dependencies: {
+                pageIndices: [formula.pageIndex],
+                sourceUnitIds: [formula.id],
+                cacheIdentityVersion: 'formula-ocr-v1',
+              },
             });
           }
           const rendered = await renderLatexFormulaPng(recognized.latex);
@@ -418,7 +1075,30 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
           region.preserveRects,
         ),
       });
-      return { ...current, prepared, assets };
+      return {
+        ...current,
+        settings: {
+          ...settings,
+          maxVisionCorrectionCalls: maxCorrectionCalls > 0 ? maxCorrectionCalls : undefined,
+        },
+        prepared,
+        assets,
+        crossPageAssetGroups: crossPage.groups,
+        sourceLayoutReport,
+        visionAttempt: {
+          phase: 'structure-generation',
+          totalPages: pdf.numPages,
+          correctionRound: lastCorrectionRound,
+          remainingPageRounds: 2 - lastCorrectionRound,
+          validatedPages: pdf.numPages,
+          failedPages: [],
+          cachedPages: cachedPlanPages.size,
+          correctionCallsUsed,
+          maxCorrectionCalls,
+          promptTokens: initialPromptTokens + correctionPromptTokens,
+          completionTokens: initialCompletionTokens + correctionCompletionTokens,
+        },
+      };
     },
 
     async buildGlossary(input) {
@@ -488,14 +1168,7 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
             } : {}),
             blocks: protectedMask.blocks,
           };
-          const recoveryInstruction = batch.recovery
-            ? [
-              'RECOVERY_REQUEST: Correct the previous failed block and return the complete JSON response again.',
-              `RECOVERY_REASON: ${batch.recovery.reason}`,
-              `VALIDATION_CODES: ${batch.recovery.validationCodes?.join(', ') ?? 'none'}`,
-              'Preserve every protected_tokens item exactly, satisfy every alignment requirement, and do not omit content.',
-            ].join('\n')
-            : '';
+          const recoveryInstruction = buildTranslationRecoveryInstruction(requestBody.recoveryContext);
           const completion = await chatCompletion({
             baseUrl: options.baseUrl ?? 'https://api.deepseek.com',
             apiKey, model: settings.modelId, thinkingMode: requestThinkingMode,
@@ -543,6 +1216,15 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
           projectId: options.projectId, blockId: record.blockId,
           translation: record.translation, alignmentGroups: record.alignmentGroups, validatedAt: Date.now(),
         }),
+        validateAccepted: (record, request, committedMarkerIds) => {
+          const validation = validateTranslationBlockMarkers({
+            request, response: record, committedMarkerIds,
+          });
+          if (validation.issues.length) throw new MarkerInvariantError(validation.issues);
+          return validation.markerIds;
+        },
+        isNonRetryableError: (error) => error instanceof MarkerInvariantError
+          || error instanceof CachePersistenceError,
         onEvent: (event) => {
           options.onAiEvent?.(event);
           if (event.type === 'batch-validated') {
@@ -568,6 +1250,12 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
       const prepared = requireValue(current.prepared, '版式结构缺失');
       const requests = requireValue(current.requests, '翻译请求缺失');
       const translations = requireValue(current.translations, '翻译结果缺失');
+      assertPreparedStructure({
+        stage: 'pre-typst',
+        regions: prepared.regions,
+        units: prepared.units,
+        assets: prepared.assetRegions,
+      });
       const responseById = new Map(translations.map((response) => [response.blockId, response]));
       const requestById = new Map(requests.map((request) => [request.blockId, request]));
       const typstUnits: TypstSemanticUnit[] = prepared.units.map((unit) => {
@@ -575,9 +1263,10 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
         if (unit.assetId) return {
           id: unit.id, kind: unit.kind, layoutRegionId: unit.layoutRegionId,
           order: unit.order, assetId: unit.assetId, sourceColumn,
+          crossPageAssetGroupId: unit.crossPageAssetGroupId,
           headingLevel: unit.headingLevel, headingNumber: unit.headingNumber,
         };
-        if (unit.kind === 'reference') return {
+        if (unit.kind === 'reference' || unit.kind === 'author') return {
           id: unit.id, kind: unit.kind, layoutRegionId: unit.layoutRegionId,
           order: unit.order, text: unit.sourceText ?? '', sourceColumn,
           headingLevel: unit.headingLevel, headingNumber: unit.headingNumber,
@@ -591,13 +1280,29 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
           sourceColumn,
         };
       });
+      const requiredMarkerIds = typstUnits.flatMap((unit) => (
+        unit.targetSegments?.length
+          ? unit.targetSegments.map((segment) => segment.id)
+          : [unit.id]
+      ));
+      const preTypstMarkerIssues = validateGlobalMarkers({
+        requiredMarkerIds,
+        emittedMarkerIds: requiredMarkerIds,
+      });
+      if (preTypstMarkerIssues.length) throw new MarkerInvariantError(preTypstMarkerIssues);
       const typstProject = await buildTypstProject({
         metadata: { paperWidth: doc.meta.paperWidth, paperHeight: doc.meta.paperHeight },
         regions: prepared.regions,
         units: typstUnits,
         assets: current.assets ?? [],
         targetLayoutPolicy,
+        crossPageAssetGroups: current.crossPageAssetGroups,
       });
+      const markerIssues = validateGlobalMarkers({
+        requiredMarkerIds,
+        emittedMarkerIds: typstProject.markerIds,
+      });
+      if (markerIssues.length) throw new MarkerInvariantError(markerIssues);
       if (import.meta.env.MODE === 'test') {
         (globalThis as typeof globalThis & { __PP_DIAGNOSTIC_TYPST_SOURCE__?: string })
           .__PP_DIAGNOSTIC_TYPST_SOURCE__ = typstProject.mainContent;
@@ -644,22 +1349,61 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
       let manifest = requireValue(current.manifest, '对齐清单缺失');
       let project = requireValue(current.typstProject, 'Typst 项目缺失');
       const sourcePdf = requireValue(current.sourcePdf, '源 PDF 缺失');
+      const sourceLayoutReport = requireValue(current.sourceLayoutReport, '源版式质量报告缺失');
       const attemptReports: QualityAttemptReport[] = [];
       let repairPlan: LayoutRepairPlan | undefined;
       const report = (pass: boolean): QualityReport => {
         const qualityReport: QualityReport = {
-          schemaVersion: 1,
+          schemaVersion: 2,
           projectId: options.projectId,
           layoutProfileVersion: settings.layoutProfileVersion ?? 'legacy-source-layout',
           pass,
           createdAt: Date.now(),
           attempts: attemptReports,
+          sourceLayout: sourceLayoutReport,
         };
         if (import.meta.env.MODE === 'test') {
           (globalThis as typeof globalThis & { __PP_DIAGNOSTIC_QUALITY_REPORT__?: QualityReport })
             .__PP_DIAGNOSTIC_QUALITY_REPORT__ = qualityReport;
         }
         return qualityReport;
+      };
+      const compileWithRepair = async (
+        nextPlan: LayoutRepairPlan,
+        nextAttempt: 1 | 2,
+        issueCount: number,
+      ): Promise<void> => {
+        repairPlan = nextPlan;
+        options.onAiEvent?.({
+          type: 'layout-repair-started', at: Date.now(), attempt: nextAttempt, issueCount,
+        });
+        repairPlan.actions.forEach((action) => options.onAiEvent?.({
+          type: 'layout-repair-action', at: Date.now(), attempt: nextAttempt,
+          unitId: action.unitId, message: action.detail,
+        }));
+        project = await buildTypstProject({
+          metadata: { paperWidth: doc.meta.paperWidth, paperHeight: doc.meta.paperHeight },
+          regions: prepared.regions,
+          units: typstUnits,
+          assets: current.assets ?? [],
+          targetLayoutPolicy,
+          repairPlan,
+          crossPageAssetGroups: current.crossPageAssetGroups,
+        });
+        compiled = await compileTypstProject(project, {
+          runtimePaths: getTypstRuntimePaths(import.meta.env.BASE_URL, document.baseURI), signal,
+          onProgress: (phase) => options.onCompileProgress?.(phase),
+        });
+        options.onPreview?.({ svg: compiled.svg, attempt: nextAttempt });
+        manifest = await buildAlignmentForCompiled(current, compiled, options.projectId);
+        current.typstProject = project;
+        current.compiled = compiled;
+        current.manifest = manifest;
+        if (import.meta.env.MODE === 'test') {
+          (globalThis as typeof globalThis & { __PP_DIAGNOSTIC_TYPST_SOURCE__?: string })
+            .__PP_DIAGNOSTIC_TYPST_SOURCE__ = project.mainContent;
+        }
+        options.onAiEvent?.({ type: 'layout-repair-completed', at: Date.now(), attempt: nextAttempt });
       };
       for (let attempt = 0 as 0 | 1 | 2; attempt <= 2; attempt = (attempt + 1) as 0 | 1 | 2) {
           if (signal.aborted) throw new DOMException('已停止', 'AbortError');
@@ -671,28 +1415,78 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
             expectedTranslations: translations.map((translation) => translation.translation),
             maximumPages: Math.max(doc.pageCount + 2, Math.ceil(doc.pageCount * 3)),
           });
-          if (!contentGate.pass || !alignment.pass) {
+          if (!alignment.pass) {
             await persistQualityReport(options.repository, report(false));
-            if (!contentGate.pass) {
-              throw new Error(`PDF 内容质量门未通过：${contentGate.issues.map((issue) => issue.message).join('；')}`);
-            }
             const errors = alignment.issues.filter((issue) => issue.severity === 'error');
             throw new Error(`对齐质量门未通过：${errors.map((issue) => issue.message).join('；')}`);
+          }
+          if (!contentGate.pass) {
+            const nonRepairableIssues = contentGate.issues
+              .filter((issue) => issue.code !== 'asset-footer-overflow');
+            if (nonRepairableIssues.length) {
+              await persistQualityReport(options.repository, report(false));
+              throw new Error(`PDF 内容质量门未通过：${contentGate.issues.map((issue) => issue.message).join('；')}`);
+            }
+            const overflowIssues: VisionFinalIssue[] = findAssetFooterOverflows(
+              inspection.pageBitmapRegions,
+              inspection.pageSizes,
+            ).map(({ pageIndex, rect, page }) => ({
+              targetPageIndex: pageIndex,
+              type: 'overlap',
+              severity: 'severe',
+              bbox: [
+                Math.max(0, Math.min(1000, rect.x / page.width * 1000)),
+                Math.max(0, Math.min(1000, rect.y / page.height * 1000)),
+                Math.max(0, Math.min(1000, rect.w / page.width * 1000)),
+                Math.max(0, Math.min(1000, rect.h / page.height * 1000)),
+              ],
+              confidence: 1,
+              evidence: 'Immutable asset crosses the printable bottom and footer boundary',
+            }));
+            attemptReports.push({
+              attempt,
+              pass: false,
+              reviewedPages: 0,
+              issues: overflowIssues,
+              actions: repairPlan?.actions ?? [],
+            });
+            if (attempt === 2) {
+              await persistQualityReport(options.repository, report(false));
+              throw new Error('PDF 内容质量门未通过：两轮自动修复后图片仍越过正文底线');
+            }
+            const nextAttempt = (attempt + 1) as 1 | 2;
+            const nextPlan = buildLayoutRepairPlan({
+              attempt: nextAttempt,
+              issues: overflowIssues,
+              manifest,
+              units: typstUnits,
+              pageSizes: new Map(inspection.pageSizes.map((page, pageIndex) => [pageIndex, page])),
+              previous: repairPlan,
+            });
+            if (!nextPlan) {
+              await persistQualityReport(options.repository, report(false));
+              throw new Error('PDF 内容质量门未通过且没有可安全映射的图片排版修复动作');
+            }
+            await compileWithRepair(nextPlan, nextAttempt, overflowIssues.length);
+            continue;
           }
 
           const targetLoading = getDocument({ data: compiled.pdf.slice() });
           const targetPdf = await targetLoading.promise;
           const pageSizes = new Map<number, PdfPageSize>();
           let visualReport: VisionFinalReport;
+          let finalReviewPageIndex = 0;
+          let finalReviewedPages = 0;
           try {
             for (let pageIndex = 0; pageIndex < targetPdf.numPages; pageIndex += 1) {
               const page = await targetPdf.getPage(pageIndex + 1);
               const viewport = page.getViewport({ scale: 1 });
               pageSizes.set(pageIndex, { width: viewport.width, height: viewport.height });
             }
-            visualReport = skipRemoteFinalReview
-              ? { pass: true, issues: [], reviewedPages: targetPdf.numPages }
-              : await runVisionFinalReview({
+            try {
+              visualReport = skipRemoteFinalReview
+                ? { pass: true, issues: [], reviewedPages: targetPdf.numPages }
+                : await runVisionFinalReview({
               sourcePdf,
               targetPdf: targetPdf as any,
               manifest,
@@ -700,10 +1494,13 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
               apiKey,
               targetLayoutPolicy,
               signal,
-              onPageStart: (event) => options.onAiEvent?.({
-                type: 'vision-review-page-started', at: Date.now(), page: event.targetPageIndex + 1,
-                totalPages: event.totalPages,
-              }),
+              onPageStart: (event) => {
+                finalReviewPageIndex = event.targetPageIndex;
+                options.onAiEvent?.({
+                  type: 'vision-review-page-started', at: Date.now(), page: event.targetPageIndex + 1,
+                  totalPages: event.totalPages,
+                });
+              },
               onPagePhase: (event) => options.onAiEvent?.({
                 type: 'vision-review-page-phase', at: Date.now(), page: event.targetPageIndex + 1,
                 totalPages: event.totalPages, phase: event.phase,
@@ -720,11 +1517,44 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
                 type: 'vision-review-page-timeout', at: Date.now(), page: event.targetPageIndex + 1,
                 totalPages: event.totalPages, timeoutMs: event.timeoutMs,
               }),
-              onPage: (event) => options.onAiEvent?.({
-                type: 'vision-review-page', at: Date.now(), page: event.targetPageIndex + 1,
-                totalPages: event.totalPages, issueCount: event.issueCount,
-              }),
-            });
+              onPage: (event) => {
+                finalReviewedPages += 1;
+                options.onAiEvent?.({
+                  type: 'vision-review-page', at: Date.now(), page: event.targetPageIndex + 1,
+                  totalPages: event.totalPages, issueCount: event.issueCount,
+                });
+              },
+              });
+            } catch (error) {
+              if (signal.aborted || (error instanceof Error && error.name === 'AbortError')) throw error;
+              if (isNonRetryableDeepSeekAccountError(error)) throw error;
+              const protocolFailure = error instanceof Error && error.message.startsWith('Vision 成品质检');
+              const transportFailure = isRetryableDeepSeekTransportError(error);
+              if (!protocolFailure && !transportFailure) throw error;
+              const previous = current.visionAttempt;
+              throw new RecoverablePipelineError(
+                protocolFailure ? 'vision-protocol-retries-exhausted' : 'network-retries-exhausted',
+                `Vision Exp 成品质检第 ${finalReviewPageIndex + 1} 页连续${protocolFailure ? '返回无效协议' : '请求失败'}，任务已暂停`,
+                {
+                  phase: 'final-review',
+                  pageIndex: finalReviewPageIndex,
+                  totalPages: targetPdf.numPages,
+                  correctionRound: previous?.correctionRound ?? 0,
+                  remainingPageRounds: previous?.remainingPageRounds ?? 2,
+                  validatedPages: finalReviewedPages,
+                  failedPages: [finalReviewPageIndex],
+                  cachedPages: previous?.cachedPages ?? 0,
+                  correctionCallsUsed: previous?.correctionCallsUsed ?? 0,
+                  maxCorrectionCalls: previous?.maxCorrectionCalls ?? 0,
+                  promptTokens: previous?.promptTokens ?? 0,
+                  completionTokens: previous?.completionTokens ?? 0,
+                  errorCode: protocolFailure
+                    ? 'final-pdf.vision-protocol-retries-exhausted'
+                    : 'final-pdf.network-retries-exhausted',
+                  errorMessage: protocolFailure ? '成品质检响应协议连续失败' : '成品质检网络请求连续失败',
+                },
+              );
+            }
           } finally {
             await targetPdf.destroy();
           }
@@ -819,37 +1649,7 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
             await persistQualityReport(options.repository, report(false));
             throw new Error(`视觉质检未通过且没有安全的自动修复动作：${visualError || '内容完整性问题'}`);
           }
-          repairPlan = nextPlan;
-          options.onAiEvent?.({
-            type: 'layout-repair-started', at: Date.now(), attempt: nextAttempt,
-            issueCount: severeVisualIssues.length,
-          });
-          repairPlan.actions.forEach((action) => options.onAiEvent?.({
-            type: 'layout-repair-action', at: Date.now(), attempt: nextAttempt,
-            unitId: action.unitId, message: action.detail,
-          }));
-          project = await buildTypstProject({
-            metadata: { paperWidth: doc.meta.paperWidth, paperHeight: doc.meta.paperHeight },
-            regions: prepared.regions,
-            units: typstUnits,
-            assets: current.assets ?? [],
-            targetLayoutPolicy,
-            repairPlan,
-          });
-          compiled = await compileTypstProject(project, {
-            runtimePaths: getTypstRuntimePaths(import.meta.env.BASE_URL, document.baseURI), signal,
-            onProgress: (phase) => options.onCompileProgress?.(phase),
-          });
-          options.onPreview?.({ svg: compiled.svg, attempt: nextAttempt });
-          manifest = await buildAlignmentForCompiled(current, compiled, options.projectId);
-          current.typstProject = project;
-          current.compiled = compiled;
-          current.manifest = manifest;
-          if (import.meta.env.MODE === 'test') {
-            (globalThis as typeof globalThis & { __PP_DIAGNOSTIC_TYPST_SOURCE__?: string })
-              .__PP_DIAGNOSTIC_TYPST_SOURCE__ = project.mainContent;
-          }
-          options.onAiEvent?.({ type: 'layout-repair-completed', at: Date.now(), attempt: nextAttempt });
+          await compileWithRepair(nextPlan, nextAttempt, severeVisualIssues.length);
       }
       throw new Error('质量检查未完成');
     },

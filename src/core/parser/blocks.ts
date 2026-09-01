@@ -55,11 +55,27 @@ export function isTableCaptionText(text: string): boolean {
   ));
 }
 
+export function isAlgorithmCaptionText(text: string): boolean {
+  return text.split(/\r?\n/).some((line) => {
+    const match = line.trim().match(/^algorithm\s*(?:\d+(?:[.-]\d+)*|[IVXLCDM]+)(.*)$/i);
+    if (!match) return false;
+    const suffix = match[1] ?? '';
+    const trimmed = suffix.trimStart();
+    if (!trimmed) return true;
+    if (/^[.:：\-–—]/.test(trimmed)) return true;
+    if (trimmed.length === suffix.length) return false;
+    // Function names in algorithm titles often begin with a lowercase letter
+    // (for example pBucketPointsReduction). Exclude common prose-reference
+    // verbs instead of requiring title case.
+    return !/^(?:is|are|was|were|shows?|presents?|describes?|illustrates?|uses?|contains?|requires?)\b/i.test(trimmed);
+  });
+}
+
 function isNumberedCaptionText(text: string): boolean {
   const trimmed = text.trim();
   return isFigureCaptionText(trimmed)
     || isTableCaptionText(trimmed)
-    || hasCaptionSuffix(trimmed.match(/^algorithm\s*(?:\d+(?:[.-]\d+)*|[IVXLCDM]+)(.*)$/i)?.[1])
+    || isAlgorithmCaptionText(trimmed)
     || hasCaptionSuffix(trimmed.match(/^[图表]\s*(?:\d+(?:[.-]\d+)*|[IVXLCDM]+)(.*)$/i)?.[1]);
 }
 

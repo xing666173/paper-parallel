@@ -18,6 +18,8 @@ const REPORT_SLUG = process.env.PP_REPORT_SLUG?.trim()
     .toLowerCase()
   || 'paper';
 const PROFILE_SLUG = process.env.PP_PROFILE_SLUG?.trim() || REPORT_SLUG;
+const FORCE_COLD_RUN = !OFFLINE_CACHED_RUN && process.env.PP_FORCE_COLD_RUN !== '0';
+const MAX_RECOVERABLE_RESUMES = Math.max(0, Number(process.env.PP_MAX_RECOVERABLE_RESUMES ?? 3) || 0);
 const OUTPUT_DIRECTORY = path.resolve('reports', 'real-api', TRANSLATION_MODEL, REPORT_SLUG);
 const PROFILE_DIRECTORY = path.resolve('reports', 'real-api', '.profiles', TRANSLATION_MODEL, PROFILE_SLUG);
 
@@ -39,8 +41,18 @@ async function connectWithRetry(page: import('@playwright/test').Page): Promise<
 async function waitForPipelineTerminal(page: import('@playwright/test').Page): Promise<'reader'> {
   const deadline = Date.now() + 25 * 60_000;
   let lastSnapshot = '尚未进入处理页';
+  let recoverableResumes = 0;
   while (Date.now() < deadline) {
     if (/#\/task\/pp-[a-f0-9]{64}\/read(?:\?|$)/.test(page.url())) return 'reader';
+    const paused = await page.locator('.task-status').innerText({ timeout: 1_000 }).catch(() => '') === '等待恢复';
+    if (paused && recoverableResumes < MAX_RECOVERABLE_RESUMES) {
+      recoverableResumes += 1;
+      const resume = page.locator('.progress-card button.primary');
+      console.log(`[real-api recovery] recoverable pause ${recoverableResumes}/${MAX_RECOVERABLE_RESUMES}: ${await resume.innerText()}`);
+      await resume.click();
+      await page.waitForTimeout(1_000);
+      continue;
+    }
     const qualityError = await page.evaluate(() => (
       document.querySelector('.quality-error')?.textContent?.replace(/\s+/g, ' ').trim() ?? ''
     )).catch(() => '');
@@ -116,6 +128,38 @@ async function saveFailureDiagnostics(page: import('@playwright/test').Page): Pr
     path.join(outputDirectory, 'diagnostic-alignment-manifest.json'),
     JSON.stringify(alignmentManifest, null, 2),
   );
+  const visionCache = await page.evaluate(async () => {
+    const request = indexedDB.open('paper-parallel');
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    try {
+      const records = await new Promise<any[]>((resolve, reject) => {
+        const transaction = database.transaction('artifacts', 'readonly');
+        const all = transaction.objectStore('artifacts').getAll();
+        all.onsuccess = () => resolve(all.result);
+        all.onerror = () => reject(all.error);
+      });
+      const selected = records
+        .filter((record) => ['raw-vision-response', 'vision-correction-patch', 'recovered-page-plan']
+          .includes(record.kind))
+        .sort((left, right) => left.updatedAt - right.updatedAt)
+        .slice(-40);
+      return await Promise.all(selected.map(async (record) => ({
+        key: record.key,
+        kind: record.kind,
+        updatedAt: record.updatedAt,
+        content: record.blob instanceof Blob ? (await record.blob.text()).slice(0, 20_000) : '',
+      })));
+    } finally {
+      database.close();
+    }
+  }).catch(() => []);
+  await writeFile(
+    path.join(outputDirectory, 'diagnostic-vision-cache.json'),
+    JSON.stringify(visionCache, null, 2),
+  );
 }
 
 test('real API exact-paper PDF quality acceptance', async () => {
@@ -124,6 +168,14 @@ test('real API exact-paper PDF quality acceptance', async () => {
   test.setTimeout(45 * 60_000);
 
   const profileDirectory = PROFILE_DIRECTORY;
+  if (FORCE_COLD_RUN) {
+    // A real acceptance run must prove the complete upload -> analysis ->
+    // translation -> typesetting path. Remove the whole persistent browser
+    // profile, not only task records, so IndexedDB, Cache Storage, service
+    // worker data, HTTP cache, and saved credentials cannot satisfy the run.
+    await rm(profileDirectory, { recursive: true, force: true });
+    await rm(OUTPUT_DIRECTORY, { recursive: true, force: true });
+  }
   await mkdir(profileDirectory, { recursive: true });
   const context = await chromium.launchPersistentContext(profileDirectory, {
     headless: true,
@@ -131,6 +183,12 @@ test('real API exact-paper PDF quality acceptance', async () => {
     viewport: { width: 1440, height: 1000 },
   });
   const page = context.pages()[0] ?? await context.newPage();
+  let chatCompletionRequests = 0;
+  page.on('request', (request) => {
+    if (request.method() === 'POST' && /\/chat\/completions(?:\?|$)/.test(request.url())) {
+      chatCompletionRequests += 1;
+    }
+  });
 
   try {
     if (OFFLINE_CACHED_RUN) {
@@ -191,6 +249,9 @@ test('real API exact-paper PDF quality acceptance', async () => {
     await page.locator('[data-action="start"]').click();
 
     await waitForPipelineTerminal(page);
+    if (FORCE_COLD_RUN) {
+      expect(chatCompletionRequests, 'cold acceptance must call the DeepSeek chat API').toBeGreaterThan(0);
+    }
 
     const alignmentManifest = await page.evaluate(() => (
       globalThis as typeof globalThis & { __PP_DIAGNOSTIC_ALIGNMENT_MANIFEST__?: {
@@ -295,6 +356,8 @@ test('real API exact-paper PDF quality acceptance', async () => {
       targetPages: pageCount,
       layoutProfileVersion: 'zh-single-column-v1',
       qualityAttempts: (successfulDiagnostics.qualityReport as { attempts?: unknown[] } | null)?.attempts?.length ?? 0,
+      coldRun: FORCE_COLD_RUN,
+      chatCompletionRequests,
       completedAt: new Date().toISOString(),
     }, null, 2));
   } finally {

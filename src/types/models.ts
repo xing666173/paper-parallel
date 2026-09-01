@@ -132,6 +132,7 @@ export interface SemanticUnit {
   protectedTokens: string[];
   sourceSentenceIds?: string[];
   assetId?: string;
+  crossPageAssetGroupId?: string;
   layoutRegionId: string;
   order: number;
 }
@@ -286,7 +287,38 @@ export type TaskStage =
   | 'validating'
   | 'completed';
 
-export type TaskStatus = 'idle' | 'running' | 'stopping' | 'stopped' | 'failed' | 'completed';
+export type TaskStatus = 'idle' | 'running' | 'pausing' | 'paused' | 'stopping' | 'stopped' | 'failed' | 'completed';
+
+export type RecoverablePauseReason =
+  | 'network-retries-exhausted'
+  | 'render-retries-exhausted'
+  | 'vision-protocol-retries-exhausted'
+  | 'vision-correction-budget-exhausted';
+
+/** Persisted, user-facing state for source-layout analysis and bounded correction. */
+export interface VisionAttemptState {
+  phase:
+    | 'initial-analysis'
+    | 'local-validation'
+    | 'correction-full-page'
+    | 'correction-local-crop'
+    | 'structure-generation'
+    | 'structure-validation'
+    | 'final-review';
+  pageIndex?: number;
+  totalPages: number;
+  correctionRound: 0 | 1 | 2;
+  remainingPageRounds: number;
+  validatedPages: number;
+  failedPages: number[];
+  cachedPages: number;
+  correctionCallsUsed: number;
+  maxCorrectionCalls: number;
+  promptTokens: number;
+  completionTokens: number;
+  errorCode?: string;
+  errorMessage?: string;
+}
 
 export interface TaskProgress {
   completed: number;
@@ -304,6 +336,8 @@ export interface TaskSnapshot {
   startedAt?: number;
   updatedAt: number;
   error?: string;
+  pauseReason?: RecoverablePauseReason;
+  visionAttempt?: VisionAttemptState;
   settings?: {
     modelId: string;
     thinkingMode: 'enabled' | 'disabled';
@@ -312,5 +346,7 @@ export interface TaskSnapshot {
     /** 新任务固定为中文单栏；source-layout 只用于识别历史任务。 */
     targetLayoutPolicy?: 'single-column' | 'source-layout';
     layoutProfileVersion?: string;
+    /** Persisted so resumed runs cannot silently receive a larger correction budget. */
+    maxVisionCorrectionCalls?: number;
   };
 }

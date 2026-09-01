@@ -1,5 +1,10 @@
 import type { AlignmentManifest } from '../align/manifest';
-import { chatCompletion, type ChatCompletionOptions, type ChatCompletionResult } from '../translate/client';
+import {
+  chatCompletion,
+  isRetryableDeepSeekTransportError,
+  type ChatCompletionOptions,
+  type ChatCompletionResult,
+} from '../translate/client';
 import { buildVisionFinalConfirmationPrompt, buildVisionFinalReviewPrompt } from './prompts';
 import {
   PdfPageRenderTimeoutError,
@@ -435,8 +440,7 @@ export async function runVisionFinalReview(options: RunVisionFinalReviewOptions)
         try {
           return await requestReview(compact || attempt > 0);
         } catch (error) {
-          const recoverable = error instanceof Error
-            && ['DeepSeekOutputLimitError', 'DeepSeekTimeoutError', 'TypeError'].includes(error.name);
+          const recoverable = isRetryableDeepSeekTransportError(error);
           if (!recoverable || attempt >= 2 || pageSignal.aborted) throw error;
           options.onPagePhase?.({ targetPageIndex, totalPages: options.targetPdf.numPages, phase: 'retrying' });
         }
@@ -540,10 +544,8 @@ export async function runVisionFinalReview(options: RunVisionFinalReviewOptions)
           const confirmation = await requestConfirmation();
           confirmationReport = parseVisionFinalPageReport(confirmation.content, targetPageIndex);
         } catch (error) {
-          const recoverable = error instanceof Error && (
-            ['DeepSeekOutputLimitError', 'DeepSeekTimeoutError', 'TypeError'].includes(error.name)
-            || error.message.startsWith('Vision 成品质检')
-          );
+          const recoverable = isRetryableDeepSeekTransportError(error)
+            || (error instanceof Error && error.message.startsWith('Vision 成品质检'));
           if (!recoverable || attempt >= 2 || pageSignal.aborted) throw error;
           options.onPagePhase?.({ targetPageIndex, totalPages: options.targetPdf.numPages, phase: 'retrying' });
         }

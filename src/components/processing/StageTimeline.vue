@@ -5,7 +5,7 @@ import type { TaskSnapshot, TaskStage } from '../../types/models';
 const props = defineProps<{ task: TaskSnapshot }>();
 const stages: { stage: TaskStage; label: string; detail: string }[] = [
   { stage: 'parsing', label: '解析论文', detail: '提取文字与页面结构' },
-  { stage: 'analyzing-layout', label: '识别版式', detail: 'Vision Exp 识别图、表、公式与栏区' },
+  { stage: 'analyzing-layout', label: '识别与验证版式', detail: 'Exp 初次识别、本地门禁与最多两轮局部纠错' },
   { stage: 'building-glossary', label: '建立术语表', detail: '统一全文专业术语' },
   { stage: 'translating', label: '翻译正文', detail: '批次翻译并校验保护内容' },
   { stage: 'composing', label: '生成中文单栏排版', detail: '统一单栏并保留原始技术资产顺序' },

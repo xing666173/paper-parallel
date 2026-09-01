@@ -8,6 +8,7 @@ import type {
 } from './protocol';
 import { validateBatchResponse } from './protected';
 import { safeErrorMessage } from '../security/errors';
+import { CachePersistenceError } from '../project/cacheErrors';
 
 export interface TranslationRequestResult extends TranslationResponse {
   usage: { promptTokens: number; completionTokens: number };
@@ -23,6 +24,13 @@ export interface TranslationTaskOptions {
   request(batch: TranslationBatch, signal?: AbortSignal): Promise<TranslationRequestResult>;
   findCached(block: TranslationBlockRequest): Promise<TranslationBlockResponse | undefined>;
   saveValidated(record: TranslationBlockResponse): Promise<void>;
+  /** Runs after response validation and before persistence; returned IDs are committed in memory. */
+  validateAccepted?(
+    record: TranslationBlockResponse,
+    request: TranslationBlockRequest,
+    committedMarkerIds: ReadonlySet<string>,
+  ): readonly string[];
+  isNonRetryableError?(error: unknown): boolean;
   onEvent(event: AiLogEvent): void;
   now?: () => number;
 }
@@ -139,6 +147,7 @@ export async function runTranslationTask(
   try {
   const completed = new Map<string, TranslationBlockResponse>();
   const cached = new Set<string>();
+  const committedMarkerIds = new Set<string>();
   const usage = { promptTokens: 0, completionTokens: 0 };
   let nextBatchIndex = 0;
   let fatalError: unknown;
@@ -153,6 +162,8 @@ export async function runTranslationTask(
       if (cachedRecord) {
         const cachedValidation = validateBatchResponse([block], { blocks: [cachedRecord] });
         if (cachedValidation.ok) {
+          const markerIds = options.validateAccepted?.(cachedRecord, block, committedMarkerIds) ?? [];
+          markerIds.forEach((id) => committedMarkerIds.add(id));
           completed.set(block.blockId, cachedRecord);
           cached.add(block.blockId);
           options.onEvent({ type: 'cache-hit', at: now(), blockId: block.blockId });
@@ -210,11 +221,30 @@ export async function runTranslationTask(
             persisted.length = 0;
           };
           for (const record of validation.accepted) {
-            try {
-              await options.saveValidated(record);
-            } catch (error) {
-              publishPersisted();
-              throw error;
+            const request = pendingBlocks.find((block) => block.blockId === record.blockId);
+            if (!request) throw new Error(`Validated translation references unknown block ${record.blockId}`);
+            const markerIds = options.validateAccepted?.(record, request, committedMarkerIds) ?? [];
+            markerIds.forEach((id) => committedMarkerIds.add(id));
+            let persistenceAttempt = 0;
+            while (true) {
+              try {
+                await options.saveValidated(record);
+                break;
+              } catch (error) {
+                if (persistenceAttempt >= options.maxRetries) {
+                  publishPersisted();
+                  throw new CachePersistenceError(
+                    `翻译缓存 ${record.blockId} 写入失败；不会重复请求 API`,
+                    error,
+                  );
+                }
+                persistenceAttempt += 1;
+                retryCount += 1;
+                options.onEvent({
+                  type: 'retry', at: now(), batchId: batch.id, attempt: retryCount,
+                  reason: `本地缓存写入失败，正在重试持久化（不重复请求 API）：${safeErrorMessage(error)}`,
+                });
+              }
             }
             completed.set(record.blockId, record);
             pendingBlocks = pendingBlocks.filter((block) => block.blockId !== record.blockId);
@@ -226,6 +256,13 @@ export async function runTranslationTask(
         throw new TranslationValidationError(validation.issues);
       } catch (error) {
         if (isAbortError(error, taskSignal)) throw abortError();
+        if (error instanceof CachePersistenceError || options.isNonRetryableError?.(error)) {
+          options.onEvent({
+            type: 'error', at: now(), batchId: batch.id,
+            blockIds: pendingBlocks.map((block) => block.blockId), message: safeErrorMessage(error),
+          });
+          throw error;
+        }
         const reason = safeErrorMessage(error);
         if (isAdaptiveSplitError(error) && pendingBlocks.length > 1) {
           const children = splitBatch({ ...batch, blocks: pendingBlocks, recovery: undefined });

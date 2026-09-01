@@ -341,6 +341,21 @@ function requiresChineseTarget(source: TranslationBlockRequest): boolean {
   return words.some((word) => ENGLISH_FUNCTION_WORDS.has(word.toLowerCase()));
 }
 
+function protectedTokenSequence(text: string, tokens: readonly string[]): string[] {
+  const unique = uniqueInOrder([...tokens]).sort((left, right) => right.length - left.length);
+  if (!unique.length) return [];
+  const pattern = new RegExp(unique.map(escapeRegExp).join('|'), 'gu');
+  return Array.from(text.matchAll(pattern), (match) => match[0]!);
+}
+
+function untranslatedLowercaseWords(source: TranslationBlockRequest, translation: string): string[] {
+  if (!requiresChineseTarget(source)) return [];
+  const prose = translation
+    .replace(/https?:\/\/\S+|\b\S+@\S+\b/giu, ' ')
+    .replace(/[（(][^()（）]{0,240}[）)]/gu, ' ');
+  return [...new Set(prose.match(/\b[a-z]{8,}(?:-[a-z]{4,})*\b/gu) ?? [])];
+}
+
 function validateSourceMapping(
   source: TranslationBlockRequest,
   response: TranslationBlockResponse,
@@ -425,6 +440,29 @@ export function validateBatchResponse(
           `Protected token count changed for ${token} (expected at least ${required}, received ${received}).`,
         );
       }
+    }
+
+    if (source.kind === 'title') {
+      const sourceSequence = protectedTokenSequence(source.source, protectedTokens);
+      const targetSequence = protectedTokenSequence(translated.translation, protectedTokens);
+      if (sourceSequence.join('\u0000') !== targetSequence.join('\u0000')) {
+        addIssue(
+          issues,
+          source.blockId,
+          'protected-token-order-changed',
+          'Title protected tokens must remain in source order, including the trailing footnote marker.',
+        );
+      }
+    }
+
+    const untranslatedWords = untranslatedLowercaseWords(source, translated.translation);
+    if (untranslatedWords.length) {
+      addIssue(
+        issues,
+        source.blockId,
+        'untranslated-residual',
+        `Chinese target contains untranslated lowercase prose: ${untranslatedWords.slice(0, 5).join(', ')}.`,
+      );
     }
 
     if (!validateSourceMapping(source, translated)) {

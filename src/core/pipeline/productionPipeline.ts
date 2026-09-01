@@ -2,6 +2,10 @@ import type { ProjectRepository } from '../project/repository';
 import { canEnterReader, type CompletionSummary } from '../task/completion';
 import type { TaskSnapshot, TaskStage } from '../../types/models';
 import { safeErrorMessage } from '../security/errors';
+import { RecoverablePipelineError } from '../task/recoverable';
+import { StructureInvariantError } from './structureInvariants';
+import { MarkerInvariantError } from './markerInvariants';
+import type { StructureDiagnosticReport } from '../quality/structureDiagnostic';
 
 export type PipelineValue = Record<string, unknown>;
 
@@ -52,7 +56,12 @@ function throwIfAborted(signal: AbortSignal): void {
 export async function runProductionPipeline(
   options: ProductionPipelineOptions,
 ): Promise<ProductionPipelineResult> {
-  let snapshot: TaskSnapshot = { ...options.snapshot, progress: { ...options.snapshot.progress }, error: undefined };
+  let snapshot: TaskSnapshot = {
+    ...options.snapshot,
+    progress: { ...options.snapshot.progress },
+    error: undefined,
+    pauseReason: undefined,
+  };
   const resumableTranslationProgress = options.snapshot.stage === 'translating'
     ? { ...options.snapshot.progress }
     : undefined;
@@ -80,6 +89,24 @@ export async function runProductionPipeline(
     await enter(stage);
     const next = await operation(value, options.signal);
     throwIfAborted(options.signal);
+    const taskValue = next as PipelineValue & {
+      settings?: TaskSnapshot['settings'];
+      visionAttempt?: TaskSnapshot['visionAttempt'];
+    };
+    if (taskValue.settings || taskValue.visionAttempt) {
+      snapshot = {
+        ...snapshot,
+        ...(taskValue.settings ? { settings: { ...taskValue.settings } } : {}),
+        ...(taskValue.visionAttempt ? {
+          visionAttempt: {
+            ...taskValue.visionAttempt,
+            failedPages: [...taskValue.visionAttempt.failedPages],
+          },
+        } : {}),
+        updatedAt: Date.now(),
+      };
+      await persist(false);
+    }
     return next;
   };
   let value: PipelineValue = { projectId: snapshot.projectId, settings: snapshot.settings };
@@ -147,14 +174,66 @@ export async function runProductionPipeline(
     throwIfAborted(options.signal);
     if (!canEnterReader(completion)) throw new Error('质量门未通过，不能自动进入阅读器');
 
-    snapshot = { ...snapshot, stage: 'completed', status: 'completed', error: undefined, updatedAt: Date.now() };
+    snapshot = {
+      ...snapshot,
+      stage: 'completed',
+      status: 'completed',
+      error: undefined,
+      pauseReason: undefined,
+      updatedAt: Date.now(),
+    };
     await persist();
     return { snapshot, completion, value };
   } catch (error) {
     if (options.signal.aborted || (error instanceof Error && error.name === 'AbortError')) throw abortError();
+    if (error instanceof RecoverablePipelineError) {
+      snapshot = {
+        ...snapshot,
+        status: 'paused',
+        pauseReason: error.pauseReason,
+        ...(error.visionAttempt ? {
+          visionAttempt: {
+            ...error.visionAttempt,
+            failedPages: [...error.visionAttempt.failedPages],
+          },
+          settings: snapshot.settings ? {
+            ...snapshot.settings,
+            ...(error.visionAttempt.maxCorrectionCalls > 0 ? {
+              maxVisionCorrectionCalls: error.visionAttempt.maxCorrectionCalls,
+            } : {}),
+          } : snapshot.settings,
+        } : {}),
+        error: safeErrorMessage(error, 500),
+        updatedAt: Date.now(),
+      };
+      await persist();
+      throw error;
+    }
+    if (error instanceof StructureInvariantError || error instanceof MarkerInvariantError) {
+      const diagnostic: StructureDiagnosticReport = {
+        schemaVersion: 1,
+        projectId: snapshot.projectId,
+        createdAt: Date.now(),
+        errorName: error.name as StructureDiagnosticReport['errorName'],
+        issues: error.issues,
+      };
+      try {
+        await options.repository.putArtifact({
+          key: `${snapshot.projectId}:structure-diagnostic`,
+          projectId: snapshot.projectId,
+          kind: 'structure-diagnostic',
+          blob: new Blob([JSON.stringify(diagnostic, null, 2)], { type: 'application/json' }),
+          updatedAt: diagnostic.createdAt,
+        });
+      } catch {
+        // The original structural failure remains authoritative when local
+        // diagnostic persistence is unavailable.
+      }
+    }
     snapshot = {
       ...snapshot,
       status: 'failed',
+      pauseReason: undefined,
       error: safeErrorMessage(error, 500),
       updatedAt: Date.now(),
     };

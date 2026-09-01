@@ -10,6 +10,13 @@ export interface ProjectAiLogEntry {
   totalPages?: number;
   reviewedPages?: number;
   attempt?: number;
+  round?: number;
+  correctionCallsUsed?: number;
+  maxCorrectionCalls?: number;
+  promptTokens?: number;
+  completionTokens?: number;
+  networkAttempts?: number;
+  errorCode?: string;
   message: string;
 }
 
@@ -39,7 +46,15 @@ export type ProjectArtifactKind =
   | 'typst-source'
   | 'typst-preview'
   | 'alignment-manifest'
+  /** Legacy accepted layout cache; retained for read compatibility only. */
   | 'vision-layout'
+  | 'raw-vision-response'
+  | 'vision-correction-patch'
+  | 'recovered-page-plan'
+  | 'accepted-page-plan'
+  | 'accepted-document-plan'
+  | 'vision-diagnostic'
+  | 'structure-diagnostic'
   | 'formula-ocr'
   | 'quality-report'
   | 'project-package';
@@ -50,6 +65,13 @@ export interface ProjectArtifactRecord {
   kind: ProjectArtifactKind;
   blob: Blob;
   updatedAt: number;
+  /** Optional dependency metadata for precise transactional invalidation. */
+  dependencies?: {
+    pageIndices?: number[];
+    sourceUnitIds?: string[];
+    planVersion?: string;
+    cacheIdentityVersion?: string;
+  };
 }
 
 export class PaperParallelDb extends Dexie {

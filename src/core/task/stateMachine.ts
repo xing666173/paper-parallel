@@ -12,6 +12,7 @@ export type TaskEvent =
   | { type: 'COMPILE_DONE'; at: number }
   | { type: 'ALIGNMENT_DONE'; at: number }
   | { type: 'QUALITY_STARTED'; at: number }
+  | { type: 'PAUSED'; reason: NonNullable<TaskSnapshot['pauseReason']>; error: string; at: number }
   | { type: 'STOP_REQUESTED'; at: number }
   | { type: 'STOPPED'; at: number }
   | { type: 'RESUME'; at: number }
@@ -97,6 +98,16 @@ export function reduceTaskEvent(state: TaskSnapshot, event: TaskEvent): TaskSnap
     return { ...state, stage: 'validating', updatedAt: event.at };
   }
 
+  if (event.type === 'PAUSED' && (state.status === 'running' || state.status === 'pausing')) {
+    return {
+      ...state,
+      status: 'paused',
+      pauseReason: event.reason,
+      error: event.error,
+      updatedAt: event.at,
+    };
+  }
+
   if (event.type === 'STOP_REQUESTED' && state.status === 'running') {
     return { ...state, status: 'stopping', updatedAt: event.at };
   }
@@ -105,12 +116,12 @@ export function reduceTaskEvent(state: TaskSnapshot, event: TaskEvent): TaskSnap
     return { ...state, status: 'stopped', updatedAt: event.at };
   }
 
-  if (event.type === 'RESUME' && (state.status === 'stopped' || state.status === 'failed')) {
-    return { ...state, status: 'running', error: undefined, updatedAt: event.at };
+  if (event.type === 'RESUME' && (state.status === 'stopped' || state.status === 'paused' || state.status === 'failed')) {
+    return { ...state, status: 'running', error: undefined, pauseReason: undefined, updatedAt: event.at };
   }
 
   if (event.type === 'FAILED') {
-    return { ...state, status: 'failed', error: event.error, updatedAt: event.at };
+    return { ...state, status: 'failed', error: event.error, pauseReason: undefined, updatedAt: event.at };
   }
 
   if (event.type === 'QUALITY_PASSED' && state.stage === 'validating') {

@@ -32,17 +32,29 @@ function proseCharacterCount(
   rect: Rect,
   eraseRects: readonly Rect[] = [],
   preserveRects: readonly Rect[] = [],
+  sourceCharacterRanges: readonly { blockId: string; start: number; end: number }[] = [],
 ): number | undefined {
-  if (!block.characterRects?.length) return undefined;
+  // A reconstructed formula composites only the explicitly preserved source
+  // glyph boxes. A coarse aggregate paragraph box without character geometry
+  // can geometrically contain those glyphs even though none of its prose ink
+  // is copied. Treat the compositing mask as the stronger evidence here; an
+  // ordinary rectangular crop has no preserveRects and keeps the conservative
+  // area-based rejection below.
+  if (!block.characterRects?.length) return preserveRects.length ? 0 : undefined;
+  const exactRanges = sourceCharacterRanges.filter((range) => range.blockId === block.id);
   const intersecting = block.characterRects.filter((character) => (
     /[A-Za-z\u3400-\u9fff]/.test(character.ch)
-    && intersectionArea(rect, character.rect) > 0
-    && (!preserveRects.length || preserveRects.some((preserve) => {
+    && (exactRanges.length
+      ? exactRanges.some((range) => (
+        character.sourceIndex >= range.start && character.sourceIndex < range.end
+      ))
+      : intersectionArea(rect, character.rect) > 0
+        && (!preserveRects.length || preserveRects.some((preserve) => {
       const centerX = character.rect.x + character.rect.w / 2;
       const centerY = character.rect.y + character.rect.h / 2;
       return centerX >= preserve.x && centerX <= preserve.x + preserve.w
         && centerY >= preserve.y && centerY <= preserve.y + preserve.h;
-    }))
+        })))
     && !eraseRects.some((erase) => {
       const centerX = character.rect.x + character.rect.w / 2;
       const centerY = character.rect.y + character.rect.h / 2;
@@ -100,7 +112,13 @@ export function validateImmutableRegion(
   if (region.kind !== 'table' && region.kind !== 'code') {
     const longProse = intersectingBlocks.map((block) => ({
       block,
-      characterCount: proseCharacterCount(block, rect, region.eraseRects, region.preserveRects),
+      characterCount: proseCharacterCount(
+        block,
+        rect,
+        region.eraseRects,
+        region.preserveRects,
+        region.sourceCharacterRanges,
+      ),
     })).filter(({ block, characterCount }) => (
       block.type === 'paragraph'
       && (block.text?.replace(/\s+/g, ' ').trim().length ?? 0) >= 45

@@ -7,6 +7,10 @@ const headingUnit = {
   id: 'heading', kind: 'heading' as const, layoutRegionId: 'r1', order: 1,
   headingLevel: 1 as const,
 };
+const assetUnit = {
+  id: 'figure-11', kind: 'figure' as const, layoutRegionId: 'figure-group-11', order: 2,
+  assetId: 'asset-11',
+};
 const manifest = {
   units: [{
     id: 'group', sourceBlockId: 'heading', parentId: 'heading', sourceUnitIds: ['heading-s1'],
@@ -72,6 +76,31 @@ describe('deterministic layout repair planning', () => {
 
     expect(plan?.actions).toContainEqual({
       type: 'page-break', unitId: 'heading', detail: '标题与首段整体移到下一页',
+    });
+  });
+
+  it('maps a deterministic footer overflow to the asset and moves the whole asset', () => {
+    const assetManifest = {
+      units: [{
+        id: 'asset-group', sourceBlockId: 'figure-11', parentId: 'figure-11', sourceUnitIds: [],
+        target: [{ page: 0, rects: [{ x: 310, y: 590, w: 240, h: 170 }] }],
+      }],
+    } as any;
+    const plan = buildLayoutRepairPlan({
+      attempt: 1,
+      issues: [issue({
+        type: 'overlap', bbox: [517, 738, 400, 213], confidence: 1,
+        evidence: 'Immutable asset crosses the printable bottom and footer boundary',
+      })],
+      manifest: assetManifest,
+      units: [assetUnit],
+      pageSizes,
+    });
+
+    expect(plan?.assetScaleByUnitId).toEqual({ 'figure-11': 0.92 });
+    expect(plan?.forcePageBreakBeforeUnitIds).toEqual(['figure-11']);
+    expect(plan?.actions).toContainEqual({
+      type: 'asset-scale', unitId: 'figure-11', detail: '资产缩放至 92% 并整体换页',
     });
   });
 });

@@ -37,21 +37,24 @@ DeepSeek 不决定字号、页边距、行距、首行缩进、标题段前距�
 
 ## 3. 从论文到最终 PDF
 
-1. 解析英文 PDF，生成页面、文本块、语义单元和不可变资产。
-2. 为每个语义单元分配稳定 ID，并建立英文坐标到语义单元的对应表。
-3. 调用 DeepSeek 翻译；命中缓存时复用经过内容门禁的译文。
-4. 新任务固定写入 `targetLayoutPolicy=single-column` 和 `layoutProfileVersion=zh-single-column-v1`：
+1. 解析英文 PDF，生成页面、文本块和本地几何证据。
+2. Vision Exp 为每页生成带本地稳定 ID 的 `VisionPagePlan`；本地协议、坐标和几何门禁拒绝不可靠区域，绝不以空计划冒充成功。
+3. 对可视觉纠正的问题最多执行两轮局部补丁：第一轮使用整页，第二轮使用失败区域高清裁图；锁定已通过区域，并按实际请求次数和 token 记账。
+4. 验证跨页资产候选，生成文档级 `CrossPageAssetGroup`；只有强证据或足够多的独立弱证据才能正式采用。
+5. 生成语义单元和不可变资产，并在翻译前检查 unit、region、asset、caption 所有权和 marker 命名空间。
+6. 调用 DeepSeek 翻译；每个响应通过具体 marker 门后才写入缓存，命中缓存时仍重新执行相同门禁。
+7. 新任务固定写入 `targetLayoutPolicy=single-column` 和 `layoutProfileVersion=zh-single-column-v1`：
    - 所有普通正文区域变为单栏自然流；
    - 横向图组、并排对比图和成组表格可以保留网格；
    - 单个图表按内容宽度适度放大，但不得超过正文宽度；
    - 正文、标题、图题和参考文献分别应用自己的排版参数。
-5. 编译 Typst，并保留所有 `pp-unit` 链接标记。
-6. 执行内容门禁：页数非零、关键章节存在、语义标记没有丢失、不可变资产哈希正确。
-7. 将每页渲染成 PNG，逐页检查标题间距、首行缩进、图表居中、裁切、重叠、空白页和参考文献可读性。
-8. 调用 DeepSeek 视觉终审；它是第二检查者，不覆盖确定性排版参数。
-9. 对可安全修复的标题拥挤、孤立标题、图表裁切/重叠和不可读横排生成受限 `LayoutRepairPlan`，重新编译后立即刷新预览，最多两轮；同一问题重复或内容完整性问题立即停止。
-10. 保存包含逐页问题、修复动作、尝试次数和最终状态的 `quality-report`；只有全部门禁通过的 PDF、Typst 和对齐清单才成为正式成品。
-11. 旧任务可按新版重新排版，并保留英文 PDF、译文、Vision 源版式和公式识别缓存。
+8. Typst 生成前再次执行全局结构/marker 门，随后编译并保留所有 `pp-unit` 链接标记。
+9. 执行内容门禁：页数非零、关键章节存在、语义标记没有丢失、不可变资产哈希正确。
+10. 将每页渲染成 PNG，逐页检查标题间距、首行缩进、图表居中、裁切、重叠、空白页和参考文献可读性。
+11. 调用 DeepSeek 视觉终审；它是第二检查者，不覆盖确定性排版参数。
+12. 对可安全修复的标题拥挤、孤立标题、图表裁切/重叠和不可读横排生成受限 `LayoutRepairPlan`，重新编译后立即刷新预览，最多两轮；同一问题重复或内容完整性问题立即停止。
+13. 保存 `vision-diagnostic`、`structure-diagnostic` 和包含逐页问题、修复动作、尝试次数与最终状态的 `quality-report`；只有全部门禁通过的 PDF、Typst 和对齐清单才成为正式成品。
+14. 旧任务可按新版重新排版，并保留英文 PDF、身份不变的译文、源视觉计划和公式识别缓存；重新分析失败页时只失效对应页、相关跨页组和下游正式产物。
 
 ## 4. 本轮 ZK-Tracer 调试记录
 
@@ -78,6 +81,12 @@ DeepSeek 不决定字号、页边距、行距、首行缩进、标题段前距�
 - `src/core/typst/template.ts`：单栏排版参数和 Typst 模板。
 - `src/core/typst/project.ts`：源布局到中文单栏布局的确定性转换。
 - `src/core/vision/prompts.ts`：DeepSeek 最终视觉验收要求。
+- `src/core/vision/pagePlan.ts`：规范化页面计划、本地稳定 ID、摘要和版本。
+- `src/core/vision/correction.ts`：受限补丁协议、原子应用和协议重试。
+- `src/core/vision/crossPageRelations.ts`：跨页资产候选与本地证据门。
+- `src/core/pipeline/structureInvariants.ts`：翻译前和 Typst 前结构门禁。
+- `src/core/pipeline/markerInvariants.ts`：翻译响应后的具体 marker 门禁。
+- `src/core/project/invalidationGraph.ts`：失败页重分析的依赖失效图。
 - `src/core/quality/layoutRepair.ts`：受限自动修复映射与重复问题停止逻辑。
 - `src/core/quality/report.ts`：逐次、逐页质检报告格式。
 - `scripts/build-single-column-typst-prototype.mjs`：ZK-Tracer 缓存样稿适配器，仅用于回归证据，正式网站不得调用。

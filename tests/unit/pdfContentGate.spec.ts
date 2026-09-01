@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { runPdfContentGate } from '../../src/core/quality/pdfContentGate';
+import { findAssetFooterOverflows, runPdfContentGate } from '../../src/core/quality/pdfContentGate';
 
 describe('compiled PDF content gate', () => {
   it('rejects a raster/source-fragment PDF that contains none of the validated Chinese translations', () => {
@@ -43,6 +43,23 @@ describe('compiled PDF content gate', () => {
       code: 'asset-footer-overflow',
       message: '中文 PDF 存在越过正文底线的图片，可能被页脚裁切：1',
     });
+  });
+
+  it('returns the exact overflowing bitmap regions for deterministic repair mapping', () => {
+    expect(findAssetFooterOverflows([
+      [
+        { x: 40, y: 80, w: 200, h: 100 },
+        { x: 312, y: 590, w: 239, h: 164 },
+      ],
+      [{ x: 30, y: 600, w: 100, h: 80 }],
+    ], [
+      { width: 612, height: 792 },
+      { width: 612, height: 792 },
+    ])).toEqual([{
+      pageIndex: 0,
+      rect: { x: 312, y: 590, w: 239, h: 164 },
+      page: { width: 612, height: 792 },
+    }]);
   });
 
   it('passes a readable naturally paginated Chinese paper with high translation coverage', () => {

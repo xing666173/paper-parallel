@@ -30,6 +30,18 @@ describe('task state machine', () => {
       'QUALITY_PASSED is invalid from idle',
     );
   });
+
+  it('resumes a recoverable pause without retaining its stale error reason', () => {
+    let state = reduceTaskEvent(createTaskSnapshot('paused', 1), { type: 'START_PARSE', at: 2 });
+    state = reduceTaskEvent(state, {
+      type: 'PAUSED', reason: 'network-retries-exhausted', error: 'offline', at: 3,
+    });
+    expect(state).toMatchObject({ status: 'paused', pauseReason: 'network-retries-exhausted' });
+    state = reduceTaskEvent(state, { type: 'RESUME', at: 4 });
+    expect(state).toMatchObject({ status: 'running' });
+    expect(state.pauseReason).toBeUndefined();
+    expect(state.error).toBeUndefined();
+  });
 });
 
 describe('composition task transitions', () => {

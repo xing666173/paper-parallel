@@ -91,9 +91,9 @@ describe('project task store', () => {
     expect(store.aiLog.at(-1)?.message).toContain('第 6/8 页响应无效，正在自动重试');
 
     store.recordAiEvent({
-      type: 'vision-layout-page-phase', at: 13, page: 6, totalPages: 8, phase: 'analysis-fallback',
+      type: 'vision-layout-page-phase', at: 13, page: 6, totalPages: 8, phase: 'analysis-paused',
     });
-    expect(store.aiLog.at(-1)?.message).toContain('已降级到 PDF 文字层与本地几何识别');
+    expect(store.aiLog.at(-1)?.message).toContain('任务已暂停并保留已验证页面');
   });
 
   it('shows page-level progress as soon as final visual review starts', () => {
@@ -236,6 +236,37 @@ describe('project task store', () => {
     expect(store.current?.status).toBe('stopped');
     expect(store.current?.progress.completed).toBe(7);
     expect((await repository.loadTask('p1'))?.status).toBe('stopped');
+  });
+
+  it('serializes live visual-attempt persistence before safe stop and preserves its budget', async () => {
+    const { store, repository } = setupStore();
+    store.current = runningTranslationTask('vision-live');
+    store.recordAiEvent({
+      type: 'vision-layout-page-started', at: 10, page: 2, totalPages: 4,
+    });
+    store.recordAiEvent({
+      type: 'vision-correction-started', at: 11, page: 2, totalPages: 4,
+      round: 1, correctionCallsUsed: 1, maxCorrectionCalls: 4,
+      errorCode: 'source-plan.caption-overlap',
+    });
+    store.recordAiEvent({
+      type: 'vision-correction-completed', at: 12, page: 2, totalPages: 4,
+      round: 1, correctionCallsUsed: 1, maxCorrectionCalls: 4,
+      promptTokens: 120, completionTokens: 30,
+    });
+
+    await store.safeStop(13);
+
+    const persisted = await repository.loadTask('vision-live');
+    expect(persisted).toMatchObject({
+      status: 'stopped',
+      visionAttempt: {
+        phase: 'correction-full-page', pageIndex: 1, totalPages: 4,
+        correctionRound: 1, correctionCallsUsed: 1, maxCorrectionCalls: 4,
+        promptTokens: 120, completionTokens: 30,
+        errorCode: 'source-plan.caption-overlap',
+      },
+    });
   });
 
   it('resumes a stopped task without resetting validated progress', async () => {

@@ -174,6 +174,24 @@ describe('immutable asset geometry gate', () => {
     ).issues).not.toContain('body-prose-density');
   });
 
+  it('does not charge a coarse aggregate prose box against a glyph-only composite', () => {
+    const aggregate = block(
+      'aggregate',
+      'A long natural language paragraph has a coarse bounding box around separately extracted formula glyphs.',
+      55, 130, 230, 90,
+    );
+
+    expect(validateImmutableRegion(
+      {
+        id: 'reconstructed-formula', kind: 'formula', pageIndex: 0,
+        rect: { x: 120, y: 175, w: 80, h: 24 }, widthMode: 'column',
+        preserveRects: [{ x: 150, y: 180, w: 12, h: 10 }],
+      },
+      page,
+      [aggregate],
+    ).issues).not.toContain('body-prose-density');
+  });
+
   it('does not treat benchmark names such as Is-Prime as natural-language prose', () => {
     const labels = block(
       'labels',

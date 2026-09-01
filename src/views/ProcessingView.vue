@@ -14,7 +14,8 @@ import { runProductionPipeline } from '../core/pipeline/productionPipeline';
 import { createBrowserPipelineStages } from '../core/pipeline/browserStages';
 import type { TaskSnapshot } from '../types/models';
 import { resetTaskForSingleColumnLayout, usesCurrentSingleColumnLayout } from '../core/layout/profile';
-import type { QualityReport } from '../core/quality/report';
+import type { QualityReport, SourceLayoutQualityReport } from '../core/quality/report';
+import type { StructureDiagnosticReport } from '../core/quality/structureDiagnostic';
 
 const route = useRoute();
 const router = useRouter();
@@ -27,6 +28,8 @@ const sourceUrl = ref<string>();
 const previewUrl = ref<string>();
 const previewState = ref<PreviewState>('empty');
 const qualityReport = ref<QualityReport>();
+const visionDiagnostic = ref<SourceLayoutQualityReport>();
+const structureDiagnostic = ref<StructureDiagnosticReport>();
 let enteredReader = false;
 
 const task = computed(() => (
@@ -51,6 +54,8 @@ watch(() => store.completionSummary, async (summary) => {
 watch(() => task.value?.status, async (status) => {
   if (status === 'failed' && !previewUrl.value) previewState.value = 'failed';
   if (status === 'failed' || status === 'completed') await loadQualityReport();
+  if (status === 'paused' || status === 'failed' || status === 'completed') await loadVisionDiagnostic();
+  if (status === 'failed') await loadStructureDiagnostic();
 });
 
 function pipelineRunner(initial: TaskSnapshot) {
@@ -81,6 +86,20 @@ function pipelineRunner(initial: TaskSnapshot) {
 async function loadQualityReport(): Promise<void> {
   const artifact = await repository.findArtifact(`${projectId.value}:quality-report`);
   qualityReport.value = artifact ? JSON.parse(await artifact.blob.text()) as QualityReport : undefined;
+}
+
+async function loadVisionDiagnostic(): Promise<void> {
+  const artifact = await repository.findArtifact(`${projectId.value}:vision-diagnostic`);
+  visionDiagnostic.value = artifact
+    ? JSON.parse(await artifact.blob.text()) as SourceLayoutQualityReport
+    : undefined;
+}
+
+async function loadStructureDiagnostic(): Promise<void> {
+  const artifact = await repository.findArtifact(`${projectId.value}:structure-diagnostic`);
+  structureDiagnostic.value = artifact
+    ? JSON.parse(await artifact.blob.text()) as StructureDiagnosticReport
+    : undefined;
 }
 
 function hasApiKey(): boolean {
@@ -122,6 +141,63 @@ function resumeTask() {
   void store.resume(pipelineRunner(snapshot)).catch(() => undefined);
 }
 
+async function resumePausedTask() {
+  if (!store.current || store.current.status !== 'paused') return;
+  if (!hasApiKey()) {
+    loadError.value = '恢复版式分析需要 DeepSeek API Key，请返回上传页重新验证连接。';
+    return;
+  }
+  if (store.current.pauseReason === 'vision-correction-budget-exhausted') {
+    const failedPages = visionDiagnostic.value?.unresolvedIssues.map((issue) => issue.pageIndex) ?? [];
+    const affectedPages = new Set(failedPages);
+    for (const group of visionDiagnostic.value?.crossPageAssetGroups ?? []) {
+      if (group.members.some((member) => affectedPages.has(member.pageIndex))) {
+        group.members.forEach((member) => affectedPages.add(member.pageIndex));
+      }
+    }
+    await repository.invalidateProjectDependencies({
+      projectId: projectId.value,
+      facets: ['page-plan', 'cross-page-group'],
+      pageIndices: [...affectedPages],
+    });
+    visionDiagnostic.value = undefined;
+    const settings = store.current.settings ? { ...store.current.settings } : undefined;
+    if (settings) delete settings.maxVisionCorrectionCalls;
+    const resetBudget: TaskSnapshot = {
+      ...store.current,
+      settings,
+      visionAttempt: undefined,
+      pauseReason: 'vision-correction-budget-exhausted',
+      updatedAt: Date.now(),
+    };
+    store.current = resetBudget;
+    await repository.saveTask(resetBudget);
+  }
+  resumeTask();
+}
+
+async function downloadVisionDiagnostic() {
+  const artifact = await repository.findArtifact(`${projectId.value}:vision-diagnostic`);
+  if (!artifact) return;
+  const url = URL.createObjectURL(artifact.blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = `${projectId.value}-vision-diagnostic.json`;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+async function downloadStructureDiagnostic() {
+  const artifact = await repository.findArtifact(`${projectId.value}:structure-diagnostic`);
+  if (!artifact) return;
+  const url = URL.createObjectURL(artifact.blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = `${projectId.value}-structure-diagnostic.json`;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
 onMounted(async () => {
   loading.value = !task.value;
   try {
@@ -142,6 +218,8 @@ onMounted(async () => {
       previewState.value = 'building';
     }
     await loadQualityReport();
+    await loadVisionDiagnostic();
+    await loadStructureDiagnostic();
     if (!store.current) loadError.value = '未找到该翻译任务，请重新选择论文。';
     else if (store.current.status === 'idle') startIdleTask(store.current);
   } catch (error) {
@@ -175,7 +253,7 @@ onBeforeRouteLeave(() => {
         :estimated-remaining-ms="estimatedRemainingMs"
         :last-response-at="store.lastResponseAt"
         @stop="store.safeStop()"
-        @resume="resumeTask"
+        @resume="task.status === 'paused' ? resumePausedTask() : resumeTask()"
       />
       <div v-if="task.status === 'completed'" class="layout-action-row">
         <span>全部质量门已通过</span>
@@ -189,6 +267,38 @@ onBeforeRouteLeave(() => {
       <p v-if="task.status === 'failed'" class="quality-error" role="alert">
         <strong>当前阶段未通过：</strong>{{ task.error }}
       </p>
+      <p v-if="task.status === 'paused'" class="quality-error" role="alert">
+        <strong>任务已暂停，可安全恢复：</strong>{{ task.error }}
+      </p>
+      <section v-if="visionDiagnostic" class="quality-report-card" aria-label="源版式诊断报告">
+        <div>
+          <strong>{{ visionDiagnostic.pass ? '源版式结构通过' : '源版式结构待处理' }}</strong>
+          <span>
+            {{ visionDiagnostic.pagePlans.length }} 页 · 初始调用
+            {{ visionDiagnostic.initialAnalysisCalls ?? 0 }} · 纠错调用
+            {{ visionDiagnostic.correctionCallsUsed }} / {{ visionDiagnostic.maxCorrectionCalls }}
+            · token {{ visionDiagnostic.promptTokens + visionDiagnostic.completionTokens }}
+          </span>
+          <button class="button secondary" type="button" @click="downloadVisionDiagnostic">导出诊断报告</button>
+        </div>
+        <ul v-if="visionDiagnostic.unresolvedIssues.length">
+          <li v-for="issue in visionDiagnostic.unresolvedIssues" :key="issue.fingerprint">
+            第 {{ issue.pageIndex + 1 }} 页 · {{ issue.code }}：{{ issue.reason }}
+          </li>
+        </ul>
+      </section>
+      <section v-if="structureDiagnostic" class="quality-report-card" aria-label="结构门禁诊断报告">
+        <div>
+          <strong>确定性结构门未通过</strong>
+          <span>{{ structureDiagnostic.issues.length }} 个结构错误；不会调用 Exp 掩盖</span>
+          <button class="button secondary" type="button" @click="downloadStructureDiagnostic">导出诊断报告</button>
+        </div>
+        <ul>
+          <li v-for="issue in structureDiagnostic.issues" :key="issue.fingerprint">
+            {{ issue.code }} · {{ issue.entityId }}：{{ issue.message }}
+          </li>
+        </ul>
+      </section>
       <section v-if="qualityReport" class="quality-report-card" aria-label="排版质量报告">
         <div>
           <strong>{{ qualityReport.pass ? '逐页质检通过' : '逐页质检未通过' }}</strong>

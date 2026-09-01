@@ -10,6 +10,7 @@ export type VisionRegionType =
 
 export type VisionColumn = 'left' | 'right' | 'full';
 export type NormalizedVisionBox = [number, number, number, number];
+export type VisionCrossPageHint = 'none' | 'starts' | 'continues' | 'ends' | 'unknown';
 
 export interface VisionRegion {
   type: VisionRegionType;
@@ -18,6 +19,15 @@ export interface VisionRegion {
   column: VisionColumn;
   captionBBox?: NormalizedVisionBox;
   confidence: number;
+  /** Provider-local identifier retained only as provenance. */
+  temporaryId?: string;
+  /** Deterministic page-plan identifier assigned by local code. */
+  localId?: string;
+  visibleLabel?: string;
+  captionPosition?: 'above' | 'below' | 'none' | 'unknown';
+  /** Model proposal only. Local cross-page evidence remains authoritative. */
+  crossPageHint?: VisionCrossPageHint;
+  evidence?: string;
 }
 
 export interface VisionPageAnalysis {
@@ -198,9 +208,7 @@ export function parseVisionPageAnalysis(value: unknown, expectedPageIndex: numbe
   if (!Array.isArray(root.regions)) throw new VisionProtocolError('Vision JSON regions 必须为数组');
 
   const regions: VisionRegion[] = [];
-  let firstRegionError: VisionProtocolError | undefined;
   root.regions.forEach((input, index) => {
-    try {
       const item = record(input, `regions[${index}]`);
       const parsedConfidence = normalizedConfidence(item.confidence);
       // Confidence is advisory metadata. Geometry and semantic-type gates below
@@ -223,17 +231,24 @@ export function parseVisionPageAnalysis(value: unknown, expectedPageIndex: numbe
           captionBBox: parseNormalizedVisionBox(captionValue, `regions[${index}].caption_bbox`),
         }),
         confidence,
+        ...(typeof item.id === 'string' && item.id.trim() ? { temporaryId: item.id.trim().slice(0, 100) } : {}),
+        ...(typeof item.label === 'string' && item.label.trim() ? { visibleLabel: item.label.trim().slice(0, 100) } : {}),
+        ...(item.caption_position === 'above' || item.caption_position === 'below'
+          || item.caption_position === 'none' || item.caption_position === 'unknown'
+          ? { captionPosition: item.caption_position }
+          : {}),
+        ...(item.cross_page_hint === undefined ? {} : {
+          crossPageHint: enumValue(
+            item.cross_page_hint,
+            ['none', 'starts', 'continues', 'ends', 'unknown'] as const,
+            `regions[${index}].cross_page_hint`,
+          ),
+        }),
+        ...(typeof item.evidence === 'string' && item.evidence.trim()
+          ? { evidence: item.evidence.trim().slice(0, 240) }
+          : {}),
       });
-    } catch (error) {
-      if (!(error instanceof VisionProtocolError)) throw error;
-      firstRegionError ??= error;
-    }
   });
-  // A page commonly contains dozens of independent Vision regions. One
-  // malformed estimate must not discard every valid region on that page; the
-  // deterministic PDF parser can recover the omitted area. Still reject a
-  // wholly unusable response so schema failures are not hidden.
-  if (root.regions.length > 0 && regions.length === 0 && firstRegionError) throw firstRegionError;
 
   return { pageIndex: expectedPageIndex, layout, regions };
 }
@@ -248,6 +263,11 @@ export function serializeVisionPageAnalysis(analysis: VisionPageAnalysis): Recor
       column: region.column,
       ...(region.captionBBox ? { caption_bbox: [...region.captionBBox] } : {}),
       confidence: region.confidence,
+      ...(region.temporaryId ? { id: region.temporaryId } : {}),
+      ...(region.visibleLabel ? { label: region.visibleLabel } : {}),
+      ...(region.captionPosition ? { caption_position: region.captionPosition } : {}),
+      ...(region.crossPageHint ? { cross_page_hint: region.crossPageHint } : {}),
+      ...(region.evidence ? { evidence: region.evidence } : {}),
     })),
   };
 }

@@ -22,9 +22,18 @@ describe('single-column layout profile', () => {
     const task = {
       ...createTaskSnapshot('p1', 1),
       stage: 'completed' as const, status: 'completed' as const, startedAt: 2,
+      error: '旧错误',
+      pauseReason: 'vision-correction-budget-exhausted' as const,
+      visionAttempt: {
+        phase: 'correction-local-crop' as const, failedPages: [2], correctionCallsUsed: 2,
+        maxCorrectionCalls: 2, validatedPages: 1, cachedPages: 0,
+        totalPages: 3, correctionRound: 2 as const, remainingPageRounds: 0,
+        promptTokens: 100, completionTokens: 20,
+      },
       settings: {
         modelId: 'deepseek-v4-flash', thinkingMode: 'enabled' as const,
         sourceFileName: 'paper.pdf', sourceFileHash: 'hash',
+        maxVisionCorrectionCalls: 2,
       },
     };
     const reset = resetTaskForSingleColumnLayout(task, 10);
@@ -36,6 +45,10 @@ describe('single-column layout profile', () => {
       },
     });
     expect(reset.startedAt).toBeUndefined();
+    expect(reset.error).toBeUndefined();
+    expect(reset.pauseReason).toBeUndefined();
+    expect(reset.visionAttempt).toBeUndefined();
+    expect(reset.settings?.maxVisionCorrectionCalls).toBeUndefined();
     expect(usesCurrentSingleColumnLayout(reset)).toBe(true);
   });
 });

@@ -3,6 +3,7 @@ import { buildSourceSentenceCandidates } from '../../src/core/align/sourceSenten
 import {
   buildBatchPrompt,
   buildSystemPrompt,
+  buildTranslationRecoveryInstruction,
   SYSTEM_PROMPT_VERSION,
 } from '../../src/core/translate/prompts';
 import {
@@ -214,7 +215,7 @@ describe('generic academic translation protocol', () => {
 
   it('keeps the fixed prompt domain-neutral and puts paper context only in the payload', () => {
     const systemPrompt = buildSystemPrompt();
-    expect(SYSTEM_PROMPT_VERSION).toBe('academic-json-v3');
+    expect(SYSTEM_PROMPT_VERSION).toBe('academic-json-v5');
     expect(systemPrompt).not.toMatch(/zkVM|Zero-Knowledge|计算机体系结构|密码学|医学/);
     expect(systemPrompt).toContain('document_context');
     expect(systemPrompt).toContain('protected_tokens');
@@ -222,6 +223,7 @@ describe('generic academic translation protocol', () => {
     expect(systemPrompt).toContain('"alignment_groups"');
     expect(systemPrompt).toContain('"source_sentence_ids"');
     expect(systemPrompt).toContain('Every field shown is required');
+    expect(systemPrompt).toContain('do not leave lowercase English prose');
 
     const payload = buildBatchPrompt({
       documentContext: {
@@ -245,6 +247,20 @@ describe('generic academic translation protocol', () => {
     expect(payload).toContain('心肌梗死');
     expect(payload).toContain('12%');
     expect(payload).not.toContain('sk-');
+  });
+
+  it('turns untranslated-residual details into an explicit repair instruction', () => {
+    const instruction = buildTranslationRecoveryInstruction({
+      reason: 'validation',
+      validationCodes: ['untranslated-residual'],
+      validationDetails: [
+        'Chinese target contains untranslated lowercase prose: exclusively, dramatically.',
+      ],
+    });
+
+    expect(instruction).toContain('UNTRANSLATED_RESIDUAL_FIX');
+    expect(instruction).toContain('exclusively, dramatically');
+    expect(instruction).toContain('Translate every ordinary lowercase English word');
   });
 
   it('extracts numbers, citations, and explicit protected markers in source order', () => {
@@ -338,6 +354,45 @@ describe('generic academic translation protocol', () => {
       alignmentGroups: [{ sourceSentenceIds: ['title-s-1'], targetSegments: [translation] }],
       newTerms: [], warnings: [],
     }] }).ok).toBe(true);
+  });
+
+  it('rejects a title acronym moved behind its trailing footnote marker', () => {
+    const source: TranslationBlockRequest = {
+      blockId: 'title', kind: 'title',
+      source: 'ZK-Tracer: Accelerator for VM Trace Generation ∗',
+      alignmentMode: 'sentence-candidates',
+      sourceSentences: [{ id: 'title-s-1', text: 'ZK-Tracer: Accelerator for VM Trace Generation ∗' }],
+      protectedTokens: ['ZK-Tracer', 'VM', '∗'],
+    };
+    const translation = 'ZK-Tracer：面向虚拟机迹生成的加速器∗ VM';
+    const result = validateBatchResponse([source], { blocks: [{
+      blockId: 'title', translation,
+      alignmentGroups: [{ sourceSentenceIds: ['title-s-1'], targetSegments: [translation] }],
+      newTerms: [], warnings: [],
+    }] });
+
+    expect(result.issues.map((issue) => issue.code)).toContain('protected-token-order-changed');
+  });
+
+  it('rejects untranslated lowercase prose left inside an otherwise Chinese paragraph', () => {
+    const source: TranslationBlockRequest = {
+      blockId: 'body', kind: 'paragraph',
+      source: 'Current hardware acceleration research has exclusively focused on backend proving.',
+      alignmentMode: 'sentence-candidates',
+      sourceSentences: [{
+        id: 'body-s-1',
+        text: 'Current hardware acceleration research has exclusively focused on backend proving.',
+      }],
+      protectedTokens: [],
+    };
+    const translation = '当前硬件加速研究 exclusively 集中在后端证明阶段。';
+    const result = validateBatchResponse([source], { blocks: [{
+      blockId: 'body', translation,
+      alignmentGroups: [{ sourceSentenceIds: ['body-s-1'], targetSegments: [translation] }],
+      newTerms: [], warnings: [],
+    }] });
+
+    expect(result.issues.map((issue) => issue.code)).toContain('untranslated-residual');
   });
 
   it('counts complete numeric tokens and permits extra numerals introduced from number words', () => {

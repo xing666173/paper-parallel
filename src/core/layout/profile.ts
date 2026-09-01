@@ -10,6 +10,7 @@ export function usesCurrentSingleColumnLayout(task: Pick<TaskSnapshot, 'settings
 
 export function resetTaskForSingleColumnLayout(task: TaskSnapshot, at = Date.now()): TaskSnapshot {
   if (!task.settings) throw new Error('任务缺少模型与源文件设置');
+  const { maxVisionCorrectionCalls: _staleCorrectionBudget, ...settings } = task.settings;
   return {
     ...task,
     stage: 'idle',
@@ -18,8 +19,10 @@ export function resetTaskForSingleColumnLayout(task: TaskSnapshot, at = Date.now
     startedAt: undefined,
     updatedAt: at,
     error: undefined,
+    pauseReason: undefined,
+    visionAttempt: undefined,
     settings: {
-      ...task.settings,
+      ...settings,
       targetLayoutPolicy: CURRENT_TARGET_LAYOUT_POLICY,
       layoutProfileVersion: CURRENT_LAYOUT_PROFILE,
     },

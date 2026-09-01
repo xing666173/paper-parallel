@@ -13,6 +13,7 @@ export interface AssetManifestInput {
   mimeType?: ImmutableAssetMimeType;
   widthMode?: WidthMode;
   captionUnitId?: string;
+  crossPageAssetGroupId?: string;
 }
 
 export interface DetectedAssetRegion {
@@ -22,6 +23,7 @@ export interface DetectedAssetRegion {
   rect: Rect;
   widthMode: WidthMode;
   captionUnitId?: string;
+  crossPageAssetGroupId?: string;
   /** Source-page glyph boxes to paint white in a conventional rectangular crop. */
   eraseRects?: Rect[];
   /**
@@ -30,6 +32,8 @@ export interface DetectedAssetRegion {
    * neighbouring text glyph box.
    */
   preserveRects?: Rect[];
+  /** Exact source-text ranges represented by a reconstructed glyph crop. */
+  sourceCharacterRanges?: Array<{ blockId: string; start: number; end: number }>;
   /** Flattened text hint used only to identify a formula in a noisy source crop. */
   formulaHint?: string;
   /** The reconstructed source glyphs prove that a large operator is required. */
@@ -61,6 +65,7 @@ async function createAsset(
     sha256: await hashBlob(input.blob),
     widthMode: input.widthMode ?? 'column',
     captionUnitId: input.captionUnitId,
+    crossPageAssetGroupId: input.crossPageAssetGroupId,
   };
 }
 

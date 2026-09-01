@@ -61,7 +61,7 @@ describe('processing dashboard', () => {
     expect(wrapper.text()).toContain('安全停止');
     expect(wrapper.text()).toContain('最近 200 条任务事件，刷新后保留；不显示思维过程');
     expect(wrapper.text()).toContain('版式识别和成品质检会将论文页面图片发送给 DeepSeek Vision Exp');
-    expect(wrapper.text()).toContain('Vision Exp 识别图、表、公式与栏区');
+    expect(wrapper.text()).toContain('Exp 初次识别、本地门禁与最多两轮局部纠错');
     expect(wrapper.text()).toContain('开始批次 batch-2');
     expect(wrapper.findAll('[data-stage]')).toHaveLength(8);
   });

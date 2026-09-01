@@ -75,6 +75,19 @@ export class DeepSeekTimeoutError extends Error {
   }
 }
 
+export function isNonRetryableDeepSeekAccountError(error: unknown): boolean {
+  if (error instanceof DeepSeekInsufficientBalanceError
+    || (error instanceof Error && error.name === 'DeepSeekInsufficientBalanceError')) return true;
+  return error instanceof Error && /^DeepSeek HTTP (?:400|401|402|403|404)\b/.test(error.message);
+}
+
+export function isRetryableDeepSeekTransportError(error: unknown): boolean {
+  if (error instanceof DeepSeekTimeoutError || error instanceof DeepSeekOutputLimitError) return true;
+  if (error instanceof Error
+    && ['DeepSeekTimeoutError', 'DeepSeekOutputLimitError', 'TypeError'].includes(error.name)) return true;
+  return error instanceof Error && /^DeepSeek HTTP (?:408|409|425|429|5\d\d)\b/.test(error.message);
+}
+
 export const CURRENT_DEEPSEEK_MODELS: readonly DeepSeekModel[] = [
   { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash' },
   { id: 'deepseek-v4-flash-vision-exp', label: 'DeepSeek V4 Flash Vision（实验）' },
@@ -95,6 +108,26 @@ export function buildChatUrl(baseUrl: string): string {
 
 function abortError(): DOMException {
   return new DOMException('Aborted', 'AbortError');
+}
+
+async function deepSeekHttpError(response: Response): Promise<Error> {
+  let detail = '';
+  try {
+    const payload = await response.clone().json() as {
+      error?: { message?: unknown; code?: unknown; type?: unknown };
+      message?: unknown;
+    };
+    const provider: { message?: unknown; code?: unknown; type?: unknown } = payload.error
+      ?? { message: payload.message };
+    const parts = [provider.code, provider.type, provider.message]
+      .filter((value): value is string => typeof value === 'string' && Boolean(value.trim()))
+      .map((value) => value.replace(/sk-[A-Za-z0-9_-]+/g, '[redacted]').replace(/\s+/g, ' ').trim());
+    detail = [...new Set(parts)].join(' · ').slice(0, 240);
+  } catch {
+    // Error bodies are optional and may not be JSON. The status remains enough
+    // for retry classification without echoing an untrusted response body.
+  }
+  return new Error(`DeepSeek HTTP ${response.status}${detail ? `：${detail}` : ''}`);
 }
 
 interface RequestLifetime {
@@ -272,7 +305,7 @@ export async function listModels(opts: DeepSeekConnectionOptions): Promise<DeepS
     });
     if (!response.ok) {
       if (response.status === 402) throw new DeepSeekInsufficientBalanceError();
-      throw new Error(`DeepSeek HTTP ${response.status}`);
+      throw await deepSeekHttpError(response);
     }
 
     const data = (await response.json()) as { data?: Array<{ id?: string }> };
@@ -317,7 +350,7 @@ export async function chatCompletion(opts: ChatCompletionOptions): Promise<ChatC
 
     if (!response.ok) {
       if (response.status === 402) throw new DeepSeekInsufficientBalanceError();
-      throw new Error(`DeepSeek HTTP ${response.status}`);
+      throw await deepSeekHttpError(response);
     }
 
     let content: string | null | undefined;

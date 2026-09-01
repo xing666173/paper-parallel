@@ -32,8 +32,29 @@ export interface PdfContentGateResult {
   issues: PdfContentIssue[];
 }
 
+export interface AssetFooterOverflow {
+  pageIndex: number;
+  rect: Rect;
+  page: { width: number; height: number };
+}
+
 function compact(value: string): string {
   return value.normalize('NFKC').replace(/[\s\u200b-\u200d\ufeff\p{P}\p{S}]+/gu, '');
+}
+
+export function findAssetFooterOverflows(
+  pageBitmapRegions: readonly (readonly Rect[])[] | undefined,
+  pageSizes: readonly { width: number; height: number }[] | undefined,
+): AssetFooterOverflow[] {
+  return pageBitmapRegions?.flatMap((regions, pageIndex) => {
+    const page = pageSizes?.[pageIndex];
+    if (!page) return [];
+    const margin = Math.max(36, page.width * 0.1);
+    const printableBottom = page.height - margin;
+    return regions
+      .filter((rect) => rect.y + rect.h > printableBottom + 2)
+      .map((rect) => ({ pageIndex, rect, page }));
+  }) ?? [];
 }
 
 export function runPdfContentGate(input: PdfContentGateInput): PdfContentGateResult {
@@ -53,15 +74,10 @@ export function runPdfContentGate(input: PdfContentGateInput): PdfContentGateRes
   if (blankPages.length) {
     issues.push({ code: 'blank-page', message: `中文 PDF 存在空白页：${blankPages.join(', ')}` });
   }
-  const overflowPages = input.pageBitmapRegions?.flatMap((regions, pageIndex) => {
-    const page = input.pageSizes?.[pageIndex];
-    if (!page) return [];
-    const margin = Math.max(36, page.width * 0.1);
-    const printableBottom = page.height - margin;
-    return regions.some((rect) => rect.y + rect.h > printableBottom + 2)
-      ? [pageIndex + 1]
-      : [];
-  }) ?? [];
+  const overflowPages = [...new Set(
+    findAssetFooterOverflows(input.pageBitmapRegions, input.pageSizes)
+      .map((overflow) => overflow.pageIndex + 1),
+  )];
   if (overflowPages.length) {
     issues.push({
       code: 'asset-footer-overflow',

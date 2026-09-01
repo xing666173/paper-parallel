@@ -489,7 +489,7 @@ describe('cancellable translation coordinator', () => {
     expect(siblingAborted).toBe(true);
   });
 
-  it('counts progress only after cache persistence and retries only the unsaved record', async () => {
+  it('counts progress only after cache persistence and retries the local write without repeating the API', async () => {
     const requested: string[][] = [];
     const progress: string[][] = [];
     const saved: string[] = [];
@@ -519,9 +519,9 @@ describe('cancellable translation coordinator', () => {
       },
     });
 
-    expect(requested).toEqual([['b1', 'b2'], ['b2']]);
+    expect(requested).toEqual([['b1', 'b2']]);
     expect(saved).toEqual(['b1', 'b2']);
-    expect(progress).toEqual([['b1'], ['b2']]);
+    expect(progress).toEqual([['b1', 'b2']]);
     expect(result.completedBlockIds).toEqual(['b1', 'b2']);
   });
 });

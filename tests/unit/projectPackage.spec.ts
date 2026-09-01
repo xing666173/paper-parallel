@@ -21,6 +21,7 @@ describe('secret-free recoverable project package', () => {
       ['chinese-pdf', '%PDF-zh', 'application/pdf'],
       ['typst-source', '#set page(width: 10cm)', 'text/plain'],
       ['quality-report', '{"schemaVersion":1,"pass":true}', 'application/json'],
+      ['accepted-document-plan', '{"schemaVersion":1,"pagePlanDigests":[],"crossPageAssetGroups":[]}', 'application/json'],
     ] as const) {
       await repository.putArtifact({
         key: `p1:${kind}`, projectId: 'p1', kind,
@@ -46,7 +47,7 @@ describe('secret-free recoverable project package', () => {
     const zip = await JSZip.loadAsync(await blob.arrayBuffer());
     expect(Object.keys(zip.files).sort()).toEqual([
       'alignment.json', 'assets.json', 'audit.json', 'chinese.pdf', 'english.pdf',
-      'glossary.json', 'project.json', 'quality-report.json', 'source-units.json', 'target-units.json',
+      'glossary.json', 'layout-plan.json', 'project.json', 'quality-report.json', 'source-units.json', 'target-units.json',
       'translation.json', 'translation.typ',
     ].sort());
     const texts = await Promise.all(Object.values(zip.files)
@@ -56,8 +57,9 @@ describe('secret-free recoverable project package', () => {
     expect(texts.join('\n')).not.toContain('Authorization');
     expect(texts.join('\n')).not.toContain('reasoning_content');
     expect(JSON.parse(await zip.file('project.json')!.async('string'))).toMatchObject({
-      schemaVersion: 2, modelId: 'deepseek-v4-flash', pageCounts: { en: 8, zh: 11 },
+      schemaVersion: 3, modelId: 'deepseek-v4-flash', pageCounts: { en: 8, zh: 11 },
       targetLayoutPolicy: 'single-column', layoutProfileVersion: 'zh-single-column-v1',
+      visionPlanSchemaVersion: 1,
     });
     expect(await zip.file('quality-report.json')!.async('string')).toContain('"pass":true');
 
