@@ -61,13 +61,15 @@ watch(() => task.value?.status, async (status) => {
 });
 
 function pipelineRunner(initial: TaskSnapshot) {
+  const runProjectId = initial.projectId;
   return async (signal: AbortSignal) => {
     const stages = createBrowserPipelineStages({
-      projectId: projectId.value,
+      projectId: runProjectId,
       snapshot: initial,
       repository,
-      onAiEvent: store.recordAiEvent,
+      onAiEvent: (event) => { if (store.isActiveRun(signal)) store.recordAiEvent(event); },
       onPreview: ({ svg }) => {
+        if (!store.isActiveRun(signal) || projectId.value !== runProjectId) return;
         if (previewUrl.value) URL.revokeObjectURL(previewUrl.value);
         previewUrl.value = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
         previewState.value = 'ready';
@@ -78,10 +80,9 @@ function pipelineRunner(initial: TaskSnapshot) {
       repository,
       signal,
       stages,
-      onSnapshot: (snapshot) => { store.current = snapshot; },
+      onSnapshot: (snapshot) => { store.acceptSnapshot(snapshot, signal); },
     });
-    store.current = result.snapshot;
-    store.completionSummary = result.completion;
+    if (store.acceptSnapshot(result.snapshot, signal)) store.completionSummary = result.completion;
   };
 }
 
@@ -149,7 +150,8 @@ async function resumePausedTask() {
     loadError.value = '恢复版式分析需要 DeepSeek API Key，请返回上传页重新验证连接。';
     return;
   }
-  if (store.current.pauseReason === 'vision-correction-budget-exhausted') {
+  if (store.current.pauseReason === 'vision-correction-budget-exhausted'
+    || store.current.pauseReason === 'source-layout-unresolved') {
     const failedPages = [
       ...(visionDiagnostic.value?.unresolvedIssues.map((issue) => issue.pageIndex) ?? []),
       ...(store.current.visionAttempt?.failedPages ?? []),
@@ -174,7 +176,10 @@ async function resumePausedTask() {
     }
     await repository.invalidateProjectDependencies({
       projectId: projectId.value,
-      facets: ['page-plan', 'asset-geometry', 'caption-link', 'cross-page-group'],
+      facets: [
+        'page-plan', 'asset-geometry', 'caption-link', 'cross-page-group',
+        ...(store.current.pauseReason === 'source-layout-unresolved' ? ['source-analysis' as const] : []),
+      ],
       pageIndices: affectedPages,
     });
     visionDiagnostic.value = undefined;
@@ -219,7 +224,7 @@ onMounted(async () => {
   loading.value = !task.value;
   try {
     if (!task.value) store.current = await repository.loadTask(projectId.value) ?? null;
-    if (store.current?.status === 'stopping') await store.recoverInterruptedStop();
+    if (store.current) await store.recoverInterruptedStop();
     if (store.current) await store.restoreAiLog(projectId.value);
     const artifact = await repository.findArtifact(`${projectId.value}:english-pdf`);
     if (artifact?.blob instanceof Blob && typeof URL.createObjectURL === 'function') {
@@ -310,8 +315,9 @@ onBeforeRouteLeave(() => {
       </section>
       <section v-if="structureDiagnostic" class="quality-report-card" aria-label="结构门禁诊断报告">
         <div>
-          <strong>确定性结构门未通过</strong>
-          <span>{{ structureDiagnostic.issues.length }} 个结构错误；不会调用 Exp 掩盖</span>
+          <strong>{{ structureDiagnostic.issues.length ? '确定性结构门未通过' : '处理阶段诊断' }}</strong>
+          <span v-if="structureDiagnostic.issues.length">{{ structureDiagnostic.issues.length }} 个结构错误</span>
+          <span v-else>{{ structureDiagnostic.message || structureDiagnostic.errorName }}</span>
           <button class="button secondary" type="button" @click="downloadStructureDiagnostic">导出诊断报告</button>
         </div>
         <ul>

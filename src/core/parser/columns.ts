@@ -3,6 +3,7 @@
 // 算法基准:P4/P5 探针(已 debug)。纯函数、零依赖。
 // ============================================================================
 import type { ParsedLine } from './lines';
+import { readingOrder } from './readingOrder';
 
 export type ColumnKind = 'full' | 'left' | 'right';
 
@@ -48,17 +49,26 @@ export function classifyLines(lines: ParsedLine[], pageW: number): ClassifiedLin
       && baselineGap > 0
       && baselineGap <= Math.max(current.h, previous.h) * 1.7
       && Math.abs(current.x1 - previous.x1) <= 12
+      && !byVisualY.some((other) => (
+        other !== current
+        && other.col === (current.col === 'left' ? 'right' : 'left')
+        && other.y < current.y + current.h
+        && current.y < other.y + other.h
+      ))
     ) current.col = 'full';
   }
-  // 阅读顺序:通栏(上→下) -> 左栏(上→下) -> 右栏(上→下)
-  const rank = (c: ColumnKind) => (c === 'full' ? 0 : c === 'left' ? 1 : 2);
-  out.sort((a, b) => rank(a.col) - rank(b.col) || a.y - b.y);
-  return out;
+  // Read both lanes above a spanning item before entering the next band.
+  return readingOrder(out, (line) => ({ x: line.x1, y: line.y, w: line.x2 - line.x1, h: line.h }));
 }
 
 /** 页面分栏模式判定(供版式继承 R4 使用) */
 export function detectLayoutMode(lines: ClassifiedLine[]): 'single' | 'double' | 'mixed' {
   const cols = new Set(lines.map((l) => l.col));
-  if (cols.has('full')) return 'mixed';
-  return cols.has('left') && cols.has('right') ? 'double' : 'single';
+  // Full-width paragraphs and their short headings still form one column.
+  // A mixed page needs evidence of both physical lanes as well as a span.
+  const left = lines.filter((line) => line.col === 'left');
+  const right = lines.filter((line) => line.col === 'right');
+  const parallelLanes = left.some((a) => right.some((b) => a.y < b.y + b.h && b.y < a.y + a.h));
+  if (!parallelLanes) return 'single';
+  return cols.has('full') ? 'mixed' : 'double';
 }

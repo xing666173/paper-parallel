@@ -1,6 +1,7 @@
 import type { ProjectArtifactRecord, TranslationCacheRecord } from './db';
 
 export type DependencyFacet =
+  | 'source-analysis'
   | 'page-plan'
   | 'asset-geometry'
   | 'caption-link'
@@ -41,11 +42,19 @@ export function computeInvalidationPlan(
   translations: readonly TranslationCacheRecord[],
 ): InvalidationResult {
   const facets = new Set(change.facets);
+  if (facets.has('source-analysis')) {
+    facets.add('page-plan');
+    facets.add('asset-geometry');
+  }
   const pages = new Set(change.pageIndices ?? []);
   const sourceUnits = new Set(change.sourceUnitIds ?? []);
   const formalStructureChanged = [...facets].some((facet) => facet !== 'layout-only');
   const artifactKeys = artifacts.flatMap((artifact) => {
     if (artifact.projectId !== change.projectId || artifact.kind === 'english-pdf') return [];
+    if (facets.has('source-analysis')
+      && (artifact.kind === 'raw-vision-response' || artifact.kind === 'vision-layout')
+      && (pages.size === 0 || !artifact.dependencies?.pageIndices?.length
+        || intersects(artifact.dependencies.pageIndices, pages))) return [artifact.key];
     if (OUTPUT_KINDS.has(artifact.kind) && (formalStructureChanged || facets.has('layout-only'))) {
       return [artifact.key];
     }

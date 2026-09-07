@@ -5,18 +5,33 @@ import type { VisionPlanValidationIssue } from './planVerifier';
 const VISION_CORRECTABLE = new Set<VisionReconciliationReason>([
   'caption-unmatched',
   'caption-overlap',
+  'foreign-caption-overlap',
   'page-edge-touch',
   'page-coverage-excessive',
 ]);
 
 const LOCALLY_REJECTABLE = new Set<VisionReconciliationReason>([
-  'low-confidence',
   'body-prose-density',
   'implausible-formula-cluster',
 ]);
 
 export function isVisionCorrectableReason(reason: VisionReconciliationReason): boolean {
   return VISION_CORRECTABLE.has(reason);
+}
+
+/** A newly exposed defect can follow a real repair of the first reported defect. */
+export function hasSubstantiveVisionCorrectionProgress(
+  before: readonly VisionPlanValidationIssue[],
+  after: readonly VisionPlanValidationIssue[],
+): boolean {
+  if (after.length < before.length) return true;
+  if (after.length > before.length || !before.length) return false;
+  const identity = (issue: VisionPlanValidationIssue) => JSON.stringify([
+    issue.pageIndex, issue.regionId ?? null, issue.code,
+  ]);
+  const remaining = new Set(after.map(identity));
+  // Geometry jitter changes a fingerprint but does not resolve the defect.
+  return before.some((issue) => !remaining.has(identity(issue)));
 }
 
 export function reconciliationValidationIssues(
@@ -43,6 +58,8 @@ export function reconciliationValidationIssues(
       regionId: region.id,
       reason: unresolved.reason === 'caption-overlap'
         ? '资产框与标题框相交；资产 bbox 必须排除标题文字并与 captionBBox 零相交'
+        : unresolved.reason === 'foreign-caption-overlap'
+          ? '资产框包含其他图表的标题；缩小或移动 bbox 以排除不属于本区域的可见标题'
         : unresolved.reason === 'caption-unmatched'
           ? 'captionBBox 未匹配到 PDF 文字层中的可见标题；不得虚构标题或标题框'
           : `区域未通过本地几何门：${unresolved.reason}`,

@@ -43,9 +43,9 @@ export const VISION_LAYOUT_LAST_RESORT_RENDER_SCALE = 0.8;
 export const VISION_LAYOUT_RENDER_TIMEOUT_MS = 30_000;
 export const VISION_LAYOUT_REQUEST_ATTEMPTS = 2;
 export const VISION_PAGE_PLAN_PROTOCOL_VERSION = 'vision-page-plan-v1';
-export const VISION_LAYOUT_PARSER_VERSION = 'vision-layout-parser-v4';
+export const VISION_LAYOUT_PARSER_VERSION = 'vision-layout-parser-v5';
 export const VISION_LAYOUT_VERIFIER_VERSION = 'vision-plan-verifier-v1';
-export const VISION_LAYOUT_RECOVERY_VERSION = 'vision-plan-recovery-v5';
+export const VISION_LAYOUT_RECOVERY_VERSION = 'vision-plan-recovery-v6';
 
 export interface VisionRawResponseRecord {
   schemaVersion: 1;

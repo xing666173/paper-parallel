@@ -135,35 +135,10 @@ export function parseNormalizedVisionBox(value: unknown, path: string): Normaliz
 }
 
 function parseLayoutVisionBox(value: unknown, path: string): NormalizedVisionBox {
-  const parsed = parseNormalizedVisionBox(value, path);
-  const raw = Array.isArray(value)
-    ? value
-    : value && typeof value === 'object'
-      ? [
-          (value as Record<string, unknown>).x,
-          (value as Record<string, unknown>).y,
-          (value as Record<string, unknown>).width,
-          (value as Record<string, unknown>).height,
-        ]
-      : [];
-  if (raw.length !== 4 || raw.some((item) => typeof item !== 'number' || !Number.isFinite(item))) return parsed;
-  let [x, y, third, fourth] = raw as number[];
-  if ([x, y, third, fourth].every((item) => item >= 0 && item <= 1)) {
-    [x, y, third, fourth] = [x * 1000, y * 1000, third * 1000, fourth * 1000];
-  }
-  // Vision models occasionally return x1/y1/x2/y2 while naming the final
-  // fields width/height.  When that tuple is also technically valid xywh, a
-  // right/bottom edge landing exactly on 1000 is the reliable tell: immutable
-  // paper assets are requested as tight ink crops and should not touch a page
-  // edge.  Repair the complete tuple so tables are not widened and lengthened.
-  const repaired: NormalizedVisionBox = [...parsed];
-  if (x >= 20 && third > x && third <= 1000 && x + third >= 995) {
-    repaired[2] = third - x;
-  }
-  if (y >= 20 && fourth > y && fourth <= 1000 && y + fourth >= 995) {
-    repaired[3] = fourth - y;
-  }
-  return repaired;
+  // A valid xywh tuple remains authoritative even near a page edge. Inferring
+  // xyxy from that location silently truncates legitimate full-width assets.
+  // The shared parser repairs only tuples that cannot already be valid xywh.
+  return parseNormalizedVisionBox(value, path);
 }
 
 function normalizedColumn(value: unknown, bbox: NormalizedVisionBox): VisionColumn {

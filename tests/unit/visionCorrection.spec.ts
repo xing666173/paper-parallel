@@ -85,6 +85,21 @@ describe('vision correction patch', () => {
     expect(JSON.stringify(plan)).toBe(before);
   });
 
+  it.each([
+    { confidence: 0.1 },
+    { bbox: [100, 210, 350, 150] as [number, number, number, number], confidence: 0.1 },
+  ])('does not let a geometry patch lower confidence to trigger automatic removal', (changes) => {
+    const plan = fixture();
+    const regionId = plan.regions[0]!.id;
+    const original = JSON.stringify(plan);
+    expect(() => applyVisionCorrectionPatch(plan, {
+      schemaVersion: 1, patchId: 'confidence-bypass', pageIndex: 0,
+      basePlanVersion: plan.planVersion, round: 1,
+      operations: [{ type: 'update-region', regionId, changes }],
+    }, { issues: [issue(regionId)] })).toThrow('不能修改区域置信度');
+    expect(JSON.stringify(plan)).toBe(original);
+  });
+
   it('parses only the operation whitelist and rejects direct reading-order writes', () => {
     expect(() => parseVisionCorrectionPatch({
       schema_version: 1, patch_id: 'bad', page: 1, base_plan_version: 'p', round: 1,

@@ -1,10 +1,27 @@
 import type { Rect } from '../../types/models';
+import { awaitWithDeadline } from '../task/asyncDeadline';
+
+export const ASSET_CROP_RENDER_VERSION = 'pdfjs-region-bounded-v2';
 
 interface PdfViewportLike { width: number; height: number }
-interface PdfRenderTaskLike { promise: Promise<unknown> }
+interface PdfRenderTaskLike { promise: Promise<unknown>; cancel?(): void }
 export interface RenderablePdfPage {
   getViewport(options: { scale: number }): PdfViewportLike;
-  render(options: { canvasContext: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D; viewport: PdfViewportLike }): PdfRenderTaskLike;
+  render(options: {
+    canvasContext: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+    viewport: PdfViewportLike;
+    transform?: number[];
+    background?: string;
+  }): PdfRenderTaskLike;
+}
+
+export interface CropPageRegionOptions {
+  signal?: AbortSignal;
+  /** Covers both rendering and PNG encoding. */
+  timeoutMs?: number;
+  /** Maximum pixels per canvas; masked crops require at most two such canvases. */
+  maxPixels?: number;
+  maxDimension?: number;
 }
 
 type CanvasTarget = HTMLCanvasElement | OffscreenCanvas;
@@ -45,72 +62,90 @@ export async function cropPageRegionLossless(
   scale = 4,
   eraseRects: readonly Rect[] = [],
   preserveRects: readonly Rect[] = [],
+  options: CropPageRegionOptions = {},
 ): Promise<Blob> {
-  const viewport = page.getViewport({ scale });
-  const source = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
-  await page.render({ canvasContext: context2d(source), viewport }).promise;
-
-  const target = createCanvas(Math.max(1, Math.ceil(rect.w * scale)), Math.max(1, Math.ceil(rect.h * scale)));
-  const targetContext = context2d(target);
-  const cropWidth = Math.ceil(rect.w * scale);
-  const cropHeight = Math.ceil(rect.h * scale);
-  if (preserveRects.length) {
-    targetContext.fillStyle = '#ffffff';
-    targetContext.fillRect(0, 0, cropWidth, cropHeight);
-    for (const preserve of preserveRects) {
-      const left = Math.max(rect.x, preserve.x);
-      const top = Math.max(rect.y, preserve.y);
-      const right = Math.min(rect.x + rect.w, preserve.x + preserve.w);
-      const bottom = Math.min(rect.y + rect.h, preserve.y + preserve.h);
-      if (right <= left || bottom <= top) continue;
-      const sourceX = Math.floor(left * scale);
-      const sourceY = Math.floor(top * scale);
-      const sourceRight = Math.ceil(right * scale);
-      const sourceBottom = Math.ceil(bottom * scale);
-      const width = sourceRight - sourceX;
-      const height = sourceBottom - sourceY;
-      targetContext.drawImage(
-        source,
-        sourceX,
-        sourceY,
-        width,
-        height,
-        sourceX - Math.floor(rect.x * scale),
-        sourceY - Math.floor(rect.y * scale),
-        width,
-        height,
-      );
-    }
-  } else {
-    targetContext.drawImage(
-      source,
-      Math.floor(rect.x * scale),
-      Math.floor(rect.y * scale),
-      cropWidth,
-      cropHeight,
-      0,
-      0,
-      cropWidth,
-      cropHeight,
-    );
+  if (options.signal?.aborted) throw new DOMException('任务已停止', 'AbortError');
+  const maxPixels = options.maxPixels ?? 8_000_000;
+  const maxDimension = options.maxDimension ?? 8192;
+  const timeoutMs = options.timeoutMs ?? 30_000;
+  if (![rect.x, rect.y, rect.w, rect.h, scale, maxPixels, maxDimension, timeoutMs].every(Number.isFinite)
+    || rect.w <= 0 || rect.h <= 0 || scale <= 0 || maxPixels < 1 || maxDimension < 1 || timeoutMs <= 0) {
+    throw new Error('裁图范围、缩放和资源上限必须有效');
   }
-  if (eraseRects.length && !preserveRects.length) {
-    targetContext.save();
-    targetContext.fillStyle = '#ffffff';
-    for (const erase of eraseRects) {
-      const left = Math.max(rect.x, erase.x);
-      const top = Math.max(rect.y, erase.y);
-      const right = Math.min(rect.x + rect.w, erase.x + erase.w);
-      const bottom = Math.min(rect.y + rect.h, erase.y + erase.h);
-      if (right <= left || bottom <= top) continue;
-      targetContext.fillRect(
-        Math.floor((left - rect.x) * scale),
-        Math.floor((top - rect.y) * scale),
-        Math.ceil((right - left) * scale),
-        Math.ceil((bottom - top) * scale),
-      );
-    }
-    targetContext.restore();
+  // Rasterize the requested region, not a full high-resolution page for every asset.
+  let renderScale = Math.min(scale, Math.sqrt(maxPixels / (rect.w * rect.h)), maxDimension / rect.w, maxDimension / rect.h);
+  if (!Number.isFinite(renderScale) || renderScale <= 0) throw new Error('裁图区域超出可渲染范围');
+  const dimensions = () => ({
+    width: Math.max(1, Math.ceil((rect.x + rect.w) * renderScale) - Math.floor(rect.x * renderScale)),
+    height: Math.max(1, Math.ceil((rect.y + rect.h) * renderScale) - Math.floor(rect.y * renderScale)),
+  });
+  let { width: cropWidth, height: cropHeight } = dimensions();
+  for (let attempt = 0; cropWidth * cropHeight > maxPixels || cropWidth > maxDimension || cropHeight > maxDimension; attempt += 1) {
+    if (attempt >= 32) throw new Error('裁图区域无法满足图像资源上限');
+    renderScale *= Math.min(0.95, Math.sqrt(maxPixels / (cropWidth * cropHeight)), maxDimension / cropWidth, maxDimension / cropHeight);
+    ({ width: cropWidth, height: cropHeight } = dimensions());
   }
-  return exportPng(target);
+  const viewport = page.getViewport({ scale: renderScale });
+  const sourceX = Math.floor(rect.x * renderScale);
+  const sourceY = Math.floor(rect.y * renderScale);
+  const source = createCanvas(cropWidth, cropHeight);
+  let target: CanvasTarget = source;
+  let renderTask: PdfRenderTaskLike | undefined;
+  const startedAt = Date.now();
+  const wait = <T>(operation: Promise<T>): Promise<T> => awaitWithDeadline(operation, {
+    signal: options.signal,
+    timeoutMs: Math.max(1, timeoutMs - (Date.now() - startedAt)),
+    timeoutMessage: 'PDF 局部裁图或图像编码超时',
+    onCancel: () => renderTask?.cancel?.(),
+  });
+  try {
+    renderTask = page.render({
+      canvasContext: context2d(source), viewport,
+      transform: [1, 0, 0, 1, -sourceX, -sourceY], background: '#ffffff',
+    });
+    await wait(renderTask.promise);
+    if (preserveRects.length) target = createCanvas(cropWidth, cropHeight);
+    const targetContext = context2d(target);
+    const pixelsWithinCrop = (area: Rect) => {
+      const left = Math.max(rect.x, area.x);
+      const top = Math.max(rect.y, area.y);
+      const right = Math.min(rect.x + rect.w, area.x + area.w);
+      const bottom = Math.min(rect.y + rect.h, area.y + area.h);
+      if (right <= left || bottom <= top) return undefined;
+      const x = Math.max(0, Math.floor(left * renderScale) - sourceX);
+      const y = Math.max(0, Math.floor(top * renderScale) - sourceY);
+      return {
+        x, y,
+        w: Math.min(cropWidth, Math.ceil(right * renderScale) - sourceX) - x,
+        h: Math.min(cropHeight, Math.ceil(bottom * renderScale) - sourceY) - y,
+      };
+    };
+    if (preserveRects.length) {
+      targetContext.fillStyle = '#ffffff';
+      targetContext.fillRect(0, 0, cropWidth, cropHeight);
+      for (const preserve of preserveRects) {
+        const pixels = pixelsWithinCrop(preserve);
+        if (!pixels || pixels.w <= 0 || pixels.h <= 0) continue;
+        const { x, y, w, h } = pixels;
+        targetContext.drawImage(source, x, y, w, h, x, y, w, h);
+      }
+    } else if (eraseRects.length) {
+      targetContext.save();
+      targetContext.fillStyle = '#ffffff';
+      for (const erase of eraseRects) {
+        const pixels = pixelsWithinCrop(erase);
+        if (!pixels || pixels.w <= 0 || pixels.h <= 0) continue;
+        targetContext.fillRect(pixels.x, pixels.y, pixels.w, pixels.h);
+      }
+      targetContext.restore();
+    }
+    return await wait(exportPng(target));
+  } finally {
+    source.width = 0;
+    source.height = 0;
+    if (target !== source) {
+      target.width = 0;
+      target.height = 0;
+    }
+  }
 }

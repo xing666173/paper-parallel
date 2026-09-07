@@ -43,7 +43,8 @@ export interface CrossPageRelationIssue {
     | 'cross-page.invalid-members'
     | 'cross-page.unknown-region'
     | 'cross-page.multiple-group-membership'
-    | 'cross-page.invalid-caption-owner';
+    | 'cross-page.invalid-caption-owner'
+    | 'cross-page.contradictory-evidence';
   candidateIndex: number;
   message: string;
 }
@@ -51,6 +52,24 @@ export interface CrossPageRelationIssue {
 function normalizedLabel(value: string | undefined): string | undefined {
   const normalized = value?.replace(/\s+/g, ' ').trim().toLocaleLowerCase();
   return normalized || undefined;
+}
+
+function numberedLabelIdentity(value: string | undefined): string | undefined {
+  const match = value?.match(/\b(fig(?:ure)?|table|algorithm|code)\s*\.?\s*(\d+(?:[.-]\d+)*|[IVXLCDM]+)\b/i);
+  if (!match) return undefined;
+  const kind = /^fig/i.test(match[1]!) ? 'figure' : match[1]!.toLocaleLowerCase();
+  return `${kind}:${match[2]!.toLocaleLowerCase()}`;
+}
+
+function contradictoryPageLink(
+  tail: VisionPagePlan['regions'][number],
+  head: VisionPagePlan['regions'][number],
+): boolean {
+  if (tail.crossPageHint === 'none' || head.crossPageHint === 'none'
+    || tail.crossPageHint === 'ends' || head.crossPageHint === 'starts') return true;
+  const tailIdentity = numberedLabelIdentity(tail.visibleLabel);
+  const headIdentity = numberedLabelIdentity(head.visibleLabel);
+  return Boolean(tailIdentity && headIdentity && tailIdentity !== headIdentity);
 }
 
 /** Produces candidates only from adjacent page-edge regions; validation remains authoritative. */
@@ -80,6 +99,7 @@ export function inferCrossPageAssetCandidates(
     ));
     for (const tail of tails) {
       for (const head of heads.filter((candidate) => candidate.type === tail.type)) {
+          if (contradictoryPageLink(tail, head)) continue;
           const sameColumn = head.column === tail.column;
           const geometryDistance = Math.abs(head.bbox[0] - tail.bbox[0])
             + Math.abs(head.bbox[2] - tail.bbox[2]);
@@ -389,6 +409,21 @@ export function validateCrossPageAssetCandidates(
       issues.push({
         code: 'cross-page.unknown-region', candidateIndex,
         message: `跨页资产引用未知或类型不一致的区域 ${unknown.regionId}`,
+      });
+      return;
+    }
+    const numberedIdentities = new Set(members.flatMap((member) => {
+      const identity = numberedLabelIdentity(regionByKey.get(`${member.pageIndex}:${member.regionId}`)!.visibleLabel);
+      return identity ? [identity] : [];
+    }));
+    const contradictsMember = numberedIdentities.size > 1 || members.some((member, index) => index > 0 && contradictoryPageLink(
+      regionByKey.get(`${members[index - 1]!.pageIndex}:${members[index - 1]!.regionId}`)!,
+      regionByKey.get(`${member.pageIndex}:${member.regionId}`)!,
+    ));
+    if (contradictsMember) {
+      issues.push({
+        code: 'cross-page.contradictory-evidence', candidateIndex,
+        message: '跨页资产成员的明确连续性提示或可见编号互相矛盾',
       });
       return;
     }

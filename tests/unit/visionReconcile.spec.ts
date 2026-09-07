@@ -697,7 +697,7 @@ describe('vision: deterministic layout reconciliation', () => {
       }],
     }]);
 
-    expect(result.unresolved).toEqual([expect.objectContaining({ reason: 'caption-overlap' })]);
+    expect(result.unresolved).toEqual([expect.objectContaining({ reason: 'foreign-caption-overlap' })]);
   });
 
   it('does not use a visible number when the PDF text layer contains duplicate caption identities', () => {
@@ -965,7 +965,9 @@ describe('vision: deterministic layout reconciliation', () => {
   });
 
   it('rejects a repeated stack of thin full-width formula boxes hallucinated from body text lines', () => {
-    const result = reconcileVisionLayout(fixtureDoc(), [{
+    const doc = fixtureDoc();
+    addFormulaRowEvidence(doc, Array.from({ length: 8 }, (_, index) => [110, 300 + index * 18, 780, 16]));
+    const result = reconcileVisionLayout(doc, [{
       pageIndex: 0,
       layout: 'single',
       regions: Array.from({ length: 8 }, (_, index) => ({
@@ -982,7 +984,9 @@ describe('vision: deterministic layout reconciliation', () => {
   });
 
   it('rejects a repeated stack of thin column-width formula boxes hallucinated from text lines', () => {
-    const result = reconcileVisionLayout(fixtureDoc(), [{
+    const doc = fixtureDoc();
+    addFormulaRowEvidence(doc, Array.from({ length: 12 }, (_, index) => [102, 190 + index * 18, 430, 32]));
+    const result = reconcileVisionLayout(doc, [{
       pageIndex: 0,
       layout: 'double',
       regions: Array.from({ length: 12 }, (_, index) => ({
@@ -999,7 +1003,9 @@ describe('vision: deterministic layout reconciliation', () => {
   });
 
   it('rejects one thin full-width text line mislabeled as a display formula', () => {
-    const result = reconcileVisionLayout(fixtureDoc(), [{
+    const doc = fixtureDoc();
+    addFormulaRowEvidence(doc, [[110, 300, 780, 16]]);
+    const result = reconcileVisionLayout(doc, [{
       pageIndex: 0, layout: 'single', regions: [{
         type: 'display_formula', bbox: [110, 300, 780, 16], column: 'full', confidence: 0.98,
       }],
@@ -1007,6 +1013,56 @@ describe('vision: deterministic layout reconciliation', () => {
 
     expect(result.assetRegions).toEqual([]);
     expect(result.unresolved).toEqual([expect.objectContaining({ reason: 'implausible-formula-cluster' })]);
+  });
+
+  it('preserves a thin wide equation corroborated by mathematical source glyphs', () => {
+    const doc = fixtureDoc();
+    addFormulaRowEvidence(doc, [[110, 300, 780, 16]], 'x = a + b + c + d + e + f', 'equation');
+    const result = reconcileVisionLayout(doc, [{
+      pageIndex: 0, layout: 'single', regions: [{
+        type: 'display_formula', bbox: [110, 300, 780, 16], column: 'full', confidence: 0.99,
+      }],
+    }]);
+    expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions).toHaveLength(1);
+    expect(result.assetRegions[0]!.kind).toBe('formula');
+    expect(result.assetRegions[0]!.rect.w).toBeGreaterThanOrEqual(780 / 1000 * 612);
+  });
+
+  it('preserves a thin raster formula when the PDF has no text-layer glyphs for it', () => {
+    const result = reconcileVisionLayout(fixtureDoc(), [{
+      pageIndex: 0, layout: 'single', regions: [{
+        type: 'display_formula', bbox: [110, 300, 780, 16], column: 'full', confidence: 0.99,
+      }],
+    }], 0.8, new Map([[0, [{ x: 67.32, y: 237.6, w: 477.36, h: 12.672 }]]]));
+    expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions).toHaveLength(1);
+    expect(result.assetRegions[0]!.kind).toBe('formula');
+  });
+
+  it('does not discard an equation block whose mathematical operators have no text representation', () => {
+    const doc = fixtureDoc();
+    addFormulaRowEvidence(doc, [[110, 300, 780, 16]], 'the expected value of observations', 'equation');
+    const result = reconcileVisionLayout(doc, [{
+      pageIndex: 0, layout: 'single', regions: [{
+        type: 'display_formula', bbox: [110, 300, 780, 16], column: 'full', confidence: 0.99,
+      }],
+    }]);
+    expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions).toHaveLength(1);
+  });
+
+  it('keeps six genuine equations even when their geometry resembles a regular prose cluster', () => {
+    const doc = fixtureDoc();
+    const boxes: Array<[number, number, number, number]> = Array.from({ length: 6 }, (_, index) => [110, 300 + index * 30, 430, 20]);
+    addFormulaRowEvidence(doc, boxes, 'x = a + b + c + d + e + f', 'equation');
+    const result = reconcileVisionLayout(doc, [{
+      pageIndex: 0, layout: 'double', regions: boxes.map((bbox) => ({
+        type: 'display_formula', bbox, column: 'left', confidence: 0.99,
+      })),
+    }]);
+    expect(result.unresolved).toEqual([]);
+    expect(result.assetRegions).toHaveLength(6);
   });
 
   it('keeps a single-column display formula away from adjacent prose and includes its equation number', () => {
@@ -1062,6 +1118,28 @@ describe('vision: deterministic layout reconciliation', () => {
     ])).toThrow('重复');
   });
 });
+
+function addFormulaRowEvidence(
+  doc: Doc,
+  boxes: Array<[number, number, number, number]>,
+  text = 'The remaining words are ordinary prose in the body text.',
+  type: 'paragraph' | 'equation' = 'paragraph',
+): void {
+  boxes.forEach(([x, y, w, h], index) => {
+    const page = doc.pages[0]!;
+    const rect = { x: x / 1000 * page.width, y: y / 1000 * page.height,
+      w: w / 1000 * page.width, h: h / 1000 * page.height };
+    doc.blocks.push({
+      id: `formula-evidence-${index}`, docId: 'en', type, pageIndex: 0, rect, text,
+      order: 0.1 + index / 100, splitAllowed: false, widthMode: 'column',
+      characterRects: [...text].map((ch, sourceIndex) => ({
+        ch, sourceIndex, pageIndex: 0,
+        rect: { x: rect.x + sourceIndex * rect.w / text.length, y: rect.y,
+          w: rect.w / text.length, h: Math.min(rect.h, 10) },
+      })),
+    });
+  });
+}
 
 function fixtureDoc(): Doc {
   return {

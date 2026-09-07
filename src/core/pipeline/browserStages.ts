@@ -21,7 +21,7 @@ import {
   parseDeepSeekTranslationJson,
 } from './preparation';
 import { extractImmutableAssets } from '../assets/extract';
-import { cropPageRegionLossless } from '../assets/crop';
+import { ASSET_CROP_RENDER_VERSION, cropPageRegionLossless } from '../assets/crop';
 import { renderLatexFormulaPng } from '../assets/formulaRender';
 import { buildTranslationBatches, translationLimitsFor } from '../translate/batcher';
 import { runTranslationTask } from '../translate/coordinator';
@@ -131,11 +131,13 @@ import {
 } from '../vision/correction';
 import {
   isVisionCorrectableReason,
+  hasSubstantiveVisionCorrectionProgress,
   reconciliationValidationIssues,
   recoverLocallyRejectedRegions,
 } from '../vision/recoveryPolicy';
 import { PdfPageRenderTimeoutError, renderPdfPageAsPng } from '../vision/render';
 import { RecoverablePipelineError } from '../task/recoverable';
+import { awaitWithDeadline } from '../task/asyncDeadline';
 import { CachePersistenceError } from '../project/cacheErrors';
 import { safeErrorMessage } from '../security/errors';
 import {
@@ -348,20 +350,24 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
   return {
     async parse(input, signal) {
       const current = value(input);
-      const artifact = await options.repository.findArtifact(`${options.projectId}:english-pdf`);
+      const wait = <T>(operation: PromiseLike<T>, message: string): Promise<T> => awaitWithDeadline(operation, {
+        signal, timeoutMs: 60_000, timeoutMessage: message,
+      });
+      const artifact = await wait(options.repository.findArtifact(`${options.projectId}:english-pdf`), '读取原文 PDF 超时');
       if (!artifact) throw new Error('英文原文 PDF 不存在');
-      const loading = getDocument({ data: new Uint8Array(await artifact.blob.arrayBuffer()) });
-      signal.addEventListener('abort', () => { void loading.destroy(); }, { once: true });
-      const pdf = await loading.promise;
+      const bytes = await wait(artifact.blob.arrayBuffer(), '读取原文 PDF 数据超时');
+      signal.throwIfAborted();
+      const loading = getDocument({ data: new Uint8Array(bytes) });
       try {
+        const pdf = await wait(loading.promise, '打开 PDF 超时');
         const pages: ParsedPage[] = [];
         const sourceBitmapRegions = new Map<number, Rect[]>();
         for (let pageIndex = 0; pageIndex < pdf.numPages; pageIndex += 1) {
           if (signal.aborted) throw new DOMException('已停止', 'AbortError');
-          const page = await pdf.getPage(pageIndex + 1);
+          const page = await wait(pdf.getPage(pageIndex + 1), `读取 PDF 第 ${pageIndex + 1} 页超时`);
           const viewport = page.getViewport({ scale: 1 });
-          const content = await page.getTextContent();
-          const operatorList = await page.getOperatorList();
+          const content = await wait(page.getTextContent(), `提取 PDF 第 ${pageIndex + 1} 页文字超时`);
+          const operatorList = await wait(page.getOperatorList(), `解析 PDF 第 ${pageIndex + 1} 页图形超时`);
           sourceBitmapRegions.set(pageIndex, extractBitmapRegions(operatorList, viewport.transform));
           const items = content.items
             .filter((item: any) => typeof item?.str === 'string')
@@ -377,7 +383,9 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
         if (!doc.blocks.length) throw new Error('PDF 没有可用的文字层，暂不支持扫描件');
         return { ...current, settings, sourcePdf: pdf, sourceBitmapRegions, doc };
       } catch (error) {
-        await pdf.destroy();
+        // PDF.js may never settle a pending operator-list request after destroy.
+        // The deadline settles our wait; cleanup must not delay stop or timeout.
+        void loading.destroy().catch(() => undefined);
         throw error;
       }
     },
@@ -579,13 +587,16 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
       };
       const pausedVisionAttempt = (
         pageIndex: number,
-        round: 1 | 2,
+        round: 0 | 1 | 2,
         errorCode: string,
         errorMessage: string,
       ): VisionAttemptState => {
-        const failedPages = [...new Set(correctionIssues.map((issue) => issue.pageIndex))].sort((a, b) => a - b);
+        const failedPages = [...new Set([
+          ...correctionIssues.map((issue) => issue.pageIndex),
+          ...reconciled.unresolved.map((issue) => issue.pageIndex),
+        ])].sort((a, b) => a - b);
         return {
-          phase: round === 1 ? 'correction-full-page' : 'correction-local-crop',
+          phase: round === 0 ? 'local-validation' : round === 1 ? 'correction-full-page' : 'correction-local-crop',
           pageIndex,
           totalPages: pdf.numPages,
           correctionRound: round,
@@ -974,7 +985,7 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
           const beforeFingerprint = before.map((issue) => issue.fingerprint).sort().join('|');
           const afterFingerprint = after.map((issue) => issue.fingerprint).sort().join('|');
           const reason = beforeFingerprint === afterFingerprint ? 'repeated-error' : 'no-improvement';
-          if (after.length >= before.length) {
+          if (!hasSubstantiveVisionCorrectionProgress(before, after)) {
             options.onAiEvent?.({
               type: 'vision-correction-stopped', at: Date.now(), page: pageIndex + 1,
               totalPages: pdf.numPages, round, reason,
@@ -983,9 +994,9 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
             await persistSourceLayoutReport(false, correctionIssues);
             throw new RecoverablePipelineError(
               'vision-correction-budget-exhausted',
-              `第 ${pageIndex + 1} 页视觉纠错没有减少结构错误，任务已暂停`,
+              `第 ${pageIndex + 1} 页视觉纠错没有解决现有结构错误，任务已暂停`,
               pausedVisionAttempt(
-                pageIndex, round, 'source-plan.no-improvement', '视觉纠错没有减少结构错误',
+                pageIndex, round, 'source-plan.no-improvement', '视觉纠错没有解决现有结构错误',
               ),
             );
           }
@@ -1007,7 +1018,14 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
       if (reconciled.unresolved.length) {
         const unresolvedIssues = reconciliationValidationIssues(plansByPage, reconciled);
         await persistSourceLayoutReport(false, unresolvedIssues);
-        throw new Error(`页面计划包含无法安全恢复的区域：${reconciled.unresolved.map((item) => item.reason).join('、')}`);
+        throw new RecoverablePipelineError(
+          'source-layout-unresolved',
+          `页面计划仍有待确认区域，任务已暂停：${reconciled.unresolved.map((item) => `第 ${item.pageIndex + 1} 页 ${item.reason}`).join('、')}`,
+          pausedVisionAttempt(
+            reconciled.unresolved[0]?.pageIndex ?? 0, lastCorrectionRound,
+            'source-plan.unresolved', '区域识别证据不足，请检查诊断后重试',
+          ),
+        );
       }
 
       await Promise.all([...plansByPage.values()].map((plan) => {
@@ -1144,6 +1162,7 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
       let nextFormula = 0;
       const reconstructFormula = async (): Promise<void> => {
         while (nextFormula < formulaRegions.length) {
+          signal.throwIfAborted();
           const formula = formulaRegions[nextFormula]!;
           nextFormula += 1;
           const cacheKey = buildFormulaOcrCacheKey({
@@ -1151,7 +1170,7 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
             pageIndex: formula.pageIndex,
             regionId: formula.id,
             modelId: FORMULA_OCR_MODEL,
-            promptVersion: FORMULA_OCR_PROMPT_VERSION,
+            promptVersion: `${FORMULA_OCR_PROMPT_VERSION}:${ASSET_CROP_RENDER_VERSION}`,
             sourceRect: [formula.rect.x, formula.rect.y, formula.rect.w, formula.rect.h]
               .map((number) => number.toFixed(3)).join(','),
           });
@@ -1162,9 +1181,14 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
           const recognized = cachedResult
             ?? await recognizeFormulaCrop({
               blob: await cropPageRegionLossless(
-                await pdf.getPage(formula.pageIndex + 1),
+                await awaitWithDeadline(pdf.getPage(formula.pageIndex + 1), {
+                  signal, timeoutMs: 30_000, timeoutMessage: `读取第 ${formula.pageIndex + 1} 页公式超时`,
+                }),
                 formula.rect,
                 6,
+                undefined,
+                undefined,
+                { signal },
               ),
               baseUrl: options.baseUrl ?? 'https://api.deepseek.com',
               apiKey,
@@ -1198,12 +1222,16 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
         () => reconstructFormula(),
       ));
       const assets = await extractImmutableAssets(assetRegions, {
-        crop: async (region) => cropPageRegionLossless(
-          await pdf.getPage(region.pageIndex + 1),
+        signal,
+        crop: async (region, cropSignal) => cropPageRegionLossless(
+          await awaitWithDeadline(pdf.getPage(region.pageIndex + 1), {
+            signal: cropSignal, timeoutMs: 30_000, timeoutMessage: `读取第 ${region.pageIndex + 1} 页图表超时`,
+          }),
           region.rect,
           4,
           region.eraseRects,
           region.preserveRects,
+          { signal: cropSignal },
         ),
       });
       return {
@@ -1304,7 +1332,7 @@ export function createBrowserPipelineStages(options: BrowserPipelineStageOptions
           const completion = await chatCompletion({
             baseUrl: options.baseUrl ?? 'https://api.deepseek.com',
             apiKey, model: settings.modelId, thinkingMode: requestThinkingMode,
-            responseFormat: 'json_object', signal: batchSignal, timeoutMs: 120_000,
+            responseFormat: 'json_object', signal: batchSignal, timeoutMs: 120_000, hardTimeoutMs: 300_000,
             maxTokens: translationLimitsFor(requestThinkingMode).maxOutputTokens,
             stream: true,
             onStreamProgress: (progress) => {

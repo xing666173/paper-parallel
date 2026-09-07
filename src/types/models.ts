@@ -293,6 +293,7 @@ export type RecoverablePauseReason =
   | 'network-retries-exhausted'
   | 'render-retries-exhausted'
   | 'vision-protocol-retries-exhausted'
+  | 'source-layout-unresolved'
   | 'vision-correction-budget-exhausted';
 
 /** Persisted, user-facing state for source-layout analysis and bounded correction. */

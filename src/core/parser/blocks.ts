@@ -1,11 +1,12 @@
 // ============================================================================
 // blocks.ts —— 行 -> 块切分
 // 算法基准:P5 探针(合成夹具断言已通过)。纯函数、零依赖。
-// 块级保序 R5:同栏按 y 归块,跨栏按 通栏→左→右 的阅读顺序输出。
+// 块级保序 R5:先按通栏边界划分垂直区域,区域内按左栏→右栏阅读。
 // ============================================================================
 import type { ClassifiedLine, ColumnKind } from './columns';
 import type { BlockType, CharacterRect, Rect } from '../../types/models';
 import { itemsToCharRects } from './charRects';
+import { readingBands } from './readingOrder';
 
 /** 解析器产出的原始块(尚未装配 docId/pageIndex 等文档上下文) */
 export interface RawBlock {
@@ -183,7 +184,7 @@ function classifyLineRole(l: ClassifiedLine, col: ColumnBounds, pageH: number): 
  * 行 -> 块。断块规则:
  * - 角色变化(标题/题注/公式/正文)立即断块
  * - 同角色但垂直空白 > max(栏内中位行距*1.4, 行高中位数*1.5, 18px) 断块
- * - 块输出顺序:通栏 → 左栏 → 右栏(栏内 y 升序)
+ * - 通栏内容分隔上下区域,每个双栏区域内先左后右
  */
 export function groupLinesToBlocks(
   lines: ClassifiedLine[],
@@ -246,9 +247,11 @@ export function groupLinesToBlocks(
     });
   };
 
-  for (const c of COLUMN_ORDER) {
-    const arr = byCol[c];
+  const bands = readingBands(lines, (line) => ({ x: line.x1, y: line.y, w: line.x2 - line.x1, h: line.h }));
+  const lanes = bands.flatMap((band) => COLUMN_ORDER.map((col) => band.filter((line) => line.col === col)));
+  for (const arr of lanes) {
     if (!arr.length) continue;
+    const c = arr[0]!.col;
     arr.sort((a, b) => a.y - b.y);
 
     const gaps: number[] = [];
@@ -270,15 +273,15 @@ export function groupLinesToBlocks(
       const role = classifyLineRole(l, colBounds[c], pageH);
       const prev = arr[i - 1];
       const bigGap = prev ? l.y - (prev.y + prev.h) > BREAK : false;
-      if (cur.length && (bigGap || role !== curType)) flush();
+      const rotatedBoundary = l.items.some((item) => Boolean(item.geometry))
+        || prev?.items.some((item) => Boolean(item.geometry));
+      if (cur.length && (bigGap || role !== curType || rotatedBoundary)) flush();
       if (!cur.length) curType = role;
       cur.push(l);
     }
     flush();
   }
 
-  const rank = (c: ColumnKind) => (c === 'full' ? 0 : c === 'left' ? 1 : 2);
-  blocks.sort((a, b) => rank(a.col) - rank(b.col) || a.rect.y - b.rect.y);
   blocks.forEach((b, i) => (b.order = i));
   return blocks;
 }

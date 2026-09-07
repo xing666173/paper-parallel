@@ -45,4 +45,18 @@ describe('layout regions', () => {
     expect(regions.map((region) => region.sourcePage)).toEqual([0, 1]);
     expect(regions.map((region) => region.orderedUnitIds)).toEqual([['p1-left'], ['p2-left']]);
   });
+
+  it('keeps short headings and narrow text in the region of a known single-column page', () => {
+    const regions = buildLayoutRegions({
+      pageWidth: 612,
+      pageModes: { 0: 'single' },
+      blocks: [
+        { id: 'heading', pageIndex: 0, order: 0, col: 'left', rect: { x: 72, y: 80, w: 130, h: 12 } },
+        { id: 'body', pageIndex: 0, order: 1, col: 'full', rect: { x: 72, y: 110, w: 468, h: 90 } },
+      ],
+    });
+
+    expect(regions.map((region) => region.mode)).toEqual(['single']);
+    expect(regions[0]?.orderedUnitIds).toEqual(['heading', 'body']);
+  });
 });

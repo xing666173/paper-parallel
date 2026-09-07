@@ -119,7 +119,8 @@ const statusLabel = computed(() => ({
 const resumeLabel = computed(() => {
   if (props.task.status === 'failed') return '继续未完成任务';
   if (props.task.status !== 'paused') return '继续处理';
-  return props.task.pauseReason === 'vision-correction-budget-exhausted'
+  return (props.task.pauseReason === 'vision-correction-budget-exhausted'
+    || props.task.pauseReason === 'source-layout-unresolved')
     ? '重新分析失败页面'
     : '重试网络或渲染';
 });

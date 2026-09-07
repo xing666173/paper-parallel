@@ -159,7 +159,16 @@ export function shouldStackAssetRow(
   metadata: AcademicTemplateOptions,
   targetLayoutPolicy: TargetLayoutPolicy,
 ): boolean {
-  if (targetLayoutPolicy !== 'single-column' || assets.length <= 1) return false;
+  if (assets.length <= 1) return false;
+  // A shared caption can describe vertical panels; preserve that source order
+  // even when the output keeps the original column layout.
+  if (assets[0]?.captionUnitId && assets.every((asset) => (
+    asset.captionUnitId === assets[0]!.captionUnitId && asset.sourcePage === assets[0]!.sourcePage
+  )) && assets.some((asset, index) => assets.slice(index + 1).some((other) => (
+    Math.min(asset.sourceRect.y + asset.sourceRect.h, other.sourceRect.y + other.sourceRect.h)
+      <= Math.max(asset.sourceRect.y, other.sourceRect.y)
+  )))) return true;
+  if (targetLayoutPolicy !== 'single-column') return false;
   const margin = metadata.margin ?? Math.max(36, metadata.paperWidth * 0.1);
   const contentWidth = metadata.paperWidth - margin * 2;
   const gutter = metadata.columnGap ?? 12;

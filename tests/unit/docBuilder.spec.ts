@@ -132,6 +132,33 @@ describe('parser: docBuilder', () => {
     expect(doc.blocks[1].text).toBe(right);
   });
 
+  it('preserves genuine interleaved two-column recovery across a consistent twelve-point gutter', () => {
+    const block = interleavedColumnBlock();
+    const characters = block.characterRects!;
+    for (const y of new Set(characters.map((character) => character.rect.y))) {
+      for (const right of [false, true]) {
+        const lane = characters.filter((character) => character.rect.y === y && (character.rect.x >= 300) === right);
+        lane.forEach((character, index) => {
+          character.rect.x = (right ? 312 : 50) + index * 250 / lane.length;
+          character.rect.w = 250 / lane.length;
+        });
+      }
+    }
+    const doc = buildDoc([{
+      no: 1, w: 612, h: 792, layoutMode: 'double', blocks: [block],
+    }], 'en');
+
+    expect(doc.blocks).toHaveLength(2);
+    expect(doc.blocks[0]?.text).toContain('Many protocols have been developed');
+    expect(doc.blocks[0]?.text).not.toContain('hardware implementation');
+    expect(doc.blocks[1]?.text).toContain('hardware implementation');
+    for (const recovered of doc.blocks) {
+      for (const character of recovered.characterRects!) {
+        expect(recovered.text![character.sourceIndex]).toBe(character.ch);
+      }
+    }
+  });
+
   it('不把数值密集的跨栏表格拆成双栏正文', () => {
     const block = interleavedColumnBlock();
     block.text = `${block.text}\n${Array.from({ length: 60 }, (_, index) => `${index}.0`).join(' ')}`;

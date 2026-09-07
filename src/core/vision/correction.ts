@@ -79,7 +79,7 @@ export class VisionPatchError extends Error {
   }
 }
 
-export const VISION_CORRECTION_PROMPT_VERSION = 'vision-correction-v6';
+export const VISION_CORRECTION_PROMPT_VERSION = 'vision-correction-v7';
 
 function record(value: unknown, path: string): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -371,9 +371,12 @@ export function applyVisionCorrectionPatch(
       const fields = Object.keys(operation.changes) as Array<keyof typeof operation.changes>;
       if (!fields.length) throw new VisionPatchError('update-region 没有实际修改');
       for (const field of fields) {
+        if (field === 'confidence') {
+          throw new VisionPatchError('几何纠错不能修改区域置信度；必须修复报告的结构字段');
+        }
         const permission = field === 'captionBBox' || field === 'captionPosition'
           ? (field === 'captionBBox' ? 'captionBBox' : 'captionLink')
-          : field === 'visibleLabel' || field === 'confidence' || field === 'evidence'
+          : field === 'visibleLabel' || field === 'evidence'
             ? 'bbox'
             : field;
         if (!fieldPermission(options.issues, region.id, permission)) {
@@ -476,6 +479,7 @@ export function buildVisionCorrectionPrompt(input: {
     `Locked region ids (must not change): ${JSON.stringify(locked)}`,
     'Allowed operations: add-region, update-region, remove-region, relink-caption, propose-order-edge.',
     'Only fields explicitly listed in each validation error allowedFields may be changed.',
+    'Never update confidence on an existing region. Lowering confidence does not repair geometry or justify removing an asset.',
     'Use these exact operation object shapes; never rename type, region_id, changes, or snake_case field names:',
     '{"type":"update-region","region_id":"region-id","changes":{"bbox":[0,0,1,1],"caption_bbox":[0,0,1,1]}}',
     '{"type":"relink-caption","region_id":"region-id","caption_position":"none"}',

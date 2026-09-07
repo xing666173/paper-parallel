@@ -1,4 +1,4 @@
-export const VISION_LAYOUT_PROMPT_VERSION = 'vision-layout-v9';
+export const VISION_LAYOUT_PROMPT_VERSION = 'vision-layout-v10';
 
 export function buildVisionLayoutPrompt(pageNumber: number): string {
   return [
@@ -12,6 +12,7 @@ export function buildVisionLayoutPrompt(pageNumber: number): string {
     'A figure bbox must contain the complete numbered figure: every panel, diagram title, axis, legend, arrow, and label (including labels such as POLY/MSM above the main drawing). Never crop a figure at an internal row or panel boundary.',
     'A formula bbox must be tight around only the visible formula ink. For an inline formula, exclude the surrounding sentence while preserving the entire mathematical expression.',
     'bbox must otherwise be tight around visible asset ink. Exclude all surrounding prose, headers, whitespace, and the complete caption line.',
+    'Always use x,y,width,height, including for assets near page edges. Never substitute right/bottom coordinates for width/height.',
     'column describes the asset itself: use left/right for a one-column asset and full only when the asset physically spans both columns.',
     'Captions are translatable text: return their tight separate caption_bbox when associated with a figure or table.',
     'Assign each returned region a short page-local id. Also return the visible figure/table label when present, whether its caption is above or below, and a short visual evidence phrase.',

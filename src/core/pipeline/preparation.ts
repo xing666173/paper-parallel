@@ -5307,11 +5307,19 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
             return Boolean(block && (looksLikeNumericTableBody(block) || looksLikeShortTableCellLabel(block)));
           })
           && region.orderedUnitIds.every((id) => id === caption.id || bodyIds.includes(id));
+        const terminalTableBody = bodyIds.length > 0
+          && bodyIds.some((id) => looksLikeNumericTableBody(blocks.get(id)!))
+          && bodyIds.every((id) => {
+            const block = blocks.get(id)!;
+            return looksLikeNumericTableBody(block) || looksLikeShortTableCellLabel(block);
+          });
         // A full-width table can own an isolated parser region that ends at
         // the last numeric row. In that case there is deliberately no
         // same-column prose boundary: the region membership itself is the
         // deterministic lower boundary.
-        if (!bodyIds.length || (!boundaryFound && !isolatedSpanningBody)) {
+        // At a column/page end, explicit table rows provide the lower boundary.
+        // Ordinary trailing prose must still fail instead of becoming an image.
+        if (!bodyIds.length || (!boundaryFound && !isolatedSpanningBody && !terminalTableBody)) {
           throw new Error(`无法可靠确定表 ${caption.id} 的不可变区域（未检测到表后边界）`);
         }
         const lastBody = blocks.get(bodyIds.at(-1)!)!;
@@ -5585,8 +5593,47 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
   }
 
   const horizontalRows: LayoutRegion[] = [];
+  const captionGroups = new Map<string, DetectedAssetRegion[]>();
+  for (const asset of assetRegions) {
+    if (!asset.captionUnitId || !['figure', 'table', 'code'].includes(asset.kind)) continue;
+    const group = captionGroups.get(asset.captionUnitId) ?? [];
+    group.push(asset);
+    captionGroups.set(asset.captionUnitId, group);
+  }
+  const groupedAssetIds = new Set<string>();
+  for (const [captionId, members] of captionGroups) {
+    if (members.length < 2) continue;
+    const first = members[0]!;
+    if (!members.every((member) => member.kind === first.kind && member.pageIndex === first.pageIndex)) continue;
+    const caption = units.find((unit) => unit.id === captionId);
+    if (!caption) continue;
+    // Keep all panels with their one caption, including vertically stacked
+    // panels that the horizontal-band pass would otherwise separate.
+    members.sort((left, right) => left.rect.y - right.rect.y || left.rect.x - right.rect.x);
+    const memberIds = members.map((asset) => asset.id);
+    const orderedUnitIds = first.kind === 'figure'
+      ? [...memberIds, captionId] : [captionId, ...memberIds];
+    const groupId = `asset-group-${captionId}`;
+    for (const region of regions) {
+      region.orderedUnitIds = region.orderedUnitIds.filter((id) => !orderedUnitIds.includes(id));
+    }
+    for (const unit of units) {
+      if (orderedUnitIds.includes(unit.id)) unit.layoutRegionId = groupId;
+    }
+    memberIds.forEach((id) => groupedAssetIds.add(id));
+    const left = Math.min(...members.map((asset) => asset.rect.x));
+    const top = Math.min(...members.map((asset) => asset.rect.y));
+    const right = Math.max(...members.map((asset) => asset.rect.x + asset.rect.w));
+    const bottom = Math.max(...members.map((asset) => asset.rect.y + asset.rect.h));
+    horizontalRows.push({
+      id: groupId, mode: right - left > doc.meta.paperWidth * 0.54 ? 'full-width' : 'single',
+      sourcePage: first.pageIndex, bounds: { x: left, y: top, w: right - left, h: bottom - top },
+      orderedUnitIds,
+    });
+  }
   const pageKindGroups = new Map<string, DetectedAssetRegion[]>();
   for (const asset of assetRegions) {
+    if (groupedAssetIds.has(asset.id)) continue;
     if (asset.kind !== 'figure' && asset.kind !== 'table') continue;
     const key = `${asset.pageIndex}:${asset.kind}`;
     const group = pageKindGroups.get(key) ?? [];
@@ -5659,8 +5706,32 @@ export function prepareImmutableStructure(doc: Doc, options: PrepareImmutableOpt
       const rows = horizontalRows
         .filter((row) => row.sourcePage === pageIndex)
         .sort((left, right) => left.bounds.y - right.bounds.y);
-      const firstPageRegion = regions.findIndex((region) => region.sourcePage === pageIndex);
-      regions.splice(firstPageRegion < 0 ? regions.length : firstPageRegion, 0, ...rows);
+      for (const row of rows) {
+        const unitOrders = new Map(units.map((unit) => [unit.id, unit.order]));
+        const rowOrder = Math.min(...row.orderedUnitIds.map((id) => unitOrders.get(id) ?? Infinity));
+        const at = regions.findIndex((region) => region.sourcePage === pageIndex
+          && region.orderedUnitIds.some((id) => (unitOrders.get(id) ?? Infinity) >= rowOrder));
+        if (at < 0) {
+          const nextPage = regions.findIndex((region) => region.sourcePage > pageIndex);
+          regions.splice(nextPage < 0 ? regions.length : nextPage, 0, row);
+          continue;
+        }
+        const region = regions[at]!;
+        const before = region.orderedUnitIds.filter((id) => (unitOrders.get(id) ?? Infinity) < rowOrder);
+        if (!before.length) {
+          regions.splice(at, 0, row);
+          continue;
+        }
+        // Inserting the row at page start would put it ahead of the title and
+        // preceding prose. Split the containing flow at the source-order anchor.
+        const after = region.orderedUnitIds.filter((id) => !before.includes(id));
+        const tail = { ...region, id: `${region.id}-after-${row.id}`, orderedUnitIds: after };
+        region.orderedUnitIds = before;
+        for (const unit of units) {
+          if (after.includes(unit.id)) unit.layoutRegionId = tail.id;
+        }
+        regions.splice(at + 1, 0, row, tail);
+      }
     }
     for (let index = regions.length - 1; index >= 0; index -= 1) {
       if (!regions[index]!.orderedUnitIds.length) regions.splice(index, 1);

@@ -7,6 +7,7 @@ import type {
 } from '../../types/models';
 import { buildLayoutRegions } from '../layout/regions';
 import type { ColumnKind } from './columns';
+import { readingOrder } from './readingOrder';
 
 /** 单页解析器产物(由 parsePageItems + regions 检测装配而来) */
 export interface ParsedPageBlock {
@@ -37,7 +38,6 @@ type WorkBlock = ParsedPageBlock & {
   order: number;
 };
 
-const COL_RANK: Record<ColumnKind, number> = { full: 0, left: 1, right: 2 };
 const ATOMIC_TYPES = new Set<Block['type']>(['figure', 'table', 'equation', 'caption']);
 
 function isSuspiciousSectionBlock(block: WorkBlock): boolean {
@@ -205,9 +205,11 @@ function splitInterleavedTwoColumnBlock(
     if (left.length < 4 || right.length < 4) return false;
     const leftEdge = Math.max(...left.map((character) => character.rect.x + character.rect.w));
     const rightEdge = Math.min(...right.map((character) => character.rect.x));
-    return rightEdge - leftEdge >= pageWidth * 0.012;
+    // A normal justified word space is not a gutter. Require a gap at least
+    // as wide as the line parser's gutter and corroboration across the rows.
+    return rightEdge - leftEdge >= Math.max(10, pageWidth * 0.018, row.h);
   });
-  if (dualLaneRows.length < 1 || dualLaneRows.length / rows.length < 0.18) return [block];
+  if (dualLaneRows.length < 1 || dualLaneRows.length / rows.length < 0.6) return [block];
 
   const left = columnTextFromCharacters(rows, block.text, 'left', midpoint);
   const right = columnTextFromCharacters(rows, block.text, 'right', midpoint);
@@ -297,7 +299,7 @@ function isRunningPageFurniture(block: ParsedPageBlock, pageHeight: number): boo
   if (nearTop && /^(?:\d+|IEEE\s+TRANSACTIONS\b|.+\bet\s+al[.]\s*:\s*.+)$/i.test(normalized)) {
     return true;
   }
-  return nearBottom && /^(?:\d+|Authorized licensed use limited to\b)/i.test(normalized);
+  return nearBottom && (/^\d+$/.test(normalized) || /^Authorized licensed use limited to\b/i.test(normalized));
 }
 
 /** 两遍法合并:先接上一页阅读顺序末尾→下一页开头,再接同页左→右栏 */
@@ -366,9 +368,9 @@ export function buildDoc(pages: ParsedPage[], docId: 'en' | 'zh'): Doc {
       // real first body paragraph continue the previous page instead of being
       // stranded behind a header block.
       .filter((block) => !isRunningPageFurniture(block, pg.h));
-    const sorted = [...recoveredBlocks].sort(
-      (a, b) => COL_RANK[a.col] - COL_RANK[b.col] || a.rect.y - b.rect.y,
-    );
+    const sorted = pg.layoutMode === 'single'
+      ? [...recoveredBlocks].sort((a, b) => a.rect.y - b.rect.y || a.rect.x - b.rect.x)
+      : readingOrder(recoveredBlocks, (block) => block.rect);
     for (const b of sorted) {
       seq.push({
         ...b,

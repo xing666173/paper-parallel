@@ -7,6 +7,16 @@ import { createTaskSnapshot, reduceTaskEvent } from '../../src/core/task/stateMa
 describe('processing progress heartbeat', () => {
   afterEach(() => vi.useRealTimers());
 
+  it('offers page reanalysis when uncertain source regions remain', () => {
+    const wrapper = mount(ProgressSummary, {
+      props: { task: { ...createTaskSnapshot('p1'), status: 'paused', stage: 'analyzing-layout',
+        pauseReason: 'source-layout-unresolved', error: '区域识别证据不足' },
+      aiLogEntries: [], estimatedRemainingMs: null, lastResponseAt: null },
+    });
+    expect(wrapper.get('button').text()).toBe('重新分析失败页面');
+    wrapper.unmount();
+  });
+
   it('updates elapsed time every second while a task is running', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(2_000);

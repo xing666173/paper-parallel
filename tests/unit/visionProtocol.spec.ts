@@ -53,7 +53,7 @@ describe('vision: page analysis protocol', () => {
     }, 0).regions[0].bbox).toEqual([80, 180, 840, 30]);
   });
 
-  it('repairs an ambiguous xyxy asset box that otherwise lands exactly on the page edge', () => {
+  it('preserves legal explicit xywh dimensions even when the asset reaches the page edge', () => {
     expect(parseVisionPageAnalysis({
       page: 1,
       layout: 'mixed',
@@ -65,9 +65,27 @@ describe('vision: page analysis protocol', () => {
         confidence: 0.95,
       }],
     }, 0).regions[0]).toMatchObject({
-      bbox: [214, 304, 572, 266],
+      bbox: [214, 304, 786, 266],
       captionBBox: [330, 286, 554, 14],
     });
+  });
+
+  it.each([
+    { x: 100, y: 200, width: 895, height: 200 },
+    [100, 200, 895, 200],
+    { x: 0.1, y: 0.2, width: 0.895, height: 0.2 },
+  ])('does not guess away the right-hand ink of a valid xywh box %j', (bbox) => {
+    expect(parseVisionPageAnalysis({
+      page: 1, layout: 'single', regions: [{ type: 'figure', bbox, column: 'full', confidence: 0.99 }],
+    }, 0).regions[0]!.bbox).toEqual([100, 200, 895, 200]);
+  });
+
+  it('preserves the height of a legal bottom-edge xywh box', () => {
+    expect(parseVisionPageAnalysis({
+      page: 1, layout: 'single', regions: [{
+        type: 'table', bbox: { x: 200, y: 100, width: 200, height: 895 }, column: 'left', confidence: 0.99,
+      }],
+    }, 0).regions[0]!.bbox).toEqual([200, 100, 200, 895]);
   });
 
   it.each([

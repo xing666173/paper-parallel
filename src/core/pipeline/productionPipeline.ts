@@ -6,6 +6,7 @@ import { RecoverablePipelineError } from '../task/recoverable';
 import { StructureInvariantError } from './structureInvariants';
 import { MarkerInvariantError } from './markerInvariants';
 import type { StructureDiagnosticReport } from '../quality/structureDiagnostic';
+import { awaitWithDeadline } from '../task/asyncDeadline';
 
 export type PipelineValue = Record<string, unknown>;
 
@@ -66,9 +67,10 @@ export async function runProductionPipeline(
     ? { ...options.snapshot.progress }
     : undefined;
   const persist = async (notify = true): Promise<void> => {
+    throwIfAborted(options.signal);
     snapshot = { ...snapshot, progress: { ...snapshot.progress } };
     if (notify) options.onSnapshot?.(snapshot);
-    await options.repository.saveTask(snapshot);
+    await awaitWithDeadline(options.repository.saveTask(snapshot), { signal: options.signal, timeoutMs: 30_000 });
   };
   const enter = async (stage: TaskStage): Promise<void> => {
     throwIfAborted(options.signal);
@@ -87,7 +89,8 @@ export async function runProductionPipeline(
     value: PipelineValue,
   ): Promise<PipelineValue> => {
     await enter(stage);
-    const next = await operation(value, options.signal);
+    throwIfAborted(options.signal);
+    const next = await awaitWithDeadline(operation(value, options.signal), { signal: options.signal });
     throwIfAborted(options.signal);
     const taskValue = next as PipelineValue & {
       settings?: TaskSnapshot['settings'];
@@ -123,10 +126,13 @@ export async function runProductionPipeline(
     snapshot = { ...snapshot, progress: { ...baselineProgress } };
     await enter('translating');
     let progressPersistence = Promise.resolve();
+    let progressPersistenceError: unknown;
+    let translationActive = true;
     let observedCompleted = 0;
     let observedRetries = 0;
     let observedFailed = 0;
     const reportTranslationProgress = (event: TranslationProgressUpdate): void => {
+      if (options.signal.aborted || !translationActive) return;
       if (!Number.isInteger(event.count) || event.count < 1) return;
       if (event.type === 'validated') {
         observedCompleted += event.count;
@@ -148,13 +154,20 @@ export async function runProductionPipeline(
       snapshot = { ...snapshot, progress, updatedAt: Date.now() };
       const progressSnapshot = { ...snapshot, progress: { ...snapshot.progress } };
       options.onSnapshot?.(progressSnapshot);
-      progressPersistence = progressPersistence.then(() => options.repository.saveTask(progressSnapshot));
+      progressPersistence = progressPersistence.then(async () => {
+        if (options.signal.aborted) return;
+        await awaitWithDeadline(options.repository.saveTask(progressSnapshot), { signal: options.signal, timeoutMs: 30_000 });
+      }).catch((error) => { progressPersistenceError ??= error; });
     };
     try {
-      value = await options.stages.translate(value, options.signal, reportTranslationProgress);
+      value = await awaitWithDeadline(
+        options.stages.translate(value, options.signal, reportTranslationProgress), { signal: options.signal },
+      );
     } finally {
-      await progressPersistence;
+      translationActive = false;
+      await awaitWithDeadline(progressPersistence, { signal: options.signal });
     }
+    if (progressPersistenceError) throw progressPersistenceError;
     snapshot = {
       ...snapshot,
       progress: {
@@ -170,7 +183,7 @@ export async function runProductionPipeline(
     value = await run('compiling', options.stages.compile, value);
     value = await run('aligning', options.stages.align, value);
     await enter('validating');
-    const completion = await options.stages.validate(value, options.signal);
+    const completion = await awaitWithDeadline(options.stages.validate(value, options.signal), { signal: options.signal });
     throwIfAborted(options.signal);
     if (!canEnterReader(completion)) throw new Error('质量门未通过，不能自动进入阅读器');
 
@@ -206,25 +219,27 @@ export async function runProductionPipeline(
         error: safeErrorMessage(error, 500),
         updatedAt: Date.now(),
       };
-      await persist();
+      try { await persist(); } catch { /* Preserve the recoverable error when storage is unavailable. */ }
       throw error;
     }
-    if (error instanceof StructureInvariantError || error instanceof MarkerInvariantError) {
+    {
       const diagnostic: StructureDiagnosticReport = {
         schemaVersion: 1,
         projectId: snapshot.projectId,
         createdAt: Date.now(),
-        errorName: error.name as StructureDiagnosticReport['errorName'],
-        issues: error.issues,
+        errorName: error instanceof Error ? safeErrorMessage(error.name, 100) : 'PipelineError',
+        stage: snapshot.stage,
+        message: safeErrorMessage(error, 500),
+        issues: error instanceof StructureInvariantError || error instanceof MarkerInvariantError ? error.issues : [],
       };
       try {
-        await options.repository.putArtifact({
+        await awaitWithDeadline(options.repository.putArtifact({
           key: `${snapshot.projectId}:structure-diagnostic`,
           projectId: snapshot.projectId,
           kind: 'structure-diagnostic',
           blob: new Blob([JSON.stringify(diagnostic, null, 2)], { type: 'application/json' }),
           updatedAt: diagnostic.createdAt,
-        });
+        }), { signal: options.signal, timeoutMs: 5_000 });
       } catch {
         // The original structural failure remains authoritative when local
         // diagnostic persistence is unavailable.
@@ -237,11 +252,13 @@ export async function runProductionPipeline(
       error: safeErrorMessage(error, 500),
       updatedAt: Date.now(),
     };
-    await persist();
+    try { await persist(); } catch { /* Preserve the original stage failure. */ }
     throw error;
   } finally {
     try {
-      await options.stages.dispose?.(value);
+      await awaitWithDeadline(Promise.resolve().then(() => options.stages.dispose?.(value)), {
+        signal: options.signal, timeoutMs: 5_000,
+      });
     } catch {
       // Cleanup must not replace the actual pipeline result or failure.
     }

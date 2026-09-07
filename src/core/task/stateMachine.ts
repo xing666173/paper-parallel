@@ -15,6 +15,7 @@ export type TaskEvent =
   | { type: 'PAUSED'; reason: NonNullable<TaskSnapshot['pauseReason']>; error: string; at: number }
   | { type: 'STOP_REQUESTED'; at: number }
   | { type: 'STOPPED'; at: number }
+  | { type: 'INTERRUPTED'; at: number }
   | { type: 'RESUME'; at: number }
   | { type: 'FAILED'; error: string; at: number }
   | { type: 'QUALITY_PASSED'; at: number };
@@ -113,6 +114,10 @@ export function reduceTaskEvent(state: TaskSnapshot, event: TaskEvent): TaskSnap
   }
 
   if (event.type === 'STOPPED' && state.status === 'stopping') {
+    return { ...state, status: 'stopped', updatedAt: event.at };
+  }
+
+  if (event.type === 'INTERRUPTED' && ['running', 'stopping', 'pausing'].includes(state.status)) {
     return { ...state, status: 'stopped', updatedAt: event.at };
   }
 

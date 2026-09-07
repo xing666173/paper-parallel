@@ -9,6 +9,7 @@ import type { TaskSnapshot } from '../types/models';
 import { safeErrorMessage } from '../core/security/errors';
 import type { ProjectAiLogEntry } from '../core/project/db';
 import { RecoverablePipelineError } from '../core/task/recoverable';
+import { awaitWithDeadline } from '../core/task/asyncDeadline';
 
 export interface TaskStoreDependencies {
   repository: ProjectRepository;
@@ -117,11 +118,14 @@ export function createTaskStore(dependencies: TaskStoreDependencies, id = 'task'
     const completionSummary = ref<CompletionSummary | null>(null);
     let runningPromise: Promise<void> | null = null;
     let activeRunToken: symbol | null = null;
+    let activeRunProjectId: string | null = null;
+    let runGeneration = 0;
     let aiLogProjectId: string | null = null;
     let aiLogPersistence = Promise.resolve();
     let liveTaskPersistence = Promise.resolve();
 
     function queueLiveTaskPersistence(snapshot: TaskSnapshot): void {
+      const generation = runGeneration;
       const value = {
         ...snapshot,
         progress: { ...snapshot.progress },
@@ -133,7 +137,10 @@ export function createTaskStore(dependencies: TaskStoreDependencies, id = 'task'
         } : {}),
       };
       liveTaskPersistence = liveTaskPersistence
-        .then(() => dependencies.repository.saveTask(value))
+        .then(async () => {
+          if (generation !== runGeneration || current.value?.projectId !== value.projectId) return;
+          await awaitWithDeadline(dependencies.repository.saveTask(value), { timeoutMs: 5_000 });
+        })
         .catch(() => undefined);
     }
 
@@ -309,22 +316,37 @@ export function createTaskStore(dependencies: TaskStoreDependencies, id = 'task'
       }
     }
 
+    function isActiveRun(signal: AbortSignal): boolean {
+      return abortController.value?.signal === signal && !signal.aborted
+        && activeRunProjectId === current.value?.projectId;
+    }
+
+    function acceptSnapshot(snapshot: TaskSnapshot, signal: AbortSignal): boolean {
+      if (!isActiveRun(signal) || current.value?.projectId !== snapshot.projectId
+        || current.value.status === 'stopping' || current.value.status === 'stopped') return false;
+      current.value = snapshot;
+      return true;
+    }
+
     function launch(runner: TaskRunner): Promise<void> {
       const controller = markRaw(new AbortController());
       const runToken = Symbol('task-run');
       abortController.value = controller;
       activeRunToken = runToken;
+      activeRunProjectId = current.value?.projectId ?? null;
       const promise = (async () => {
         try {
-          await runner(controller.signal);
+          await awaitWithDeadline(runner(controller.signal), { signal: controller.signal });
         } catch (error) {
-          if (controller.signal.aborted || isAbortError(error)) return;
+          if (!isActiveRun(controller.signal) || isAbortError(error) || activeRunToken !== runToken) return;
           if (error instanceof RecoverablePipelineError) {
             if (current.value?.status !== 'paused' && current.value) {
               current.value = reduceTaskEvent(current.value, {
                 type: 'PAUSED', reason: error.pauseReason, error: error.message, at: Date.now(),
               });
-              await dependencies.repository.saveTask(current.value);
+              try {
+                await awaitWithDeadline(dependencies.repository.saveTask(current.value), { signal: controller.signal, timeoutMs: 5_000 });
+              } catch { /* The paused state and original failure remain available in memory. */ }
             }
             return;
           }
@@ -332,13 +354,16 @@ export function createTaskStore(dependencies: TaskStoreDependencies, id = 'task'
             current.value = reduceTaskEvent(current.value, {
               type: 'FAILED', error: error instanceof Error ? error.message : String(error), at: Date.now(),
             });
-            await dependencies.repository.saveTask(current.value);
+            try {
+              await awaitWithDeadline(dependencies.repository.saveTask(current.value), { signal: controller.signal, timeoutMs: 5_000 });
+            } catch { /* A persistence failure must not replace the runner's error. */ }
           }
           throw error;
         } finally {
           if (abortController.value === controller) abortController.value = null;
           if (activeRunToken === runToken) {
             activeRunToken = null;
+            activeRunProjectId = null;
             runningPromise = null;
           }
         }
@@ -348,6 +373,9 @@ export function createTaskStore(dependencies: TaskStoreDependencies, id = 'task'
     }
 
     function start(snapshot: TaskSnapshot, runner: TaskRunner): Promise<void> {
+      abortController.value?.abort();
+      runGeneration += 1;
+      completionSummary.value = null;
       if (aiLogProjectId !== snapshot.projectId) {
         aiLog.value = [];
         aiLogProjectId = snapshot.projectId;
@@ -358,33 +386,53 @@ export function createTaskStore(dependencies: TaskStoreDependencies, id = 'task'
 
     async function safeStop(at = Date.now()): Promise<void> {
       if (!current.value || current.value.status !== 'running') return;
-      await liveTaskPersistence;
+      const generation = runGeneration;
+      const projectId = current.value.projectId;
+      const pendingRun = runningPromise;
       current.value = reduceTaskEvent(current.value, { type: 'STOP_REQUESTED', at });
-      await dependencies.repository.saveTask(current.value);
+      // Cancellation is never conditional on IndexedDB being writable.
       abortController.value?.abort();
-      await runningPromise;
+      await pendingRun?.catch(() => undefined);
+      if (generation !== runGeneration || current.value?.projectId !== projectId) return;
       if (current.value.status !== 'stopping') return;
       current.value = reduceTaskEvent(current.value, { type: 'STOPPED', at: Date.now() });
-      await dependencies.repository.saveTask(current.value);
+      const stopped = current.value;
+      const saveStopped = liveTaskPersistence.then(async () => {
+        if (generation !== runGeneration || current.value?.projectId !== projectId) return;
+        await dependencies.repository.saveTask(stopped);
+      });
+      liveTaskPersistence = saveStopped.catch(() => undefined);
+      try {
+        await awaitWithDeadline(saveStopped, { timeoutMs: 5_000 });
+      } catch (error) {
+        if (generation === runGeneration && current.value === stopped) {
+          current.value = { ...stopped, error: `任务已停止，但本地状态保存失败：${safeErrorMessage(error, 180)}` };
+        }
+      }
     }
 
     async function resume(runner: TaskRunner, at = Date.now()): Promise<void> {
       if (!current.value) throw new Error('No task is available to resume');
-      await liveTaskPersistence;
+      const generation = runGeneration;
+      await awaitWithDeadline(liveTaskPersistence, { timeoutMs: 5_000 });
+      if (generation !== runGeneration) return;
       current.value = reduceTaskEvent(current.value, { type: 'RESUME', at });
-      await dependencies.repository.saveTask(current.value);
-      await launch(runner);
+      const snapshot = current.value;
+      await start(snapshot, async (signal) => {
+        await awaitWithDeadline(dependencies.repository.saveTask(snapshot), { signal, timeoutMs: 5_000 });
+        if (!signal.aborted) await runner(signal);
+      });
     }
 
     async function recoverInterruptedStop(at = Date.now()): Promise<void> {
       if (
         !current.value
-        || current.value.status !== 'stopping'
+        || !['running', 'stopping', 'pausing'].includes(current.value.status)
         || abortController.value
         || runningPromise
       ) return;
-      current.value = reduceTaskEvent(current.value, { type: 'STOPPED', at });
-      await dependencies.repository.saveTask(current.value);
+      current.value = reduceTaskEvent(current.value, { type: 'INTERRUPTED', at });
+      await awaitWithDeadline(dependencies.repository.saveTask(current.value), { timeoutMs: 5_000 });
     }
 
     async function clearTranslationCache(): Promise<void> {
@@ -403,6 +451,8 @@ export function createTaskStore(dependencies: TaskStoreDependencies, id = 'task'
       safeStop,
       resume,
       recoverInterruptedStop,
+      acceptSnapshot,
+      isActiveRun,
       clearTranslationCache,
       recordAiEvent,
       restoreAiLog,

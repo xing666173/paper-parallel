@@ -5,7 +5,7 @@ import {
   parseAcceptedDocumentPlan,
   validateCrossPageAssetCandidates,
 } from '../../src/core/vision/crossPageRelations';
-import { createVisionPagePlan } from '../../src/core/vision/pagePlan';
+import { createVisionPagePlan, type VisionPlanRegion } from '../../src/core/vision/pagePlan';
 
 function plan(pageIndex: number) {
   return createVisionPagePlan({
@@ -19,6 +19,42 @@ function plan(pageIndex: number) {
 }
 
 describe('cross-page asset relationship gate', () => {
+  it.each([
+    [{ visibleLabel: 'Figure 1', crossPageHint: 'none' }, { visibleLabel: 'Figure 1 (continued)', crossPageHint: 'ends' }],
+    [{ visibleLabel: 'Figure 1', crossPageHint: 'starts' }, { visibleLabel: 'Figure 2', crossPageHint: 'ends' }],
+    [{ visibleLabel: 'Figure 1', crossPageHint: 'ends' }, { visibleLabel: 'Figure 1', crossPageHint: 'continues' }],
+    [{ visibleLabel: 'Figure 1', crossPageHint: 'starts' }, { visibleLabel: 'Figure 1', crossPageHint: 'starts' }],
+  ] as Array<[Partial<VisionPlanRegion>, Partial<VisionPlanRegion>]>)('vetoes contradictory members despite matching geometry and claimed strong evidence', (first, second) => {
+    const plans = [first, second].map((metadata, pageIndex) => createVisionPagePlan({
+      analysis: { pageIndex, layout: 'single', regions: [{
+        type: 'figure', bbox: pageIndex === 0 ? [100, 710, 800, 200] : [100, 100, 800, 200],
+        column: 'full', confidence: 0.99,
+        visibleLabel: metadata.visibleLabel, crossPageHint: metadata.crossPageHint,
+      }] }, renderFingerprint: `figure-${pageIndex}`,
+    }));
+    expect(inferCrossPageAssetCandidates(plans)).toEqual([]);
+    const validated = validateCrossPageAssetCandidates(plans, [{
+      kind: 'figure', strongEvidence: 'continued-label',
+      weakEvidence: ['page-edge-continuity', 'same-column', 'graphic-continuity'], provenance: ['proposal'],
+      members: plans.map((item, index) => ({ pageIndex: item.pageIndex,
+        regionId: item.regions[0]!.id, role: index === 0 ? 'head' : 'tail' })),
+    }]);
+    expect(validated.groups).toEqual([]);
+    expect(validated.issues[0]!.code).toBe('cross-page.contradictory-evidence');
+  });
+
+  it('keeps a true continuation with equivalent abbreviated figure numbers', () => {
+    const plans = ['Figure 1', 'Fig. 1 (continued)'].map((visibleLabel, pageIndex) => createVisionPagePlan({
+      analysis: { pageIndex, layout: 'single', regions: [{
+        type: 'figure', bbox: pageIndex === 0 ? [100, 710, 800, 200] : [100, 100, 800, 200],
+        column: 'full', confidence: 0.99, visibleLabel, crossPageHint: pageIndex === 0 ? 'starts' : 'ends',
+      }] }, renderFingerprint: `continuation-${pageIndex}`,
+    }));
+    const candidates = inferCrossPageAssetCandidates(plans);
+    expect(candidates).toHaveLength(1);
+    expect(validateCrossPageAssetCandidates(plans, candidates).groups).toHaveLength(1);
+  });
+
   it('requires strong evidence or two independent weak signals', () => {
     const plans = [plan(0), plan(1)];
     const members = [

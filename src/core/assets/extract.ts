@@ -1,5 +1,6 @@
 import type { Rect, WidthMode } from '../../types/models';
 import { hashBlob } from './hash';
+import { awaitWithDeadline } from '../task/asyncDeadline';
 import type {
   AssetManifest, ImmutableAsset, ImmutableAssetKind, ImmutableAssetMimeType,
 } from './types';
@@ -44,8 +45,9 @@ export interface DetectedAssetRegion {
 }
 
 export interface AssetExtractionDependencies {
-  crop(region: DetectedAssetRegion): Promise<Blob>;
-  /** Limits full-page raster canvases kept alive at the same time. */
+  crop(region: DetectedAssetRegion, signal: AbortSignal): Promise<Blob>;
+  signal?: AbortSignal;
+  /** Limits raster crops kept alive at the same time. */
   concurrency?: number;
 }
 
@@ -90,27 +92,48 @@ export async function extractImmutableAssets(
     throw new Error('Asset extraction concurrency must be a positive integer');
   }
   const assets: ImmutableAsset[] = Array.from({ length: regions.length });
+  const controller = new AbortController();
+  const abort = (): void => controller.abort();
+  dependencies.signal?.addEventListener('abort', abort, { once: true });
+  if (dependencies.signal?.aborted) controller.abort();
+  let failed = false;
+  let failure: unknown;
   let nextIndex = 0;
   const worker = async (): Promise<void> => {
-    while (nextIndex < regions.length) {
-      const index = nextIndex;
-      nextIndex += 1;
-      const region = regions[index]!;
-      const blob = region.rawImage
-        ? new Blob([region.rawImage.bytes], { type: region.rawImage.mimeType })
-        : await dependencies.crop(region);
-      const mimeType = region.rawImage?.mimeType ?? 'image/png';
-      if (blob.type && blob.type !== 'image/png' && blob.type !== 'image/jpeg') {
-        throw new Error(`Unsupported immutable asset type: ${blob.type}`);
+    try {
+      while (nextIndex < regions.length) {
+        if (controller.signal.aborted) throw new DOMException('资产提取已停止', 'AbortError');
+        const index = nextIndex;
+        nextIndex += 1;
+        const region = regions[index]!;
+        const blob = region.rawImage
+          ? new Blob([region.rawImage.bytes], { type: region.rawImage.mimeType })
+          : await awaitWithDeadline(dependencies.crop(region, controller.signal), { signal: controller.signal });
+        const mimeType = region.rawImage?.mimeType ?? 'image/png';
+        if (blob.type && blob.type !== 'image/png' && blob.type !== 'image/jpeg') {
+          throw new Error(`Unsupported immutable asset type: ${blob.type}`);
+        }
+        assets[index] = await awaitWithDeadline(createAsset({ ...region, blob, mimeType }), { signal: controller.signal });
       }
-      assets[index] = await createAsset({ ...region, blob, mimeType });
+    } catch (error) {
+      if (!failed) {
+        failed = true;
+        failure = error;
+        controller.abort();
+      }
+      throw error;
     }
   };
-  const settled = await Promise.allSettled(Array.from(
-    { length: Math.min(concurrency, regions.length) },
-    () => worker(),
-  ));
-  const rejected = settled.find((result): result is PromiseRejectedResult => result.status === 'rejected');
-  if (rejected) throw rejected.reason;
-  return assets;
+  try {
+    const settled = await Promise.allSettled(Array.from(
+      { length: Math.min(concurrency, regions.length) },
+      () => worker(),
+    ));
+    if (failed) throw failure;
+    const rejected = settled.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+    if (rejected) throw rejected.reason;
+    return assets;
+  } finally {
+    dependencies.signal?.removeEventListener('abort', abort);
+  }
 }

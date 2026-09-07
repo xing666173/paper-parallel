@@ -90,14 +90,15 @@ describe('parser: items -> lines', () => {
 });
 
 describe('parser: columns', () => {
-  it('分类与阅读顺序:full -> left -> right,且居中的短作者行判为 full', () => {
+  it('keeps the full-width front matter before the two-column band below it', () => {
     const fx = syntheticFixture();
     const lines = classifyLines(itemsToLines(fx.items), fx.pageW);
     expect(lines.filter((l) => l.col === 'full')).toHaveLength(3);
     expect(lines.filter((l) => l.col === 'left')).toHaveLength(8);
     expect(lines.filter((l) => l.col === 'right')).toHaveLength(7);
-    const kinds = lines.map((l) => l.col);
-    expect(kinds.join('|')).toMatch(/^full(\|full)*(\|left)*(\|right)*$/);
+    // This fixture has only top-of-page spans; same-page later spans are
+    // covered by parserGeneralization rather than a global full-first rule.
+    expect(lines.slice(0, 3).map((line) => line.col)).toEqual(['full', 'full', 'full']);
     expect(detectLayoutMode(lines)).toBe('mixed');
   });
 
@@ -117,6 +118,16 @@ describe('parser: columns', () => {
     }], 594);
 
     expect(lines[0]?.col).toBe('left');
+  });
+
+  it('does not infer two columns from a short heading and an unrelated page number', () => {
+    const lines = classifyLines([
+      { y: 100, x1: 50, x2: 220, h: 10, text: 'Experimental Setup', items: [] },
+      { y: 140, x1: 50, x2: 560, h: 10, text: 'The full-width paragraph contains the experimental details.', items: [] },
+      { y: 760, x1: 309, x2: 320, h: 10, text: '12', items: [] },
+    ], 612);
+
+    expect(detectLayoutMode(lines)).toBe('single');
   });
 });
 

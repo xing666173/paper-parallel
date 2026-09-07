@@ -2,6 +2,7 @@
 // lines.ts —— 文字层第一道工序:字符 items -> 行
 // 算法基准:P5 探针(已通过合成夹具断言)。纯函数、零依赖,便于 Vitest 测试。
 // ============================================================================
+import type { TextRunGeometry } from './textGeometry';
 
 /** 归一化后的简单文本项(视口坐标,scale=1)。pdfjs 坐标换算见 pdfjsAdapter。 */
 export interface SimpleTextItem {
@@ -10,6 +11,8 @@ export interface SimpleTextItem {
   y: number;
   w: number;
   h: number;
+  /** Present for rotated runs whose characters do not advance along +x. */
+  geometry?: TextRunGeometry;
 }
 
 /** 一行:同一 y 基线、且 x 连续的字符合并结果 */
@@ -43,9 +46,16 @@ function crossesPageCenter(prev: SimpleTextItem, next: SimpleTextItem, pageW?: n
  */
 export function itemsToLines(items: SimpleTextItem[], pageW?: number): ParsedLine[] {
   const groups: { y: number; items: SimpleTextItem[] }[] = [];
+  const lines: ParsedLine[] = [];
 
   for (const it of items) {
     if (!it.str || !it.str.trim()) continue;
+    // A rotated axis label's bounding-box top is not a horizontal baseline.
+    // Keep its source run intact instead of merging it with adjacent prose.
+    if (it.geometry) {
+      lines.push({ y: it.y, items: [it], x1: it.x, x2: it.x + it.w, h: it.h, text: it.str });
+      continue;
+    }
     let g = groups.find((g) => Math.abs(g.y - it.y) <= Y_TOLERANCE);
     if (!g) {
       g = { y: it.y, items: [] };
@@ -54,7 +64,6 @@ export function itemsToLines(items: SimpleTextItem[], pageW?: number): ParsedLin
     g.items.push(it);
   }
 
-  const lines: ParsedLine[] = [];
   for (const g of groups) {
     g.items.sort((a, b) => a.x - b.x);
     let seg: SimpleTextItem[] = [];

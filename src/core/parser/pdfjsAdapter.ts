@@ -3,6 +3,7 @@
 // 与 pdfjs 解耦:解析器只认 SimpleTextItem;换算矩阵算法来自 P4 探针。
 // ============================================================================
 import type { SimpleTextItem } from './lines';
+import { textRunRect, type TextRunGeometry } from './textGeometry';
 
 export interface PdfTextItemLike {
   str: string;
@@ -44,5 +45,17 @@ export function normalizeTextItem(item: PdfTextItemLike, viewport: PdfViewportLi
   // here; the cloned production viewport is normalized to scale=1.
   const viewportScale = Math.hypot(vp.transform[0], vp.transform[1]) || 1;
   const w = item.width * viewportScale || 0;
+  const baselineLength = Math.hypot(m[0], m[1]);
+  if (baselineLength && (Math.abs(m[1]) > 1e-8 || m[0] < 0)) {
+    const dx = m[0] / baselineLength;
+    const dy = m[1] / baselineLength;
+    // As for horizontal runs, this is an em-box approximation rather than
+    // font-specific ink bounds. Rotate both advance and ascent together.
+    const geometry: TextRunGeometry = {
+      x: m[4], y: m[5], advanceX: dx * w, advanceY: dy * w,
+      ascentX: dy * h, ascentY: -dx * h,
+    };
+    return { str: item.str, ...textRunRect(geometry), geometry };
+  }
   return { str: item.str, x, y, w, h };
 }

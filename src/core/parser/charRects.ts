@@ -5,6 +5,7 @@
 // ============================================================================
 import type { Rect } from '../../types/models';
 import type { SimpleTextItem } from './lines';
+import { textRunRect } from './textGeometry';
 
 export interface CharRect {
   ch: string;
@@ -29,14 +30,14 @@ export function itemsToCharRects(
     if (!n) continue;
     const w = it.w / n;
     for (let i = 0; i < n; i++) {
+      const rect = it.geometry
+        ? textRunRect(it.geometry, i / n, (i + 1) / n)
+        : { x: it.x + i * w, y: it.y, w, h: it.h };
       out.push({
         ch: it.str[i],
         sourceIndex: sourceIndex + i,
         pageIndex: options.pageIndex,
-        x: it.x + i * w,
-        y: it.y,
-        w,
-        h: it.h,
+        ...rect,
       });
     }
     sourceIndex += n;
@@ -53,9 +54,11 @@ export function rectsForRange(chars: CharRect[], range: [number, number]): Rect[
     const c = chars[i];
     if (!cur) {
       cur = { x: c.x, y: c.y, w: c.w, h: c.h };
-    } else if (Math.abs(c.y - cur.y) <= 2 && c.x <= cur.x + cur.w + 4) {
+    } else if (Math.abs(c.y - cur.y) <= 2 && c.x <= cur.x + cur.w + 4 && cur.x <= c.x + c.w + 4) {
+      const x1 = Math.min(cur.x, c.x);
       const x2 = Math.max(cur.x + cur.w, c.x + c.w);
-      cur.w = x2 - cur.x;
+      cur.x = x1;
+      cur.w = x2 - x1;
     } else {
       out.push(cur);
       cur = { x: c.x, y: c.y, w: c.w, h: c.h };

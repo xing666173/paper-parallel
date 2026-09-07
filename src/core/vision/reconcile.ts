@@ -648,7 +648,7 @@ const ASSET_KIND = {
   figure: 'figure', table: 'table', display_formula: 'formula', code: 'code',
 } as const;
 
-function implausibleFormulaClusterIndices(analysis: VisionPageAnalysis): Set<number> {
+function implausibleFormulaClusterIndices(doc: Doc, analysis: VisionPageAnalysis): Set<number> {
   const obviousThinPageRows = analysis.regions
     .map((region, index) => ({ region, index }))
     .filter(({ region }) => (
@@ -690,7 +690,11 @@ function implausibleFormulaClusterIndices(analysis: VisionPageAnalysis): Set<num
     }
   }
   flush();
-  return rejected;
+  // Shape proposes suspicious rows, but only source text can disprove a
+  // formula. Long equations and raster formulas can have the same geometry.
+  return new Set([...rejected].filter((index) => implausibleFormulaInk(
+    doc, analysis.pageIndex, sourceRect(analysis.regions[index]!.bbox, doc.pages[analysis.pageIndex]!),
+  )));
 }
 
 function withAssetPadding(
@@ -744,13 +748,14 @@ function formulaProseLike(block: Doc['blocks'][number]): boolean {
 }
 
 function implausibleFormulaInk(doc: Doc, pageIndex: number, rect: Rect): boolean {
-  const page = doc.pages[pageIndex]!;
+  if (doc.blocks.some((block) => block.pageIndex === pageIndex && block.type === 'equation'
+    && intersectionArea(block.rect, rect) / Math.max(1, block.rect.w * block.rect.h) >= 0.5)) return false;
   const characters = doc.blocks
     .flatMap((block) => (block.characterRects ?? []).map((character) => ({
       ...character, blockOrder: block.order,
     })))
     .filter((character) => {
-      if (character.pageIndex !== pageIndex || !character.ch.trim()) return false;
+      if (character.pageIndex !== pageIndex) return false;
       const centerX = character.rect.x + character.rect.w / 2;
       const centerY = character.rect.y + character.rect.h / 2;
       return centerX >= rect.x && centerX <= rect.x + rect.w
@@ -763,11 +768,9 @@ function implausibleFormulaInk(doc: Doc, pageIndex: number, rect: Rect): boolean
     /\b(?:the|a|an|and|or|of|to|in|for|with|that|this|is|are|was|were|as|by|from|on|at|shown)\b/gi,
   ) ?? [];
   const hasMath = /[=+*/∑∏∫√≤≥≈≠<>×÷\d]|(?:^|\s)-(?:\s|$)/u.test(text);
-  if (naturalWords.length >= 3 && functionWords.length >= 1 && !hasMath) return true;
-  // Wide, one-line Vision boxes with no PDF ink are commonly hallucinated
-  // strips across a column gutter or publisher footer. A real raster-only
-  // formula normally has a materially taller tight box.
-  return characters.length === 0 && rect.w >= page.width * 0.35 && rect.h <= 28;
+  // No text-layer ink is inconclusive: formulas may be raster images or
+  // outlined vector glyphs. Absence of text is never proof of body prose.
+  return naturalWords.length >= 3 && functionWords.length >= 1 && !hasMath;
 }
 
 function withoutAdjacentFormulaProse(
@@ -819,7 +822,7 @@ export function reconcileVisionLayout(
   const unresolved: UnresolvedVisionRegion[] = [];
   for (const page of doc.pages) {
     const analysis = byPage.get(page.pageIndex)!;
-    const implausibleFormulaIndices = implausibleFormulaClusterIndices(analysis);
+    const implausibleFormulaIndices = implausibleFormulaClusterIndices(doc, analysis);
     const portraitIndices = portraitClusterIndices(doc, page.pageIndex, analysis);
     const exactBitmapPortraitsAvailable = (bitmapRegionsByPage.get(page.pageIndex) ?? [])
       .filter((rect) => isPortraitRect(page, rect)).length >= 3;
@@ -950,7 +953,7 @@ export function reconcileVisionLayout(
           // The Vision box is attached to the wrong numbered caption. Reject
           // it so the deterministic caption-gap recovery can rebuild both
           // neighbouring figures independently instead of duplicating one.
-          unresolved.push({ pageIndex: page.pageIndex, regionIndex, regionId: vision.localId, type: vision.type, reason: 'caption-overlap' });
+          unresolved.push({ pageIndex: page.pageIndex, regionIndex, regionId: vision.localId, type: vision.type, reason: 'foreign-caption-overlap' });
           return;
         }
       }

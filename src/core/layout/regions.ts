@@ -18,8 +18,9 @@ export interface LayoutRegionInput {
 type RegionMode = LayoutRegion['mode'];
 
 function normalizedMode(block: LayoutRegionBlockInput, pageModes?: Record<number, LayoutMode>): RegionMode {
+  if (pageModes?.[block.pageIndex] === 'single') return 'single';
   if (block.col === 'left' || block.col === 'right') return 'double';
-  return pageModes?.[block.pageIndex] === 'single' ? 'single' : 'full-width';
+  return 'full-width';
 }
 
 function unionBounds(left: Rect, right: Rect): Rect {

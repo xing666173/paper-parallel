@@ -4,6 +4,7 @@ import type { DetectedAssetRegion } from './extract';
 export type ImmutableGeometryIssue =
   | 'page-edge-touch'
   | 'page-coverage-excessive'
+  | 'foreign-caption-overlap'
   | 'caption-overlap'
   | 'body-prose-density';
 
@@ -93,6 +94,10 @@ export function validateImmutableRegion(
 ): ImmutableGeometryResult {
   const issues: ImmutableGeometryIssue[] = [];
   const { rect } = region;
+  if (![rect.x, rect.y, rect.w, rect.h, page.width, page.height].every(Number.isFinite)
+    || page.width <= 0 || page.height <= 0) {
+    return { pass: false, issues: ['page-coverage-excessive'] };
+  }
   const right = rect.x + rect.w;
   const bottom = rect.y + rect.h;
   if (rect.x < 0 || rect.y <= 0 || right > page.width || bottom > page.height) {
@@ -100,9 +105,30 @@ export function validateImmutableRegion(
   }
 
   const pageArea = page.width * page.height;
-  if (rect.w <= 0 || rect.h <= 0 || rect.w * rect.h / pageArea > 0.5 || rect.h / page.height > 0.78) {
+  const large = rect.w * rect.h / pageArea > 0.5 || rect.h / page.height > 0.78;
+  // A nearby, separate caption is positive evidence for a large visual object.
+  // Page fraction alone cannot distinguish a full-page table from a bad crop.
+  const captionGap = captionRect ? Math.max(
+    captionRect.y - bottom, rect.y - captionRect.y - captionRect.h, 0,
+  ) : Infinity;
+  const anchored = region.kind !== 'formula' && Boolean(region.captionUnitId && captionRect
+    && [captionRect.x, captionRect.y, captionRect.w, captionRect.h].every(Number.isFinite)
+    && captionRect.w > 0 && captionRect.h > 0
+    && captionRect.x >= 0 && captionRect.y >= 0
+    && captionRect.x + captionRect.w <= page.width
+    && captionRect.y + captionRect.h <= page.height
+    && intersectionArea(rect, captionRect) === 0 && captionGap <= 48
+    && Math.min(right, captionRect.x + captionRect.w) > Math.max(rect.x, captionRect.x));
+  if (rect.w <= 0 || rect.h <= 0
+    || (large && !anchored)
+    || rect.w * rect.h / pageArea > 0.9 || rect.h / page.height > 0.94) {
     issues.push('page-coverage-excessive');
   }
+
+  if (large && intersectingBlocks.some((block) => (
+    block.type === 'caption' && block.id !== region.captionUnitId
+    && intersectionArea(rect, block.rect) > 0
+  ))) issues.push('foreign-caption-overlap');
 
   if (captionRect && intersectionArea(rect, captionRect) > 0) issues.push('caption-overlap');
 

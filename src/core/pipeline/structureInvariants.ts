@@ -207,6 +207,23 @@ export function validatePreparedStructure(
   }
   for (const [captionId, owners] of captionOwners) {
     if (owners.length < 2) continue;
+    const caption = units.get(captionId);
+    const members = owners.map((id) => assets.get(id)!);
+    const first = members[0]!;
+    // A shared caption is legal for disjoint panels emitted together. Reject
+    // overlapping detections, mixed kinds/pages, or groups split across regions.
+    const sharedGroup = Boolean(caption)
+      && (first.kind === 'figure' || first.kind === 'table' || first.kind === 'code')
+      && members.every((member) => member.kind === first.kind && member.pageIndex === first.pageIndex
+        && input.units.some((unit) => unit.assetId === member.id
+          && unit.layoutRegionId === caption!.layoutRegionId))
+      && members.every((member, index) => members.slice(index + 1).every((other) => (
+        Math.min(member.rect.x + member.rect.w, other.rect.x + other.rect.w)
+          <= Math.max(member.rect.x, other.rect.x)
+        || Math.min(member.rect.y + member.rect.h, other.rect.y + other.rect.h)
+          <= Math.max(member.rect.y, other.rect.y)
+      )));
+    if (sharedGroup) continue;
     issues.push(issue({
       stage: input.stage, code: 'local-structural.multiple-caption-owners', entityType: 'caption',
       entityId: captionId, firstSource: owners[0], conflictSource: owners[1],

@@ -19,6 +19,24 @@ const translations: TranslationCacheRecord[] = [
 ];
 
 describe('project dependency invalidation graph', () => {
+  it('refreshes uncertain source analysis without replaying the same raw response or clearing other pages', () => {
+    const result = computeInvalidationPlan({
+      projectId: 'p1', facets: ['source-analysis'], pageIndices: [1],
+    }, [
+      artifact('en', 'english-pdf'),
+      artifact('raw:0', 'raw-vision-response', [0]),
+      artifact('raw:1', 'raw-vision-response', [1]),
+      artifact('legacy', 'vision-layout'),
+      artifact('accepted:0', 'accepted-page-plan', [0]),
+      artifact('recovered:1', 'recovered-page-plan', [1]),
+      artifact('formula:1', 'formula-ocr', [1]),
+      artifact('pdf', 'chinese-pdf'),
+      artifact('vision-diagnostic', 'vision-diagnostic', [0, 1]),
+    ], translations);
+    expect(result.artifactKeys).toEqual(['formula:1', 'legacy', 'pdf', 'raw:1', 'recovered:1']);
+    expect(result.translationKeys).toEqual([]);
+  });
+
   it('invalidates one changed page plan and every downstream formal output transactionally', () => {
     const result = computeInvalidationPlan({
       projectId: 'p1', facets: ['page-plan'], pageIndices: [1],
